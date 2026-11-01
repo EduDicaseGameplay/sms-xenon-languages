@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# The shader cache the package ships (data\shaders): programs.bin, the GX states of every program
+# the game has made on the console or in Xenia, and pack.bin, their shaders compiled by this build.
+# Usage: xshaders [programs.bin ...]
+# Each given programs.bin (a console's, a Xenia run's) adds its keys to ../build-xenon/shaders/programs.bin.
+# Then the Master xex warms them up in Xenia from no pack.bin (programWarmup compiles every shader
+# and writes the pack) and ../build-xenon/shaders gets both files. Xenia runs the xex's own
+# D3DXCompileShader, so the code is the console's. The run tree's data\shaders is put back after.
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+top=$(readlink -f "$here/../../..")/build-xenon
+run=~/src/xbox-dev/run/sms
+mkdir -p "$top/shaders"
+python3 - "$top/shaders/programs.bin" "$@" <<'EOF'
+import os, struct, sys
+out, ins = sys.argv[1], sys.argv[2:]
+keys, size = [], None
+for p in ([out] if os.path.exists(out) else []) + ins:
+    d = open(p, 'rb').read()
+    magic, n = struct.unpack('>II', d[:8])
+    assert magic == 0x58505231, p + ': not programs.bin'
+    assert size in (None, n), p + ': key size %d, not %d' % (n, size)
+    size = n
+    keys += [d[i:i + n] for i in range(8, len(d) - n + 1, n)]
+assert keys, 'no keys: give a programs.bin'
+seen = set()
+keys = [k for k in keys if not (k in seen or seen.add(k))]
+open(out, 'wb').write(struct.pack('>II', 0x58505231, size) + b''.join(keys))
+print('%d programs' % len(keys))
+EOF
+keep=$(mktemp -d)
+[ -d "$run/data/shaders" ] && mv "$run/data/shaders" "$keep/"
+trap 'rm -rf "$run/data/shaders"; [ -d "$keep/shaders" ] && mv "$keep/shaders" "$run/data/"; rmdir "$keep"' EXIT
+mkdir -p "$run/data/shaders"
+cp "$top/shaders/programs.bin" "$run/data/shaders/"
+XRUN_CONFIG=Master "$here/xrun" "${XSHADERS_SECONDS:-240}" > /dev/null
+grep -h "shader warm-up" "$run/sms.log" || { echo "xshaders: no warm-up in sms.log" >&2; exit 1; }
+# the run may have made programs the list lacked: they ride along
+cp "$run/data/shaders/pack.bin" "$run/data/shaders/programs.bin" "$top/shaders/"
+ls -la "$top/shaders"

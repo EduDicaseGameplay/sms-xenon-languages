@@ -1,0 +1,39 @@
+Xbox 360: retraces follow the TV's vertical blank (xenon/platform/xe_vblank.cpp) instead of a 59.94 Hz host timer, so frames meet the display's refresh. Applied by xenon/tools/xstage to the staged copy only.
+--- a/platform/vi/vi.cpp	2026-10-24 21:17:10.167478291 +0500
++++ b/platform/vi/vi.cpp	2026-10-24 21:17:10.249874228 +0500
+@@ -185,6 +185,10 @@
+ }
+ } // namespace
+ 
++#ifdef _XBOX
++extern "C" int xe_vi_start_vblank(void);
++#endif
++
+ extern "C" void port_vi_init(void)
+ {
+ 	g_retrace_multiplier = port_vi_retrace_multiplier();
+@@ -206,11 +210,24 @@
+ 		port_log("[vi] deterministic retrace clock (SMS_VI_DETERMINISTIC)\n");
+ 		return;
+ 	}
++#ifdef _XBOX
++	// the TV's vertical blank raises retraces (xenon/platform/xe_vblank.cpp calls port_vi_vblank)
++	if (xe_vi_start_vblank())
++		return;
++#endif
+ 	pthread_t th;
+ 	pthread_create(&th, NULL, timer_thread, NULL);
+ 	pthread_detach(th);
+ }
+ 
++#ifdef _XBOX
++extern "C" void port_vi_vblank(void)
++{
++	g_pending.fetch_add(1);
++	port_irq_kick();
++}
++#endif
++
+ // Called by the scheduler when no thread can run. In deterministic mode the
+ // next retrace fires now; returns 1 if it did.
+ extern "C" int port_vi_idle_advance(void)

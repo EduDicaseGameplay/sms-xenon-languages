@@ -1,0 +1,32 @@
+Xbox 360: the guest scheduler's spin before a host sleep is set by SMS_OS_SPIN_US (console tuning: its threads may share one hardware thread). Applied by xenon/tools/xstage to the staged copy only.
+--- a/platform/os/os_thread.cpp	2026-10-26 23:19:19.005799252 +0500
++++ b/platform/os/os_thread.cpp	2026-10-26 23:19:19.088348813 +0500
+@@ -228,10 +228,27 @@
+ // spinning there only burns power, which a handheld's GPU shares.
+ const u64 kSpinNs = 100000;
+ 
++#ifdef _XBOX
++// SMS_OS_SPIN_US: the spin's length here (default kSpinNs); 0 sleeps at once
++u64 spin_ns()
++{
++	static u64 ns = ~0ull;
++	if (ns == ~0ull) {
++		const char* e = getenv("SMS_OS_SPIN_US");
++		ns = e ? u64(atoi(e)) * 1000 : kSpinNs;
++	}
++	return ns;
++}
++#else
++u64 spin_ns() { return kSpinNs; }
++#endif
++
+ // True if the turn came while spinning.
+ bool spin_for_turn(OSThread* self)
+ {
+-	const u64 until = spin_clock_ns() + kSpinNs;
++	if (spin_ns() == 0)
++		return false;
++	const u64 until = spin_clock_ns() + spin_ns();
+ 	for (int i = 1;; i++) {
+ 		if (g_cur_spin.load(std::memory_order_acquire) == self)
+ 			return true;

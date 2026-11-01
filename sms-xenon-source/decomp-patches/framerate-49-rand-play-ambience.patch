@@ -1,0 +1,59 @@
+Reason: port: with frame_rate = 60 or 120 the seagulls and the MareFalls ambience (Bianco Hills, Pianta Village) called two or four times as often; MSRandPlay counts its random wait in calls and these two call it once per displayed frame; call once per 1/30 s
+--- a/src/Map/MapStaticObject.cpp
++++ b/src/Map/MapStaticObject.cpp
+@@ -38,6 +38,9 @@
+ #include <MSound/MSound.hpp>
+ #include <MSound/MSoundSE.hpp>
+ #include <stdio.h>
++#ifdef TARGET_PC
++#include "port_framerate.h"
++#endif
+ 
+ // Common J3DModelLoaderFlag combinations used by the actor data table below.
+ // Spelled out as named constants to keep the table rows compact.
+@@ -203,7 +206,15 @@
+ 			if (mRandPlayHandle == -1)
+ 				gpMSound->startSoundActor(mSoundId, &mPosition, 0, nullptr,
+ 				                          0, 4);
++#ifdef TARGET_PC
++			// Port: MSRandPlay counts its random wait in calls, and this one
++			// comes once per displayed frame, so at 60 or 120 fps the
++			// ambience (Bianco's and Pianta Village's birds) called two or
++			// four times as often. Call it once per 1/30 s, as at 30.
++			else if (port_native_frame_step(gpMarDirector->unk5C))
++#else
+ 			else
++#endif
+ 				gpMSound->startSeRandPlay(mSoundId, mRandPlayHandle);
+ 		}
+ 
+--- a/src/Animal/AnimalBase.cpp
++++ b/src/Animal/AnimalBase.cpp
+@@ -17,6 +17,10 @@
+ #include <Strategic/Spine.hpp>
+ #include <Strategic/Strategy.hpp>
+ #include <System/Application.hpp>
++#ifdef TARGET_PC
++#include <System/MarDirector.hpp>
++#include "port_framerate.h"
++#endif
+ 
+ // rogue includes needed for matching sinit & bss
+ #include <MSound/MSSetSound.hpp>
+@@ -172,7 +176,16 @@
+ 			mLinearVelocity.zero();
+ 			control();
+ 			mPosition += mLinearVelocity;
++#ifdef TARGET_PC
++			// Port: this runs on a frame's last movement tick, once per
++			// displayed frame, and MSRandPlay counts its random wait in
++			// calls: at 60 or 120 fps the seagulls called two or four times
++			// as often. Call once per 1/30 s, as at 30.
++			if (mActorType == 0x800001
++			    && port_native_frame_step(gpMarDirector->unk5C)) {
++#else
+ 			if (mActorType == 0x800001) {
++#endif
+ 				SMSGetMSound()->startSeRandPlay(MSD_SE_OBJ_KAMOME_SOLO,
+ 				                                mInstanceIndex);
+ 			}

@@ -1,0 +1,43 @@
+Xbox 360: the mirror (water reflections) at 512x448 of the EFB instead of 256x256 (its 256x256 image in MEM1 only keys the GPU copy); SMS_XE_MIRROR=0 keeps 256x256. Applied by xenon/tools/xstage to the staged copy only.
+--- a/game/src/System/MarDirectorInitECT.cpp	2026-10-30 00:06:16.511054120 +0500
++++ b/game/src/System/MarDirectorInitECT.cpp	2026-10-30 00:28:50.894203277 +0500
+@@ -12,6 +12,10 @@
+ #include <JSystem/JDrama/JDRCamera.hpp>
+ #include <JSystem/JDrama/JDRNameRefGen.hpp>
+ #include <JSystem/JDrama/JDREfbCtrl.hpp>
++#ifdef _XBOX
++#include <JSystem/JDrama/JDRViewport.hpp>
++#include <stdlib.h>
++#endif
+ 
+ // rogue includes
+ #include <M3DUtil/InfectiousStrings.hpp>
+@@ -119,6 +123,28 @@
+ 
+ 	TMirrorCamera* mirrorCam = (TMirrorCamera*)ECTSearch("鏡カメラ");
+ 
++#ifdef _XBOX
++	// Xbox 360: the mirror (the water's reflections) drawn at 512x448 of the
++	// EFB instead of 256x256 and copied at that size: magnified over the
++	// water at 720p, 256 texels came out blocky. The copy stays on the GPU
++	// (an RGB5A3 copy is not written back), so the 256x256 image in MEM1 is
++	// only the copy's key: GX resolves addresses within MEM1, an image
++	// outside it was not found. ponytail: SMS_GX_COPY_WRITEBACK=all would
++	// write 448 KiB into its 128 KiB. SMS_XE_MIRROR=0: the GameCube's 256x256.
++	if (!(getenv("SMS_XE_MIRROR") && getenv("SMS_XE_MIRROR")[0] == '0')) {
++		enum { kW = 512, kH = 448 };
++		ResTIMG* img = mirrorCam->unk94;
++		img->width   = kW;
++		img->height  = kH;
++		GXInitTexObj(&mirrorCam->unk60, (u8*)img + img->imageDataOffset, kW, kH,
++		             GX_TF_RGB5A3, GX_REPEAT, GX_REPEAT, 0);
++		GXInitTexObjLOD(&mirrorCam->unk60, GX_LINEAR, GX_LINEAR, 0.0f, 0.0f,
++		                0.0f, GX_FALSE, GX_FALSE, GX_ANISO_1);
++		JDrama::TViewport* view = (JDrama::TViewport*)ECTSearch("鏡用Viewport");
++		if (view)
++			view->unk10 = JDrama::TRect(0, 0, kW, kH);
++	}
++#endif
+ 	GXTexObj& obj = *const_cast<GXTexObj*>(MarDirectorInitECTUnk60(mirrorCam));
+ 	mirrorTex->setTexAttb(obj);
+ 	// TODO: 99.8%, frame 0x80 against the ROM's 0x88. Passing the rectangle

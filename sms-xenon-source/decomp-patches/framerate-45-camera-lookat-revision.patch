@@ -1,0 +1,32 @@
+Reason: port: at 60 and 120 fps the game camera turns smoothly; CLBRevisionLookatByAngleX, which keeps the look-at point within the camera's pitch limits every tick, took it round matan and the 4096-entry sine table even when it was within them, so the view turned in steps of 1/4096 turn (0.088 degrees, 3-4 pixels of scenery at 2560 wide) every few frames
+--- a/src/Camera/cameralib.cpp
++++ b/src/Camera/cameralib.cpp
+@@ -161,6 +161,17 @@ void CLBPolarToCross(const Vec& origin, Vec* out, f32 radius, s16 vAngle,
+ 	out->z = origin.z + radius * JMASCos(vAngle) * JMASCos(hAngle);
+ }
+ 
++#ifdef TARGET_PC
++// Port: the round trip below through matan and the 4096-entry sine table puts
++// the point on a grid of 1/4096 turn (0.088 degrees) about `origin`, even when
++// the angle is already within the limits. The game camera revises its look-at
++// point this way every tick, so the view turned in those steps: at 120 fps a
++// step every few frames, the scenery 3-4 pixels at a time at 2560 wide, where
++// at 30 fps the four ticks of a frame hid it. At 60 and 120 fps a point within
++// the limits is left as it is.
++#include "port_framerate.h"
++#endif
++
+ void CLBRevisionLookatByAngleX(s16 vAngleMin, s16 vAngleMax, const Vec& origin,
+                                Vec* inOut)
+ {
+@@ -169,6 +180,10 @@ void CLBRevisionLookatByAngleX(s16 vAngleMin, s16 vAngleMax, const Vec& origin,
+ 	s16 hAngle;
+ 
+ 	CLBCrossToPolar(origin, *inOut, &radius, &vAngle, &hAngle);
++#ifdef TARGET_PC
++	if (port_high_fps_active && vAngle >= vAngleMin && vAngle <= vAngleMax)
++		return;
++#endif
+ 	vAngle = MsClamp(vAngle, vAngleMin, vAngleMax);
+ 	CLBPolarToCross(origin, inOut, radius, vAngle, hAngle);
+ }

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Host check of xenon/platform/xe_files.cpp's xe_path (relative paths to game:\, "." and ".."
+# resolved): compiles the function alone with g++ and ASan and runs a table of cases.
+set -euo pipefail
+src=$(dirname "$(readlink -f "$0")")/../platform/xe_files.cpp
+t=$(mktemp -d)
+python3 - "$src" "$t/t.cpp" <<'PY'
+import sys
+s = open(sys.argv[1]).read()
+f = s[s.index('extern "C" const char* xe_path'):s.index('extern "C" FILE* xe_fopen')]
+open(sys.argv[2], 'w').write('#include <string.h>\n#include <stdio.h>\n#define MAX_PATH 260\n' + f + r'''
+int main() {
+	const char* c[][2] = {{"game:\\files/../sys/fst.bin", "game:\\sys\\fst.bin"}, {"game:\\a\\.\\b\\..\\c", "game:\\a\\c"},
+	                      {"rom/x.iso", "game:\\rom\\x.iso"}, {"game:\\..\\x", "game:\\x"}, {"game:\\a\\b\\", "game:\\a\\b"},
+	                      {"game:\\", "game:\\"}, {"../../mods", "game:\\mods"}, {"game:\\a\\..", "game:\\"},
+	                      {"game:\\data/sms-port/card-a", "game:\\data\\sms-port\\card-a"}};
+	int bad = 0;
+	for (auto& t : c) {
+		char o[260];
+		xe_path(t[0], o, sizeof o);
+		if (strcmp(o, t[1])) printf("FAIL %s -> %s (want %s)\n", t[0], o, t[1]), bad++;
+	}
+	printf(bad ? "xe_path: %d failed\n" : "xe_path: all ok\n", bad);
+	return bad != 0;
+}
+''')
+PY
+g++ -g -fsanitize=address -o "$t/t" "$t/t.cpp" && "$t/t"
+rm -rf "$t"

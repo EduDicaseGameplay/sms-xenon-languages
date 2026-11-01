@@ -1,0 +1,9 @@
+Super Mario Sunshine for the Xbox 360 - source snapshot
+
+  sms-pc-port   branch xenon   f233c150b8407a56c88de794887c3d9726f9ccef  2026-10-31  xenon/dist: rewrap LICENSE.txt
+  decomp/       branch xenon   967436b8c623834d38a57d34923775f45eca8861  2026-10-06
+  sdk/          branch xenon   0d7d78ebdce70d0d1d4511db323c63b1f9065286  2026-10-26
+
+These are the commits the published package sms-xenon-f233c15.7z was built from
+(its VERSION.txt names the same commit). Upstream: https://github.com/chasem-dev/sms-pc-port,
+https://github.com/chasem-dev/sms-english (the decompilation), https://github.com/chasem-dev/sms-mod-sdk.

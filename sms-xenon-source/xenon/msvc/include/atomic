@@ -1,0 +1,173 @@
+// <atomic> for the Xbox 360 build: 1, 2, 4 and 8-byte integers, bools and
+// pointers. The XDK's Interlocked functions order nothing on Xenon, so every
+// operation is fenced: lwsync before (release) and after (acquire), and a full
+// sync before a sequentially consistent store, as the C++11 mapping for POWER
+// does. Only what the port uses.
+#ifndef XE_ATOMIC
+#define XE_ATOMIC
+#include "xe_win.h"
+
+namespace std {
+
+enum memory_order { memory_order_relaxed, memory_order_consume, memory_order_acquire, memory_order_release,
+	                memory_order_acq_rel, memory_order_seq_cst };
+
+namespace xe_atomic {
+inline long long cas(volatile void* p, long long want, long long expect, int size)
+{
+	switch (size) {
+	case 8: return InterlockedCompareExchange64((volatile LONG64*)p, want, expect);
+	case 4: return (unsigned long)InterlockedCompareExchange((volatile LONG*)p, (LONG)want, (LONG)expect);
+	default: {
+		// 1 and 2-byte values: a compare-exchange of the aligned word holding them (big-endian)
+		volatile LONG* w = (volatile LONG*)((uintptr_t)p & ~(uintptr_t)3);
+		int shift = (int)(8 * (4 - size - ((uintptr_t)p & 3)));
+		unsigned long mask = (size == 1 ? 0xFFul : 0xFFFFul) << shift;
+		for (;;) {
+			LONG old = *w;
+			long long cur = ((unsigned long)old & mask) >> shift;
+			if (cur != (expect & (mask >> shift)))
+				return cur;
+			LONG nw = (LONG)(((unsigned long)old & ~mask) | (((unsigned long)want << shift) & mask));
+			if (InterlockedCompareExchange(w, nw, old) == old)
+				return cur;
+		}
+	}
+	}
+}
+} // namespace xe_atomic
+
+template <class T> class atomic {
+public:
+	atomic() : v_() {}
+	atomic(T v) : v_(v) {}
+	T load(memory_order o = memory_order_seq_cst) const
+	{
+		if (o == memory_order_seq_cst)
+			__sync();
+		T v = *(volatile const T*)&v_;
+		if (o != memory_order_relaxed)
+			__lwsync();
+		return v;
+	}
+	void store(T v, memory_order o = memory_order_seq_cst)
+	{
+		if (o == memory_order_seq_cst)
+			__sync();
+		else if (o != memory_order_relaxed)
+			__lwsync();
+		*(volatile T*)&v_ = v;
+	}
+	operator T() const { return load(); }
+	T operator=(T v) { store(v); return v; }
+	T exchange(T v, memory_order = memory_order_seq_cst)
+	{
+		__lwsync();
+		T old;
+		do {
+			old = *(volatile T*)&v_;
+		} while (!raw_cas(old, v));
+		__lwsync();
+		return old;
+	}
+	bool compare_exchange_strong(T& expect, T want, memory_order = memory_order_seq_cst, memory_order = memory_order_seq_cst)
+	{
+		__lwsync();
+		T seen = (T)xe_atomic::cas(&v_, bits(want), bits(expect), sizeof(T));
+		__lwsync();
+		if (bits(seen) == bits(expect))
+			return true;
+		expect = seen;
+		return false;
+	}
+	bool compare_exchange_weak(T& expect, T want, memory_order a = memory_order_seq_cst, memory_order b = memory_order_seq_cst)
+	{
+		return compare_exchange_strong(expect, want, a, b);
+	}
+	T fetch_add(T d, memory_order = memory_order_seq_cst) { return rmw(d, 1); }
+	T fetch_sub(T d, memory_order = memory_order_seq_cst) { return rmw(d, -1); }
+	T operator++() { return rmw(1, 1) + 1; }
+	T operator++(int) { return rmw(1, 1); }
+	T operator--() { return rmw(1, -1) - 1; }
+	T operator--(int) { return rmw(1, -1); }
+	T operator+=(T d) { return rmw(d, 1) + d; }
+	T operator-=(T d) { return rmw(d, -1) - d; }
+	bool is_lock_free() const { return true; }
+private:
+	atomic(const atomic&);
+	atomic& operator=(const atomic&);
+	static long long bits(T v) { return (long long)v; }
+	bool raw_cas(T expect, T want) { return xe_atomic::cas(&v_, bits(want), bits(expect), sizeof(T)) == bits(expect); }
+	T rmw(T d, int sign)
+	{
+		__lwsync();
+		T old;
+		do {
+			old = *(volatile T*)&v_;
+		} while (!raw_cas(old, sign > 0 ? (T)(old + d) : (T)(old - d)));
+		__lwsync();
+		return old;
+	}
+	T v_;
+};
+
+template <class T> class atomic<T*> {
+public:
+	atomic() : p_(0) {}
+	atomic(T* p) : p_(p) {}
+	T* load(memory_order o = memory_order_seq_cst) const { return (T*)a_().load(o); }
+	void store(T* p, memory_order o = memory_order_seq_cst) { a_().store((uintptr_t)p, o); }
+	operator T*() const { return load(); }
+	T* operator=(T* p) { store(p); return p; }
+	T* exchange(T* p, memory_order o = memory_order_seq_cst) { return (T*)a_().exchange((uintptr_t)p, o); }
+	bool compare_exchange_strong(T*& e, T* w, memory_order = memory_order_seq_cst, memory_order = memory_order_seq_cst)
+	{
+		uintptr_t ex = (uintptr_t)e;
+		bool ok = a_().compare_exchange_strong(ex, (uintptr_t)w);
+		e = (T*)ex;
+		return ok;
+	}
+	bool compare_exchange_weak(T*& e, T* w, memory_order a = memory_order_seq_cst, memory_order b = memory_order_seq_cst)
+	{
+		return compare_exchange_strong(e, w, a, b);
+	}
+private:
+	atomic(const atomic&);
+	atomic& operator=(const atomic&);
+	atomic<uintptr_t>& a_() const { return *(atomic<uintptr_t>*)&p_; }
+	T* p_;
+};
+
+template <> class atomic<bool> {
+public:
+	atomic() : v_(0) {}
+	atomic(bool v) : v_(v ? 1 : 0) {}
+	bool load(memory_order o = memory_order_seq_cst) const { return a_().load(o) != 0; }
+	void store(bool v, memory_order o = memory_order_seq_cst) { a_().store(v ? 1 : 0, o); }
+	operator bool() const { return load(); }
+	bool operator=(bool v) { store(v); return v; }
+	bool exchange(bool v, memory_order o = memory_order_seq_cst) { return a_().exchange(v ? 1 : 0, o) != 0; }
+	bool compare_exchange_strong(bool& e, bool w, memory_order = memory_order_seq_cst, memory_order = memory_order_seq_cst)
+	{
+		long ex = e ? 1 : 0;
+		bool ok = a_().compare_exchange_strong(ex, w ? 1 : 0);
+		e = ex != 0;
+		return ok;
+	}
+private:
+	atomic(const atomic&);
+	atomic& operator=(const atomic&);
+	atomic<long>& a_() const { return *(atomic<long>*)&v_; }
+	long v_;
+};
+
+inline void atomic_thread_fence(memory_order o)
+{
+	if (o == memory_order_seq_cst)
+		__sync();
+	else if (o != memory_order_relaxed)
+		__lwsync();
+}
+
+} // namespace std
+#endif

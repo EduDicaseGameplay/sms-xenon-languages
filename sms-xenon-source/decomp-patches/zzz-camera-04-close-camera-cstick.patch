@@ -1,0 +1,60 @@
+Reason: port: SMS_CLOSE_CAMERA_CSTICK (platform/pad) lets the C-stick turn the Y close-up camera, and so aim FLUDD in it, as it turns the normal camera (with Invert camera X / Y), alongside the control stick
+--- a/src/System/MarioGamePad.cpp
++++ b/src/System/MarioGamePad.cpp
+@@ -33,6 +33,12 @@
+ }
+ #endif
+ 
++#ifdef TARGET_PC
++// SMS_CLOSE_CAMERA_CSTICK (platform/pad/pad.cpp): the C-stick turns the Y
++// close-up camera too (CPolarSubCamera::ctrlLButtonCamera_).
++extern "C" int port_close_camera_cstick;
++#endif
++
+ // NOTE (linked from source, batch 279): the `.sdata2` pool order that used to
+ // block the link is fixed -- see considerMarioStick below. What is still
+ // dishonest here is the `u32 stackAlloc[83]` in updateMeaning: it is
+@@ -141,6 +147,13 @@
+ #endif
+ 			mCompSPos[2 * 2]     = mMainStick.mPosX;
+ 			mCompSPos[2 * 2 + 1] = mMainStick.mPosY;
++#ifdef TARGET_PC
++			// the C-stick, which this branch otherwise leaves as it was
++			if (port_close_camera_cstick) {
++				mCompSPos[3 * 2]     = mSubStick.mPosX;
++				mCompSPos[3 * 2 + 1] = mSubStick.mPosY;
++			}
++#endif
+ 			updateMeaning(A, MEANING_0x10000, prevMeaning);
+ 			updateMeaning(B, MEANING_0x10000, prevMeaning);
+ 			updateMeaning(Y, MEANING_0x4000, prevMeaning);
+--- a/src/Camera/CameraNotice.cpp
++++ b/src/Camera/CameraNotice.cpp
+@@ -251,6 +251,14 @@
+ 	}
+ }
+ 
++#ifdef TARGET_PC
++// SMS_CLOSE_CAMERA_CSTICK (platform/pad/pad.cpp): the C-stick turns the Y
++// close-up camera, and so aims FLUDD in it, as it turns the normal camera
++// (ctrlNormalOrTowerCamera_ passes mCompSPos[6..7] to the same two calls,
++// inverted as Invert camera X / Y say). The control stick keeps turning it.
++extern "C" int port_close_camera_cstick;
++#endif
++
+ // TODO (closure batch 87): pure frame gap, 0x70 vs 0x40. The one named local
+ // (a scratch Vec) sits at 0x34 in retail and 0x10 here, so 36 of the 48 bytes
+ // are low region (inline-expansion temporaries) and 12 sit above the vector.
+@@ -270,6 +278,12 @@
+ {
+ 	f32 stickX = -unk120->mCompSPos[4];
+ 	f32 stickY = -unk120->mCompSPos[5];
++#ifdef TARGET_PC
++	if (port_close_camera_cstick) {
++		stickX = MsClamp(stickX + unk120->mCompSPos[6], -1.0f, 1.0f);
++		stickY = MsClamp(stickY + unk120->mCompSPos[7], -1.0f, 1.0f);
++	}
++#endif
+ 
+ 	if (mTargetFreezeFrames == 0) {
+ 		if (!SMS_CheckMarioFlag(MARIO_FLAG_HAS_FLUDD))

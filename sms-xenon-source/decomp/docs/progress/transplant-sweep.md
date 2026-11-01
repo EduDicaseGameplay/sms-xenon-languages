@@ -1,0 +1,313 @@
+# Transplant sweep (c-tp1)
+
+Every function below 100% in the GMSE01 report (885 functions in 196 units) was checked against a second decompilation of the game that targets the Japanese build with the same compiler.
+For each function its definition in that tree was spliced over ours in a shadow copy of the unit, the unit was compiled with our own ninja command and our headers only, and the function was scored against US retail with objdiff.
+The tree is never written; the tools are `tools/transplant/transplant.py` (per-function splice and score) and `tools/transplant/context.py` (their whole unit compiled under our flags, a ceiling for what a port could reach).
+
+Automatic fixes while scoring: a member missing from our headers was renamed to ours declared at the same `/* 0xNN */` offset of the same class, a file-scope helper of theirs was copied in, and stack padding was deleted before scoring.
+Their macros, pragmas and per-TU inline switches were never imported.
+
+## Counts
+
+| status | functions | meaning |
+| --- | ---: | --- |
+| better | 33 | compiles here and scores above ours |
+| same | 67 | compiles here, same score |
+| worse | 325 | compiles here, scores below ours |
+| ident | 48 | the two bodies are the same text once comments and spacing go |
+| needs-port | 370 | does not compile against our headers |
+| missing | 36 | no definition in the other tree's copy of the unit (or no such unit) |
+| header | 6 | ours is defined in a header or template, not in the unit |
+
+## The "better" functions
+
+Every one was reviewed by hand before porting; the port is written in our names and constants and often keeps only the one lever that carries the gain.
+
+| unit | function | ours | spliced | decision | commit |
+| --- | --- | ---: | ---: | --- | --- |
+| Animal/BeeHive | `controlCollision__8TBeeHiveFv` | 89.583 | 96.042 | ported | 2734b348 |
+| Animal/BeeHive | `getCenterOfGravity__8TBeeHiveCFv` | 85.897 | 86.143 | ported | d2db4aa4 |
+| MSound/MSModBgm | `modBgm__8MSModBgmFUcUc` | 96.508 | 98.095 | ported | fe466094 |
+| Enemy/effectObj | `moveObject__14TEffectObjBaseFv` | 98.836 | 99.836 | skip-claimed |  |
+| Enemy/graph | `getPosAndRot__11TSplineRailFfPQ29JGeometry8TVec3<f>PQ29JGeometry8TVec3<f>` | 99.603 | 99.915 | rejected-fake |  |
+| Enemy/bossgesso | `init__10TBossGessoFP12TLiveManager` | 99.866 | 99.886 | rejected-behaviour |  |
+| Enemy/bossgesso | `lenFromToeToMario__10TBossGessoFv` | 99.864 | 99.932 | rejected-regress |  |
+| Enemy/bossgesso | `changeAllTentacleState__10TBossGessoFi` | 94.122 | 99.927 | rejected-regress |  |
+| Enemy/tobiPuku | `hitWall__9TTobiPukuFv` | 97.057 | 97.621 | ported-adapted | f21a5712 |
+| Enemy/igaiga | `reset__10TRollEnemyFv` | 95.690 | 99.762 | ported | c5ee5537 |
+| Enemy/igaiga | `walkBehavior__10TRollEnemyFif` | 97.931 | 99.916 | ported-adapted | ed8088c2 |
+| Enemy/bgtentacle | `calcAttackGuideAnm__11TBGTentacleFv` | 98.944 | 99.653 | ported | 32a7cdfb |
+| Enemy/rocket | `execute__15TNerveRocketFlyCFP24TSpineBase<10TLiveActor>` | 98.939 | 99.750 | rejected-fake |  |
+| Enemy/Kukku | `calcMomentum__6TKukkuFf` | 95.775 | 98.873 | rejected-regress |  |
+| Enemy/Koopa | `updateAnmSound__6TKoopaFv` | 99.500 | 99.900 | ported-adapted | afbe0982 |
+| GC2D/GCConsole2 | `startDisappearCoin__11TGCConsole2Fv` | 99.356 | 99.772 | skip-claimed |  |
+| GC2D/GCConsole2 | `startDisappearStar__11TGCConsole2Fv` | 99.950 | 100.00 | skip-claimed |  |
+| GC2D/GCConsole2 | `startAppearStar__11TGCConsole2Fv` | 99.877 | 100.00 | skip-claimed |  |
+| Map/MapCheck | `checkRoofList__17TMapCollisionDataFfffUcPC12TBGCheckListPPC12TBGCheckData` | 98.451 | 98.890 | ported | 6f19026f |
+| Map/MapCheck | `checkGroundList__17TMapCollisionDataFfffUcPC12TBGCheckListPPC12TBGCheckData` | 98.353 | 98.765 | ported | 6f19026f |
+| Map/MapMakeData | `setCheckData__17TMapCollisionBaseFPCfPCsP12TBGCheckDatai` | 92.111 | 99.824 | rejected-regress |  |
+| Map/MapMakeList | `getGridArea__17TMapCollisionDataFPC12TBGCheckDataiPiPiPiPi` | 99.500 | 99.750 | ported-adapted | 8642b6c8 |
+| MoveBG/MapObjBase | `initAndRegister__11TMapObjBaseFPCc` | 99.788 | 100.00 | skip-claimed |  |
+| MoveBG/MapObjLib | `emitAndSRT__11TMapObjBaseFlUcPCQ29JGeometry8TVec3<f>RCQ29JGeometry8TVec3<f>RCQ29JGeometry8TVec3<f>` | 95.929 | 99.732 | ported-adapted | cb4c3f12 |
+| MoveBG/MapObjLib | `emitAndRotateScale__11TMapObjBaseCFlUcPCQ29JGeometry8TVec3<f>` | 96.350 | 99.783 | ported-adapted | cb4c3f12 |
+| MoveBG/MapObjMamma | `load__13TShiningStoneFR20JSUMemoryInputStream` | 97.399 | 99.878 | skip-claimed |  |
+| MoveBG/MapObjMamma | `perform__23TMammaMirrorMapOperatorFUlPQ26JDrama9TGraphics` | 96.946 | 97.682 | skip-claimed |  |
+| MoveBG/MapObjMare | `draw__9TCogwheelCFv` | 96.730 | 96.822 | skipped-noise |  |
+| MoveBG/MapObjPlane | `makeMountain__12TMapObjPlaneFv` | 94.517 | 99.862 | ported | d10bdc66 |
+| MoveBG/MapObjBall | `touchActor__14TBigWatermelonFP9THitActor` | 97.279 | 98.100 | rejected-fake |  |
+| MarioUtil/MtxUtil | `constraintTail__5TRopeFRCQ29JGeometry8TVec3<f>` | 99.583 | 99.799 | rejected-fake |  |
+| MarioUtil/MtxUtil | `moveHead__5TRopeFRCQ29JGeometry8TVec3<f>` | 93.596 | 93.636 | ported | 71d9b9d4 |
+| System/CardManager | `decideUseSector__12TCardManagerFPQ212TCardManager9TCriteria` | 93.929 | 97.857 | rejected-regress |  |
+
+Rejections:
+- `rejected-fake`: the gain needs a stack pad (`TSplineRail::getPosAndRot`), a pass-through wrap helper (`TNerveRocketFly`), or header methods expanded by hand (`TBigWatermelon::touchActor`, `TRope::constraintTail`); honest spellings of the same statements were measured and are inert.
+- `rejected-regress`: the function improves but a caller that expands it drops: `setCheckData` (initAllCheckData 100 -> 58.6), `TKukku::calcMomentum` (RecoverGraph 100 -> 76.9), `changeAllTentacleState` and `lenFromToeToMario` (7 and 13 other bossgesso functions), `decideUseSector` (readBlock_ and copyTo).
+- `rejected-behaviour`: `TBossGesso::init` swaps the two `setMActors` arguments against retail's relocations for +0.02 of slot noise.
+- `skipped-noise`: `TCogwheel::draw` is +0.09 fuzzy but five more mismatched instructions.
+- `skip-claimed`: units held by c-r23 at the time (three of them have since matched on main).
+
+Found while measuring, not from the splice:
+- `TMapObjBase::emitAndSRT`/`emitAndRotateScale` needed named `s16` locals before `setRotation` (the other tree expanded the header method by hand and padded); `emitAndRotateScale` is now exact.
+- Naming the scaled step in `TRope::moveHead` also brings the UNUSED `moveHeadAndTail` to its map size (0x1b4 -> 0x19c).
+- `TConeBeam::calcVertices` reaches 98.3% with coneInPlane's origin components named, but that shrinks the UNUSED out-of-line coneInPlane below its 0x15c map size, so it is recorded as a TODO, not applied. The map's mangled name also confirms coneInPlane takes a `TPartition3` (the other tree passes four scalars).
+
+## needs-port
+
+First compile error: 227 undefined identifiers (members, accessors or helpers our headers lack), 29 private-member accesses, 23 type conversions, the rest syntax or overload mismatches from different declarations.
+Body shape against ours (token skeleton similarity): far (< 0.70) 142, mid (0.70-0.90) 140, near (>= 0.90) 88.
+
+Top 25 by our distance from 100 times the function size (`value`); `ctx` is the other tree's whole unit compiled under our flags (`-` when it did not compile), `sim` the skeleton similarity:
+
+| unit | function | value | ours | ctx | sim | flags |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| Enemy/Kazekun | `doAttackPose__8TKazekunFb` | 189.2 | 85.62 | 78.77 | 0.71 |  |
+| Enemy/bossgesso | `doAttackSingle__10TBossGessoFv` | 178.0 | 93.27 | 85.81 | 0.83 | dont_inline |
+| Camera/cameragc | `calcPosAndAt___15CPolarSubCameraFv` | 149.3 | 96.27 | 74.64 | 0.75 |  |
+| Enemy/BossHanachanMain | `perform__13TBossHanachanFUlPQ26JDrama9TGraphics` | 147.7 | 97.58 | 69.53 | 0.68 |  |
+| Map/BathWaterManager | `prerender__22TBathWaterMeshRendererFPQ26JDrama9TGraphicsRC12TBathtubDataPP10TBathWaterPP16TBathWaterParamsi` | 144.8 | 94.48 | 88.17 | 0.75 |  |
+| Player/ModelWaterManager | `move__18TModelWaterManagerFv` | 126.9 | 96.96 | 92.16 | 0.93 |  |
+| Enemy/Koopa | `KoopaNeckCallBack__9@unnamed@FP7J3DNodei` | 126.6 | 94.96 | 40.78 | 0.65 |  |
+| MoveBG/MapObjMare | `bind__10TMuddyBoatFv` | 111.4 | 91.83 | 95.17 | 0.81 |  |
+| Animal/boid | `calcBoids__11TBoidLeaderFv` | 85.4 | 96.08 | 94.51 | 0.95 |  |
+| Enemy/BossHanachanSub | `moveHead__11TSphereLinkFRCQ29JGeometry8TVec3<f>` | 80.6 | 91.77 | 80.52 | 0.73 |  |
+| Enemy/tinkoopa | `init__9TTinKoopaFP12TLiveManager` | 79.5 | 94.72 | 81.10 | 0.52 |  |
+| MarioUtil/ShadowUtil | `calcVtx__19TMBindShadowManagerFv` | 77.5 | 97.23 | 94.53 | 0.89 |  |
+| Animal/BeeHive | `doWait__8TBeeHiveFv` | 76.0 | 95.46 | 68.13 | 0.68 |  |
+| Enemy/beam | `calcVertices__9TConeBeamFi` | 73.5 | 95.62 | 96.83 | 0.91 |  |
+| GC2D/SelectShine2 | `perform__19TSelectShineManagerFUlPQ26JDrama9TGraphics` | 70.4 | 94.03 | 74.82 | 0.55 |  |
+| MoveBG/MapObjBianco | `control__14TBellWatermillFv` | 68.6 | 96.59 | 76.14 | 0.78 |  |
+| Camera/lensflare | `perform__10TLensFlareFUlPQ26JDrama9TGraphics` | 62.8 | 95.84 | 88.89 | 0.18 |  |
+| Animal/AnimalBase | `perform__11TAnimalBaseFUlPQ26JDrama9TGraphics` | 61.5 | 92.53 | 89.58 | 0.83 |  |
+| GC2D/GCConsole2 | `processAppearStar__11TGCConsole2Fi` | 61.4 | 96.62 | 96.51 | 0.68 |  |
+| Enemy/koopajr | `init__17TKoopaJrSubmarineFP12TLiveManager` | 61.3 | 94.40 | 74.97 | 0.75 |  |
+| Player/Tongue | `movement__12TYoshiTongueFv` | 61.0 | 97.23 | 74.94 | 0.72 |  |
+| Enemy/limitkoopa | `setUpHitActors__11TLimitKoopaFv` | 56.4 | 94.81 | 92.61 | 0.65 |  |
+| JSystem/JParticle/JPADrawVisitor | `exec__22JPADrawExecStripeCrossFPC14JPADrawContext` | 54.1 | 97.32 | 91.03 | 0.81 |  |
+| Enemy/Kukku | `execute__22TNerveKukkuGraphWanderCFP24TSpineBase<10TLiveActor>` | 53.7 | 94.54 | 97.22 | 0.55 |  |
+| Enemy/bgtentacle | `setAttackTarget__11TBGTentacleFv` | 50.8 | 95.51 | 93.34 | 0.97 |  |
+
+Only 32 needs-port functions score above ours even in the other tree's own context; those are the only ones where a port could pay:
+
+| unit | function | value | ours | ctx | sim | flags |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| MoveBG/MapObjMare | `bind__10TMuddyBoatFv` | 111.4 | 91.83 | 95.17 | 0.81 |  |
+| Enemy/beam | `calcVertices__9TConeBeamFi` | 73.5 | 95.62 | 96.83 | 0.91 |  |
+| Enemy/Kukku | `execute__22TNerveKukkuGraphWanderCFP24TSpineBase<10TLiveActor>` | 53.7 | 94.54 | 97.22 | 0.55 |  |
+| Enemy/koopajr | `calcNearerDirection__14TDirectionCalcFf` | 48.8 | 69.50 | 99.45 | 0.66 | dont_inline |
+| Player/MarioMove | `setStatusToJumping__6TMarioFUlUl` | 44.1 | 98.48 | 99.19 | 0.78 |  |
+| MarioUtil/DrawUtil | `clash__19TTrembleModelEffectFf` | 32.4 | 93.96 | 96.73 | 0.93 |  |
+| Enemy/tamaNoko | `perform__15TTamaNokoFlowerFUlPQ26JDrama9TGraphics` | 27.5 | 97.06 | 99.52 | 0.81 |  |
+| Enemy/Kukku | `execute__15TNerveKukkuFallCFP24TSpineBase<10TLiveActor>` | 21.2 | 96.81 | 99.70 | 0.85 |  |
+| MoveBG/MapObjMare | `initMapObj__9TCogwheelFv` | 21.0 | 96.78 | 99.65 | 0.86 |  |
+| Enemy/BathtubKiller | `isAboided__14TBathtubKillerFv` | 10.6 | 98.72 | 99.05 | 0.86 |  |
+| MoveBG/MapObjMare | `touchWater__15TMapObjGrowTreeFP9THitActor` | 8.0 | 98.92 | 99.73 | 0.69 |  |
+| Enemy/enemyMario | `findRunAwayNearestNode__11TEnemyMarioFv` | 8.0 | 98.82 | 99.50 | 0.81 |  |
+| MoveBG/MapObjMare | `control__15TMapObjGrowTreeFv` | 7.8 | 98.92 | 99.75 | 0.70 |  |
+| GC2D/Talk2D2 | `moveTalkWindow__8TTalk2D2Fv` | 5.9 | 99.19 | 99.38 | 0.78 | dont_inline |
+| Enemy/chuuhana | `moveObject__9TChuuHanaFv` | 5.1 | 99.43 | 99.58 | 0.80 |  |
+| Enemy/bosspakkun | `execute__13TNerveBPVomitCFP24TSpineBase<10TLiveActor>` | 4.7 | 99.45 | 99.57 | 0.72 |  |
+| Enemy/hinokuri2 | `moveObject__10THinokuri2Fv` | 4.6 | 99.74 | 99.77 | 0.92 |  |
+| Enemy/pakkun | `execute__18TNervePakkunAppearCFP24TSpineBase<10TLiveActor>` | 4.0 | 98.55 | 99.89 | 0.97 |  |
+| Enemy/popo | `PopoNonScaleCallback__FP7J3DNodei` | 3.2 | 99.21 | 99.65 | 0.86 |  |
+| Enemy/hinokuri2 | `perform__10THino2MaskFUlPQ26JDrama9TGraphics` | 2.6 | 99.65 | 99.79 | 0.95 |  |
+| MoveBG/MapObjFence | `initMapObj__11TFenceWaterFv` | 2.4 | 99.30 | 99.43 | 0.82 |  |
+| MarioUtil/ShadowUtil | `forceRequest__19TMBindShadowManagerFRC20TCircleShadowRequestUl` | 1.5 | 99.50 | 99.69 | 0.45 |  |
+| MSound/MSoundSE | `__ct__Q214MSoundSESystem9MSRandVolFUl` | 1.5 | 99.11 | 99.52 | 0.11 | pad |
+| MSound/MSoundSE | `getRandVol__Q214MSoundSESystem9MSRandVolFUl` | 1.1 | 99.12 | 100.0 | 0.40 |  |
+| MoveBG/MapObjPinna | `control__13TMerrygoroundFv` | 1.0 | 99.77 | 99.80 | 0.91 |  |
+| MSound/MSoundSE | `__ct__Q214MSoundSESystem10MSRandPlayFUlllff` | 0.6 | 99.62 | 100.0 | 0.44 | pad |
+| Enemy/BossHanachanSub | `__ct__11TSphereLinkFUsRCQ29JGeometry8TVec3<f>ffffff` | 0.5 | 99.89 | 100.0 | 0.62 | pad |
+| MoveBG/MapObjInit | `initUnique__11TMapObjBaseFv` | 0.4 | 99.97 | 100.0 | 0.95 | pad |
+| Enemy/smallEnemy | `receiveMessage__11TSmallEnemyFP9THitActorUl` | 0.4 | 99.93 | 100.0 | 0.98 | pad |
+| Enemy/hamukuri | `receiveMessage__14TDangoHamuKuriFP9THitActorUl` | 0.3 | 99.94 | 100.0 | 0.98 | pad |
+| MoveBG/MapObjBianco | `__ct__24TBiancoWatermillVerticalFPCc` | 0.2 | 99.80 | 100.0 | 0.44 | pad |
+| Map/MapEventMare | `appear__13TMareWallRockFv` | 0.2 | 99.96 | 100.0 | 0.69 | pad |
+
+Hand ports tried on that list: `TMuddyBoat::bind` (each statement-level difference inert, 91.8 either way), the Kukku GraphWander and Fall nerves (inert; the context gain comes from their helper split and calcMomentum), `TConeBeam::calcVertices` (see above), the pakkun Appear nerve (its gain is an invented assert macro that forces a dead compare).
+`calcNearerDirection` and the koopajr submarine constructor rely on `#pragma dont_inline`; the MSoundSE rows and every `pad` row rely on stack padding.
+
+## Header differences that matter
+
+- The other tree switches inline bodies per translation unit with `#define ..._OUT_OF_LINE` / `..._IMPLICIT_COPY_CTOR` / `..._DECL_ONLY` lines before its includes (72 files: TVec3 add/sub/scale, TUtil sqrt, J3DMtxCalc init, getMActor, TVec3's copy constructor, ...). Most of its whole-unit gains over ours come from those switches, dont_inline pragmas or padding, not from the bodies: of 86 functions where its unit context beats ours, 8 sit in units with none of them.
+- `TMultiMtxEffect::setup` is 92.3 here and 99.5 there only because that unit compiles TVec3<f32> with an implicit copy constructor; ours has the user `: Vec(other)` one, which is the open TODO already recorded above the function.
+- `TKoopaJrSubmarineManager::createEnemyInstance` (3.6 here) is 99.4 there only because the TKoopaJrSubmarine constructor is under `#pragma dont_inline`; the real cause (the constructor's statement budget) is the open TODO in koopajr.cpp.
+- Class layouts agree: every field rename the sweep needed was a name at the same `/* 0xNN */` offset (TAnimalBird, TBeeHive, TCogwheel, JPABaseEmitter's 0x124/0x154/0x174, TRealoidActor's 0x74, MSModBgm's 0x0/0x4, ...). No layout disagreement blocked a port.
+- The accessors differ: the other tree adds header helpers ours lacks (`getSaveParam2`, `setScale`, `getWireBinderDirect`, per-class `get...Param` casts), which is most of the undefined-identifier failures; none was needed for the ports above.
+
+Raw rows (one per function, with the automatic fixes and first compile error) are in the session scratchpad as `transplant/results.tsv`; rerun with `python3 tools/transplant/transplant.py --other <tree> --out results.tsv -j 2`.
+
+## hsearch sweep c-hs2 (continued)
+
+The resumed `tools/hsearch` batch (200 s per function, `-j 2`) ran rows 124 to 213 of its 350-function list in two 2-hour legs before the session's background time limit stopped it; rows 214 onward are unsearched and the batch resumes from there.
+It reported 40 new exact or improved candidates; review accepted 12 and rejected 28 (the whole sweep so far: 22 accepted, 59 rejected, 81 reviewed).
+Made exact: `TGorogoroManager::initSetEnemies`, `TNerveTobiPukuBound::execute`, `TRollEnemy::walkBehavior`, `TShiningStone::load`, `TGCConsole2::startDisappearCoin`, `JPADrawExecLine::exec`.
+Improved: `TTinKoopaLaunchOrder::checkOrder`, `SetViewFrustumClipCheck`, `TBathtub::control`, `TKumokun::checkOnMovingFloor`, `TLeanMirror::draw`, `TMario::wireRolling`.
+Accepted edits were C-style top declarations, a declaration order, one named compare operand and one named bool test, consistent accessor or raw spellings across a whole block, a dropped redundant TVec3 copy, and two inline levels.
+The best find was an extract that turned out to be a map UNUSED: `TBathtub::liftMario` was an empty stub, and holding the extracted torque block it now compiles to its map size 0xe0.
+Check every machine extract against the unit's UNUSED map entries before rejecting it.
+The other accepted level, `TobiPukuStartBound`, wraps a whole `getTime() == 0` branch whose TVec3 the old TODO had already measured as missing from the low region.
+Rejected: arbitrary machine-cut extracts (9), results that stack on an existing fabricated binder or fork (5), hoisting one of several parallel locals (5), a lone `!getTime()` that is the only such spelling in its file (2), a local named at one of two identical call sites (2), whole-body wrappers (2), and small trades or mixed spellings across parallel branches (3).
+Tool notes: `extract` offers whole-body wrappers and helpers that take every parameter, and the plausibility filter's four-line window misses spellings mixed across parallel `case` arms.
+
+## hsearch sweep c-hs3
+
+The `tools/hsearch` batch (200 s per function, `-j 2`) ran rows 214 to 294 of the 350-function list, one function per foreground call in chunks of under ten minutes, so the background time limit never hit it; rows 295 onward are unsearched.
+It reported 53 exact or improved candidates (7 exact, 45 improved, one flagged as regressing another function); review accepted 19 and rejected 34 (one first rejected, `TBossEel::init`, was accepted on review once the same lever turned up in `SMS_MakeJointsToArc`).
+Made exact: `TNerveHino2Turn::execute` (getUnkF4(), getPosition() and getCurrentBck() at their only sites, mRotation raw) and `TMario::warpOut` (a computing `IsWarpOutGet(u32)` inline at both identical animation picks plus a named camera-flag bool, rewritten by hand from hsearch's mixed-spelling exact).
+Improved to the retail frame: `TMapWire::getPosInWire`, `JPADrawExecDirectionalCross::exec`, `TDirectionCalc::calcTurnDirection`, `TMareEventDepressWall::initCommon`, `TMuddyBoat::moveByWater`, `TTalk2D2::moveTalkWindow`, `SMS_MakeJointsToArc`, `TBossEel::init`, `TSpineEnemy::goToExclusiveNextGraphNode`, `TKumokun::decideTargetAtDir`, `TBathtub::updatePosture_`, `TBossTelesa::moveObject` and `TNerveBWJumpToBath::execute`.
+Improved part of the way: `TMario::moveMain`, `TEnemyMario::drawHPMeter`, `initStage` and `TSplineRail::getPosAndRot`.
+Accepted edits were accessors at every read of a member in the function, two-argument `startSoundActor` where the file already uses it, named bool or int tests (in both parallel branches where there are two), one named receiver split and one declaration swap.
+`getModelData()->mJointNum` read raw lands the frame in both functions that read it once, where `getJointNum()` is 8 long; c-hs2's `TPakkun::init` also lands its frame with it, at a slot cost.
+Rejected: machine-cut extracts with no UNUSED of their shape (9), stacks of five or more moves (7), lone spellings among parallel sites or against the file's style (8), trades or slot-only noise (5), results on a fake (3: a dead shadowed declaration from a doubled `decl-hoist`, the recorded `volatile` in calcTurnSpeedToReach, the fabricated MarioCollisionVecScaled), and two regressions: the one hsearch flagged in MapEventSink, and `TMapWire::drawUpper`, where getStartPoint() at all six reads lands the frame and every slot but drops the objdiff score, so it stays a lead.
+Leads: `processMiss`, `processShineGet` and `PauseMenu2::drawAppearPane` all want the same rect-centre emitter with a named int width; `TWireTrap::calcRootMatrix` closes its frame and slots with getPosition(), getScaling() and a lone `getHolder() != nullptr`; `TKoopa::updateAnmSound` closes exactly with its anime-loop block as an inline level.
+Tool notes: `decl-hoist` applied to an already hoisted name leaves a dead outer declaration shadowed by the inner one, and the lint does not catch it; the plausibility filter misses identical blocks more than four lines apart (CardSave's three close-A4 blocks), and `sound-short` does not check the file's prevailing spelling.
+
+## hsearch sweep c-hs4
+
+The `tools/hsearch` batch (200 s per function, `-j 2`, one function per foreground call) ran the last rows, 295 to 350, so all 350 rows of the list are now searched.
+It reported 12 exact or improved candidates (one exact, one flagged as regressing another function); review accepted 3 and rejected 9, and one of c-hs3's two leads was accepted (the whole sweep: 45 accepted, 103 rejected, 148 reviewed).
+Improved to the retail frame: `TNerveBPVomit::execute` (getRotation() at all three rotation reads, where hsearch needed a nonsense `TSpineEnemy* body` temporary and two of three sites) and `TObjHitCheck::checkWater` (a named bool `alive` for the particle test, which also lands every slot).
+Improved in slots: `TBeeHive::bind` (getLinearVelocity() at the member's only read, 33 slots to 7).
+Lead accepted: one `EmitAtRectCentre(rect, id)` inline over ConsoleStr's four identical bounds-centre emitter blocks takes `processMiss` from 99.64 to 99.81 and `processShineGet` from 99.73 to 99.75, but moves no frame.
+Named int widths (inside the level or in the caller), the centre passed as two floats, a pane-taking level and a returned vec are all inert there, and the same level in PauseMenu2 is inert or worse, so the named-width lead is closed.
+`TMapWire::drawUpper` with getStartPoint() at all six start reads is left with only the first vertex's two `fadds` in the wrong operand order (retail adds point + offset, addPoint's order); addPoint(getStartPoint()) there is 0x50 and a commuted source is inert, recorded in its TODO.
+The one exact, `TNerveBGBeakDamage::execute`, is a machine extract of the BTP-frame, resetDL and BGM block; its 0x64 matched UNUSED `TBGCork::crush` only by size, and `setEyeDamageBtp(1)` there costs the recorded 0x18 of frame.
+Rejected: machine extracts (3), nonsense temporaries or lone spellings stacked for a frame (3), inverting an existing mixed split (`TLampSeesawMain::loadAfter`, where every consistent spelling misses by 8), and slot-only noise (2).
+Tool fixes: moves that rewrite or delete the same text no longer combine, and the lint refuses a new shadowed declaration (the doubled `decl-hoist`).
+Spelling moves are refused when an identical line anywhere in the function is left alone, `sound-short` only offers a form that is at least a quarter of the file's other calls and adds an all-sites move, and an extract winner's helpers are compiled out of line and checked against the unit's UNUSED map sizes (skipping UNUSEDs the build already emits at their size), with the result in the log and the patch header.
+
+## hsearch sweep c-hs5
+
+A new list of the 513 non-exact functions outside c-hs2's targets, less 81 whose TODO records a by-value TVec3, JGadget pool, JUTColor stride or MsMtxSetRot residue, left 432 rows ordered by fuzzy match then size (`scratchpad/hs5/targets.tsv`, own `trials.sqlite`).
+The batch (200 s per function, `-j 2`, one foreground call per row) searched rows 1 to 64; rows 65 onward are unsearched.
+It reported 46 candidates (one exact, 44 improved, one flagged as regressing another function) and 18 rows with no gain; review accepted 23 and rejected 23.
+No function became byte-exact and no unit was linked.
+Improved to the retail frame: `TNerveCannonSearch::execute`, where getRotation() at both yaw reads (the third site is a write) lands the frame and 27 of 40 slots.
+Improved part of the way, all instruction-exact before and after: `TApplication::proc`, `TOptionControl::checkInput`, the TBossTelesa Die and Appear nerves, `TMapObjBase::initUnique`, `TBossPakkun::perform` and `init`, `TNerveBPWait::execute` (8 short), `TYoshi::init`, `TNerveBossEelDie::execute`, `TBGBeakHit::receiveMessage`, `TResetFruit::control`, `TWaterGun::perform`, `TFluffManager::control`, `TMarDirector::updateGameMode`, `TFluff::move`, `TAmiKing::moveObject`, `TEnemyMario::initModel`, `TGorogoro::walkBehavior`, `TEMario::load`, `TCannon::calcRootMatrix` and `TTamaNokoManager::initSetEnemies`.
+Almost every accepted edit reads a member through its header accessor at every read in the function (getManager, getSpine, getTracer, getGroundPlane, getActorType, getGamePad, getM3UModel, getCurrentMap, getCurrentStage, getObjNum/getObj); the rest are a two-argument startSoundActor where the file already uses that form and one consistent `== 0` spelling at three parallel tests.
+On this list the residue is mostly a dead low region: accessor inlines add frame without moving instructions, so the frame grows toward retail in steps of 8 but rarely lands.
+Each TODO above an accepted function now records the new frame and what was tried.
+The one exact candidate, `TYoshi::init`, needed a machine extract of only the second of two identical hand-texture blocks; a helper over both blocks overshoots (0x298 to 0x2a8 against 0x290), so only its getM3UModel() was kept.
+`TMarDirector::changeState` lands its frame only with a machine extract of the card-save restore/next-area block; that block is not the map's UNUSED `decideNextStageOfMiss` (0x10c), which it compiles to at 0x8c.
+Rejected: lone named values or `!getTime()` among identical calls (9), two-argument sounds in files that spell every sound with six (bosseel, fireWanwan, MarioReceiveMsg, MarioMove), machine extracts with no UNUSED of their shape (7), accessor subsets that leave the other sites raw, and one step the function's TODO had already measured and declined (`considerSetAnm_`'s getRotation()).
+Tool note: `raw->acc` subsets such as "sites 3+4 of 4" and single `name-call`s dominate the improved results; filtering them out before the beam would save most of the review time.
+
+## hsearch sweep c-hs6
+
+The resumed c-hs5 list (`scratchpad/hs5/targets.tsv`, 200 s per function, `-j 2`, one foreground call per row) ran rows 65 to 133 in two legs, the second after a container restart; rows 134 onward are unsearched.
+First, hsearch now refuses `raw->acc` subsets that leave the other spelling of a member in the function and named values that leave an identical read elsewhere.
+Review accepted 23 and rejected 31 (the whole c-hs5 list so far: 46 accepted, 54 rejected), and the other 15 rows gave no gain.
+No function became byte-exact and no unit was linked.
+`TNerveKoopaWait::execute` keeps its frame but loses all 15 register mismatches once the single-use bathtub search is passed straight to `KoopaFindGrip`, as the tumble test below it already does.
+`TEnemyMario::emReplayJumpToNearestNode` lands its frame (0x2c0) and cuts slot mismatches 132 to 76 with getStatus(), both `canJumpToNode()` tests as `!= 0` and one named u8 random flag; each alone is 0 or +0x10.
+`TCannon::init` and `TMarDirector::setMario` fix their register mismatches with C-style top declarations of their case or resource locals (hsearch hoisted one of each group; hoisting the whole group scores the same and reads consistently).
+`TBathtubGrip::receiveMessage` goes from 0x38 to 0x118 of 0x150 with `getUnk16C()->x.get()` at all ten param reads, TBathtub::hipdrop's spelling; `.get()` on the raw member had been measured as reordering loads, but through the accessor it does not.
+The other accepted edits read a member through its header accessor at every read in the function, in files that already use that accessor: SMS_GetMarioSpeed*(), getNormal(), getTracer(), getGroundPlane(), getHolder(), getObj(i)/getObjNum(), getStage(), getTag(), getTranslation(), getPosition(), plus one pair of identical early returns as `?:` in `MSound::startMarioVoice`.
+Rejected: machine extracts with no UNUSED of their shape (10), accessors the file never uses (getBodyScale, getSpine/getLeash in bosswanwan, getRotation in Koopa, getLinearVelocity, getDamageHeight/Radius), lone named values including two uncast `TNameRef*` temporaries, register trades (NpcChange, bgtentacle, Tongue, J3DCluster's x/z/y sign order), and pairs whose parts are each inert.
+Lead: `CPolarSubCamera::ctrlLButtonCamera_` is byte-exact with four stacked single-use names (u32 copies of both freeze counters, a bool for the FLUDD flag test, a const reference to the notice actor's getPosition()); any three are 8 short, and the recipe is in its TODO rather than the source.
+The disk filled once mid-leg (not this batch's files) and cleared on its own; hsearch then resumed from its database.
+
+## hsearch sweep c-hs7
+
+The resumed c-hs5 list (`scratchpad/hs5/targets.tsv`, 200 s per function, `-j 2`, one foreground call per row) ran rows 134 to 186; rows 187 onward are unsearched.
+Review accepted 14 and rejected 27 (the whole c-hs5 list so far: 60 accepted, 81 rejected), and the other 12 rows gave no gain.
+No function became byte-exact and no unit was linked.
+Landed on the retail frame: `TMario::running` (getInput(), getForwardVel(), getWallPlane() and getFludd() at every read; only the recorded pushed-zero r30 residue is left) and `TKoopaJrSubmarine::checkNerve` (getSpine() at all five reads and getKillerIndex(); registers 13 to 0).
+`TBiancoGateKeeper::init` loses all 17 register mismatches with getName() in both strcmp tests (MapObjBianco's spelling) and getMActor() at every read.
+`TBossGesso::perform` fixes the MTXCopy load order its TODO recorded with a named source matrix, which the TODO had measured as inert before getMActor() was in place.
+The three nozzle animation()s take 0x18, 0x18 and 0x28 of their frame gaps from getMActor() at every nozzle-actor read.
+The other accepted edits are header accessors at every read of a member in the function, where the file or the class's other files already use that accessor: getModel(), getGamePad(), getStatus(), getFludd(), getCamMode(), getCurrentMap(), getCurrentStage(), getUnk2E9(), plus one single-use target direction passed straight into calcTurnDirection as canRun does.
+Hand edits beat hsearch's winners in several rows: its best results usually stacked a machine extract or a lone named value on top of the honest accessor sets, and scoring the accessor set alone with `tools/score-variant.sh` kept the gain.
+Rejected: machine extracts with no UNUSED of their shape (10, including a 0x90 extract that matched UNUSED `TWaterGun::getWillBeEmitted` by size only), lone named values or receivers (8), accessors the file never uses (5), trades (3), and a far hoist of one declaration in both instances of one template body.
+Leads: `TFruitsBoat::moveObject` lands its frame with a named int for the anm switch on getBoatType(), and `TNerveHino2JumpIn::execute` reaches registers 0 at 0x60 with getUnk104() and named curAnmEndsNext() and getTime() values; both read as lone names and stay out of the source.
+
+## hsearch sweep c-hs8
+
+The resumed c-hs5 list (`scratchpad/hs5/targets.tsv`, 200 s per function, `-j 2`, one foreground call per row) ran rows 187 to 245; rows 246 onward are unsearched.
+Row 240 (`checkGroundList`) was not searched: the accessor set accepted for its twin `checkRoofList` (row 229) was applied by hand.
+Review accepted 18 and rejected 26 (the whole c-hs5 list so far: 78 accepted, 107 rejected), and the other 15 rows gave no gain.
+No function became byte-exact and no unit was linked.
+Landed on the retail frame: `TSelectMenu::initData` (getPane()), `TCardSave::waitForChoice` (getUnk2E9(), as waitForChoiceBM), `TMario::calcAnim`, `TFireWanwan::moveObject` and `TMario::setStatusToJumping`.
+`TMario::calcAnim` lands 0x328 with `mModel->getModel()` for the body model (a spelling the file already uses) and the surf gesso's raw mModel; `getM3UModel()->getModel()` overshoots to 0x348.
+`TFireWanwan::moveObject` needs both collision tests as `!= nullptr` beside getUnk8(); the accessor alone is +8.
+`TNerveFireWanwanRecoverGraph::execute` loses all three instruction and three register mismatches with `self->getUnk104()` alone.
+`TKoopa::getFlameDirRate` loses all seven register mismatches with `s32 time` (the step params it is compared with are s32).
+The other accepted edits are header accessors at every read of a member in the function, where the file or the class already uses them: getPlaneDistance(), getNormal(), getPrevPosition(), getMario(), getCurrentNozzleIndex(), getCurrentMap(), getStartPoint() (end raw, as drawUpper), getBounds(), the TBGCheckData triangle accessors, getVideo(), getPosition(), getKillerIndex() and SMS_GetMarioPos().
+As in c-hs7, scoring the accessor set alone kept most of hsearch's gain; the rest usually came from a machine extract or a lone named value.
+Rejected: machine extracts with no UNUSED of their shape (12, one matching UNUSED `JPABaseEmitter::deleteParticle` by size only), accessors the file never uses (8), lone named values or hoists (6), trades (3), and one frame-plus-registers trade that `ninja changes_all` scored as a regression (`TBWLeashNode::calcMatrix`'s getRope()).
+Tool note: `ninja changes_all` scores fuzzy match, so an edit that gains frame but loses registers can read as a regression; score candidates with `hsearch score` first and still gate on changes_all.
+
+## hsearch sweep c-hs9
+
+The resumed c-hs5 list (`scratchpad/hs5/targets.tsv`, 200 s per function, `-j 2`, one foreground call per row) ran rows 246 to 301 across two container restarts; rows 302 onward are unsearched.
+Search gave 39 candidates (two exact, 37 improved) and 17 rows with no gain.
+Review accepted 19 of the rows and rejected 20, plus one sibling applied by hand each way (the whole c-hs5 list so far: 98 accepted, 128 rejected).
+No function became byte-exact and no unit was linked.
+`TPakkunSeed::rebirth` is the closest: the file's short `startSoundActor` at both sink sounds and `getGroundPlane()` clear all eight instruction mismatches (98.45 -> 99.93%), leaving the frame 8 short; exact needs a 0xa8 machine extract with no UNUSED of that size.
+Landed on the retail frame: `TBathtubKiller::isAboided`, `TBeeHive::receiveMessage` and `TMapObjTurn::control`.
+`TNozzleTrigger::animation` loses 15 register mismatches by declaring the start and swap indices before the idle ones; the same order is inert in `TNozzleBase::animation`.
+`TGuide::placeMario` gains by computing x right after the pane width (width, x, height, y); hsearch's C-style hoists and int/s32 flips were rejected as machine order.
+`MSStageCubeFadeDouble::proc` lands 0x148 with the spelling `MSStageCubeFade::proc` already uses (`SMS_GetMarioPos()`, `getCubeInfo(i)->unkC`), better than hsearch's `getUnkC()`.
+The same spelling in `MSStageCubeFadeMonte::proc` (0x118 -> 0x148) shifts `MSStageCubeFade::setBgmVolumeForce`'s stack by 4 and unlinks it from 100%, so it was not kept.
+`TModelGate::perform`'s `getTexture()` also gains 8 in `loadAfter`, applied by hand.
+The other accepted edits are header accessors at every read in the function where the file or class already uses them: getUnkCD(), getPosition(), SMS_GetMarioPos(), getPicket(), getMapObjData(), getHolder(), getUnk2C(), getScaling(), getCollision(), getRotation(), getGridExtentX(), getTracer() and the save-param get().
+Rejected: machine extracts with no UNUSED of their shape (7), lone named values or receivers (6), spellings at odds with the rest of the file (4: a lone `!= nullptr`, raw `mData` beside `end()`, one commuted store of a parallel pair, raw `.value` at three of five reads), accessors the file never uses (2), and trades (2).
+`MSSeCallBack::setParameterSeqSync`'s raw `mChildren[i]->mChildren[j]` drops the `mr` (18 instructions) but `ninja changes_all` reads it as 98.75 -> 98.32%, and `zigzagToCurPathNode`'s earlier `fVar2` declaration (insn 36 -> 10) reads 97.96 -> 97.62%: both are recorded in review.log, not kept.
+Lead: `TKoopaHead::receiveMessage` lands its frame with `&sender->getPosition()` (the MapObjBlock and bossgesso water-hit spelling), but Koopa.cpp never uses getPosition().
+
+## hsearch sweep c-hs10
+
+The resumed c-hs5 list (`scratchpad/hs5/targets.tsv`, 200 s per function, `-j 2`, one foreground call per row) ran rows 302 to 356; rows 357 onward are unsearched.
+Search gave 43 candidates (one exact, 42 improved) and 12 rows with no gain.
+Review accepted 18 rows and rejected 25, plus the c-hs9 lead on `TKoopaHead::receiveMessage`, rejected by hand.
+No function became byte-exact and no unit was linked.
+`TKukku::dropCoins` is the closest: raw `mPosition` at both `JSGSetTranslation` calls and the coin velocity initialised straight from `KukkuVecFromRotY` clear all ten instruction mismatches and land the frame (96.57 -> 99.68%); four slots and the helper's FPR order are left.
+That removed the only `getPosition()` precedent in Kukku.cpp, so the `TKukkuBall::perform` translation accepted earlier in this batch went back to raw `mPosition`; its `getScaling()` stays.
+`TGorogoroManager::perform` gains the most frame (0xb8 -> 0x150 of 0x170, registers 80 -> 29, 96.59 -> 97.45%) with `getObj()`, `getTracer()->getGraph()->getGraphNode(n)` and `getPosition()`, both seated Gorogoros spelled alike.
+Landed on the retail frame: `TBathtub::calcBathtubData` (`getUnk16C()->x.value`, as `updatePosture_`; each half alone misses), `CPolarSubCamera::calcInHouseNo_` (raw `mData`) and `TBigWatermelon::touchActor` (`getMapObjData()`).
+Unnaming also paid: `SamboHeadRollCallback`'s projections passed straight to the `TVec3` constructor (MWCC evaluates arguments right to left, the order the named locals forced), the flower params in `checkGenCoin` and the knee angle in `FeetInvCalc`.
+`calcNoticeTargetYrot_` gains 8 with `chase` initialised by `?:`.
+The other accepted edits are accessors at every read in the function where the file already uses them: getStatus(), SMS_GetMarioPos(), getIntendedMag()/getForwardVel(), getVolumeType(), getFludd()/getBounds(), getActorType()/getHolder(), getActor() on the ground plane, and getPathDir() with the reverse speed through get().
+Rejected: accessors the file never uses (8), machine extracts with no UNUSED of their shape (7, one of them exact), lone named values or hoists (6), and four edits that `ninja changes_all` scored as regressions despite a better hsearch score.
+Those four are `TGuide::resetObjects` (hsearch's split `mShineNum` store, insn 51 -> 8, reads 97.77 -> 95.09), `TGCConsole2::processAppearStar` (`s32 blueCoinValue`, insn 17 -> 15), `TCogwheel::draw` and `TMapCollisionData::intersectLine` (frame landed, registers or slots worse).
+`TBossHanachan::execDamage` is exact with its dying block's collision-off loop (head, eight bodies and their feet) moved into an inline level, but no UNUSED is 0x13c, so it stays a lead.
+`TGuide::resetObjects`'s etcShines and blueCoins clamps are ternaries whose result retail coalesces into the counter (`bge; b; li r24, 9`); `etcShines = etcShines < 10 ? etcShines : 9` gets insn 51 -> 7 but keeps an `mr` and reads 97.77 -> 97.74.
+`TKoopaBody::receiveMessage` is 8 short like `TKoopaHead::receiveMessage` and has no sound call, so both gaps likely sit in the shared `stagger()` path; the head's `(Vec*)&mOwner->getPosition()` lands its frame only by coincidence.
+
+## hsearch sweep c-hs11
+
+The resumed c-hs5 list (`scratchpad/hs5/targets.tsv`, 200 s per function, `-j 2`, one foreground call per row) ran rows 357 to 432, which completes the list.
+A tool fix landed first: hsearch now ranks and reports candidates by objdiff's fuzzy match percent for the function (`objdiff-cli diff -c functionRelocDiffs=none`, which reproduces report.json exactly), with its instruction, frame, register and slot counts as tie-breaks, so a candidate it ranks better is no longer one `ninja changes_all` reads as a regression.
+Search gave 39 candidates (one exact, 37 improved, one improved-regresses), 20 rows with no gain, and 17 rows that are weak or local-class functions our objects do not emit (the ShadowUtil `TSetup`/`TCylinder` makeDL and dtors, the J3DShapeMtx getters, `SMS_GetMarioPos`, `getCurGraphIndex`, `TVec3::set<f>`).
+Review accepted 10 rows (one by hand ahead of its row) and rejected 30.
+`AudioDecoderForOnMemory` is byte-exact and `THPPlayer/THPAudioDecode.c` is linked: with every declaration at its block's top (C89), `readSize, size, frame` at function scope and `remaining` at the loop-body top, MWCC ranks retail's frame > &AudioDecodeThread > &ActivePlayer > readSize rotation.
+Only `frame` declared after both readSize and size gives it; the other orders are 89.3% or 86.3%, and `remaining` at function scope too is 99.8% with seven slots off.
+The loadAfter that the old comment paired it with (`TMapObjRevivalPollution::loadAfter`) has no locals to order, and search found nothing there.
+`TLimitKoopa::setUpHitActors` gains the most of the accepted partials: the flame height read unnamed at the `set()` call takes it from 94.90 to 98.98%; `along *= spread` on its own line reaches 99.70% but reads as a split and stays out.
+The three nozzle `emit()`s take the same spelling: the facing sine and cosine named as a pair, `getMario()` at every read and the reaction unnamed into `addVelocity` (TNozzleBase 94.15 -> 97.45, TNozzleTrigger 94.64 -> 97.47, TNozzleDeform 94.00 -> 96.35); each part alone is inert or worse.
+`TAnimalBase::perform` gains with the draw-matrix flag and index named as a pair in its shared-animation loop (92.54 -> 93.52).
+The other accepted edits are accessors the file or class already uses, at every read in the function: getUnk30(), getRealoid(), getStatus() and `mOwner->getPosition()`.
+Rejected: machine order (split accumulates, hoists, declaration swaps, asymmetric spellings: 8), lone named values or receivers (6), machine extracts with no UNUSED of their shape (6), accessors the file never uses or reads raw elsewhere (6), raw fields against the file's accessor (2), one edit that cost the exact frame, and one that regressed its inliners.
+`TBossGesso::changeAllTentacleState` reaches 99.73% with `getTentacle(i)`, but the three nerves that inline it fall from exact or 99.95% to about 98.5%, so the nerves want the raw spelling.
+Lead: `TAnimalBird::doFlyToCurPathNode` loses all 46 slot mismatches with `getPosition()` at the subtrahend, but Bird.cpp never uses getPosition().
+Whole c-hs5 list (c-hs5 to c-hs11, 432 rows, 431 searched and one applied by hand): 6 exact, 294 improved, 5 improved-regresses, 109 no gain and 17 base failures; review accepted 126 rows and rejected 184, and one unit was linked.

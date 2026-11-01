@@ -1,0 +1,52 @@
+Reason: MSVC (the Xbox 360 build) rejects what g++ -fpermissive lets through: a case label that jumps past a static's initialisation (the static moves above the switch; it is zero-initialised either way), and u32*/s32* (long) passed where port_ext.h takes unsigned*/int* (the same object on every target).
+--- a/src/MSound/MSound.cpp
++++ b/src/MSound/MSound.cpp
+@@ -153,6 +153,7 @@
+ 	u16 local_2a;
+ 	u16 local_2c;
+ 
++	static bool ukuleleFlag = 0; // above the switch: MSVC rejects a case that skips its initialisation
+ 	switch (param_2) {
+ 	case 15:
+ 		return MSGMSound->mTimerSyncValue;
+@@ -288,7 +289,6 @@
+ 	}
+ 
+ 	case 120:
+-		static bool ukuleleFlag = 0;
+ 		ukuleleFlag ^= true;
+ 		return ukuleleFlag;
+ 
+--- a/src/Player/MarioMove.cpp
++++ b/src/Player/MarioMove.cpp
+@@ -850,7 +850,7 @@
+ {
+ #ifdef TARGET_PC
+ 	// extensions may change or refuse the player's new status (port_ext.h)
+-	if (port_ext_player_status(this, &status, &arg, force))
++	if (port_ext_player_status(this, (unsigned*)&status, (unsigned*)&arg, force))
+ 		return 0;
+ #endif
+ 	if (!force) {
+--- a/src/System/FlagManager.cpp
++++ b/src/System/FlagManager.cpp
+@@ -233,7 +233,7 @@
+ 	// extensions may change or refuse the new value (port_ext.h)
+ 	{
+ 		const s32 sms_ext_old = getFlag(flag);
+-		if (value != sms_ext_old && port_ext_flag_change(flag, sms_ext_old, &value))
++		if (value != sms_ext_old && port_ext_flag_change(flag, sms_ext_old, (int*)&value))
+ 			return;
+ 	}
+ 	// As in getFlag, for setFlag's switch table (retail 0x803DEE38): Eclipse's
+--- a/src/System/FlagManager.cpp
++++ b/src/System/FlagManager.cpp
+@@ -396,7 +396,7 @@
+ 	if (amount != 0) {
+ 		const s32 sms_ext_old = getFlag(flag);
+ 		s32 sms_ext_new       = sms_ext_old + amount;
+-		if (port_ext_flag_change(flag, sms_ext_old, &sms_ext_new))
++		if (port_ext_flag_change(flag, sms_ext_old, (int*)&sms_ext_new))
+ 			return;
+ 		amount = sms_ext_new - sms_ext_old;
+ 	}

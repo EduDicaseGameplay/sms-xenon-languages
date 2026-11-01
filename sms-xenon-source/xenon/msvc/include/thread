@@ -1,0 +1,91 @@
+// <thread> for the Xbox 360 build on CreateThread. Only what the port uses.
+// A new thread starts on its creator's hardware thread (XSetThreadProcessor
+// docs); platform code places its own threads.
+#ifndef XE_THREAD
+#define XE_THREAD
+#include <chrono>
+#include "xe_win.h"
+
+namespace std {
+
+class thread {
+public:
+	class id {
+	public:
+		id() : v_(0) {}
+		explicit id(DWORD v) : v_(v) {}
+		bool operator==(const id& o) const { return v_ == o.v_; }
+		bool operator!=(const id& o) const { return v_ != o.v_; }
+		bool operator<(const id& o) const { return v_ < o.v_; }
+	private:
+		DWORD v_;
+	};
+	thread() : h_(0), id_(0) {}
+	template <class F> explicit thread(F f) : h_(0), id_(0) { start(new Fn<F>(f)); }
+	template <class F, class A> thread(F f, A a) : h_(0), id_(0) { start(new Fn1<F, A>(f, a)); }
+	~thread() { /* a joinable thread at destruction is std::terminate in C++11; just let it run */ }
+	bool joinable() const { return h_ != 0; }
+	void join()
+	{
+		WaitForSingleObject(h_, INFINITE);
+		CloseHandle(h_);
+		h_ = 0;
+		id_ = 0;
+	}
+	void detach()
+	{
+		CloseHandle(h_);
+		h_ = 0;
+		id_ = 0;
+	}
+	id get_id() const { return id(id_); }  // the XDK has no GetThreadId
+	HANDLE native_handle() const { return h_; }
+	static unsigned hardware_concurrency() { return 6; }
+	void swap(thread& o)
+	{
+		HANDLE t = h_; h_ = o.h_; o.h_ = t;
+		DWORD i = id_; id_ = o.id_; o.id_ = i;
+	}
+private:
+	thread(const thread&);
+	thread& operator=(const thread&);
+	struct Base {
+		virtual ~Base() {}
+		virtual void run() = 0;
+	};
+	template <class F> struct Fn : Base {
+		F f;
+		Fn(F f_) : f(f_) {}
+		void run() { f(); }
+	};
+	template <class F, class A> struct Fn1 : Base {
+		F f;
+		A a;
+		Fn1(F f_, A a_) : f(f_), a(a_) {}
+		void run() { f(a); }
+	};
+	static DWORD WINAPI entry(LPVOID p)
+	{
+		Base* b = (Base*)p;
+		b->run();
+		delete b;
+		return 0;
+	}
+	void start(Base* b) { h_ = CreateThread(NULL, 256 * 1024, entry, b, 0, &id_); }
+	HANDLE h_;
+	DWORD id_;
+};
+
+namespace this_thread {
+inline thread::id get_id() { return thread::id(GetCurrentThreadId()); }
+inline void yield() { SwitchToThread(); }
+template <class R, class P> void sleep_for(const chrono::duration<R, P>& d)
+{
+	long long ms = chrono::duration_cast<chrono::milliseconds>(d).count();
+	Sleep(ms > 0 ? (DWORD)ms : (d.count() > 0 ? 1 : 0));
+}
+template <class C, class D> void sleep_until(const chrono::time_point<C, D>& t) { sleep_for(t - C::now()); }
+} // namespace this_thread
+
+} // namespace std
+#endif

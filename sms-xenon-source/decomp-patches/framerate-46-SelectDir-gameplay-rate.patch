@@ -1,0 +1,391 @@
+Reason: port: the episode select (TSelectDir) runs at the gameplay frame rate (60 or 120) instead of 30; its scroll, spin, bob, fades, pulses and pane moves count displayed frames, so they are scaled to keep their 30 fps timing, its sound fades are given in 30 fps frames of MSound work (framerate-35), and the 120 fps particle step counts the select's own frames since there is no stage director
+--- a/src/GC2D/SelectMenu.cpp
++++ b/src/GC2D/SelectMenu.cpp
+@@ -39,6 +39,21 @@
+ #include <System/DummyMactorString.hpp>
+ #include <System/DummyStrings.hpp>
+ 
++#ifdef TARGET_PC
++#include "port_framerate.h"
++
++// Port: the episode select runs at the gameplay frame rate (SelectDir.cpp).
++// Its pane moves and the letterbox already take their lengths from
++// SMSGetAnmFrameRate; the rest counts displayed frames as 30 fps frames.
++// Steps are spread over a 30 fps frame's worth of displayed frames, and
++// lengths in frames last as many of them (both unchanged at 30).
++#define PORT_SELECT_STEP(step) port_native_step_share(step, port_select_frame)
++#define PORT_SELECT_FRAMES(frames) ((frames) * port_native_frame_divisor())
++#else
++#define PORT_SELECT_STEP(step) (step)
++#define PORT_SELECT_FRAMES(frames) (frames)
++#endif
++
+ TSelectGrad::TSelectGrad(const char* pName)
+     : JDrama::TViewObj(pName)
+ {
+@@ -105,7 +120,7 @@
+ 
+ 		switch (grad->mRgbAnimCycle[i]) {
+ 		case 0: {
+-			s16 newValue = *value + 2;
++			s16 newValue = *value + PORT_SELECT_STEP(2);
+ 			if (newValue > 255) {
+ 				newValue  = 255;
+ 				nextCycle = true;
+@@ -113,7 +128,7 @@
+ 			*value = newValue;
+ 		} break;
+ 		case 3: {
+-			s16 newValue = *value - 2;
++			s16 newValue = *value - PORT_SELECT_STEP(2);
+ 			if (newValue < 0) {
+ 				newValue  = 0;
+ 				nextCycle = true;
+@@ -133,14 +148,14 @@
+ 
+ 		switch (topLeftAnimCycle) {
+ 		case 0: {
+-			s16 newValue = *value + 2;
++			s16 newValue = *value + PORT_SELECT_STEP(2);
+ 			if (newValue > 255) {
+ 				newValue = 255;
+ 			}
+ 			*value = newValue;
+ 		} break;
+ 		case 3: {
+-			s16 newValue = *value - 2;
++			s16 newValue = *value - PORT_SELECT_STEP(2);
+ 			if (newValue < 0) {
+ 				newValue = 0;
+ 			}
+@@ -614,7 +629,7 @@
+ 
+ static inline s32 fadeOutArrow(J2DPane* arrow, s32 alpha)
+ {
+-	alpha -= 4;
++	alpha -= PORT_SELECT_STEP(4);
+ 	if (alpha < 0) {
+ 		alpha = 0;
+ 		arrow->hide();
+@@ -773,7 +788,7 @@
+ 		}
+ 	} break;
+ 	case WAIT_BEFORE_CLOSE: {
+-		if (mSelectShineAnimFrame > mWaitBeforeCloseTimer) {
++		if (mSelectShineAnimFrame > PORT_SELECT_FRAMES(mWaitBeforeCloseTimer + 1) - 1) {
+ 			mMenuState = CLOSE_MENU;
+ 		}
+ 		mSelectShineAnimFrame++;
+@@ -833,13 +848,13 @@
+ 				mSelectNext = false;
+ 
+ 				mScenarioPane2->getPane()->show();
+-				mScenarioPane2->setPaneAlpha(10, 255, 0);
+-				mScenarioPane2->setPaneOffset(10, -mScenarioPaneDist, 0,
++				mScenarioPane2->setPaneAlpha(PORT_SELECT_FRAMES(10), 255, 0);
++				mScenarioPane2->setPaneOffset(PORT_SELECT_FRAMES(10), -mScenarioPaneDist, 0,
+ 				                              -mScenarioPaneDist * 2, 0);
+ 
+ 				mScenarioPane1->getPane()->show();
+-				mScenarioPane1->setPaneAlpha(10, 0, 255);
+-				mScenarioPane1->setPaneOffset(10, mScenarioPaneDist, 0, 0,
++				mScenarioPane1->setPaneAlpha(PORT_SELECT_FRAMES(10), 0, 255);
++				mScenarioPane1->setPaneOffset(PORT_SELECT_FRAMES(10), mScenarioPaneDist, 0, 0,
+ 				                              0);
+ 
+ 				mScenarioImg2->changeTexture(
+@@ -906,13 +921,13 @@
+ 				mSelectNext = true;
+ 
+ 				mScenarioPane2->getPane()->show();
+-				mScenarioPane2->setPaneAlpha(10, 255, 0);
+-				mScenarioPane2->setPaneOffset(10, -mScenarioPaneDist, 0, 0,
++				mScenarioPane2->setPaneAlpha(PORT_SELECT_FRAMES(10), 255, 0);
++				mScenarioPane2->setPaneOffset(PORT_SELECT_FRAMES(10), -mScenarioPaneDist, 0, 0,
+ 				                              0);
+ 
+ 				mScenarioPane1->getPane()->show();
+-				mScenarioPane1->setPaneAlpha(10, 0, 255);
+-				mScenarioPane1->setPaneOffset(10, -mScenarioPaneDist, 0, 0,
++				mScenarioPane1->setPaneAlpha(PORT_SELECT_FRAMES(10), 0, 255);
++				mScenarioPane1->setPaneOffset(PORT_SELECT_FRAMES(10), -mScenarioPaneDist, 0, 0,
+ 				                              0);
+ 
+ 				mScenarioImg2->changeTexture(
+@@ -982,7 +997,7 @@
+ 
+ 			if (mArrowAnimDir) {
+ 				mArrowAnimPos++;
+-				if (mArrowAnimPos > 10) {
++				if (mArrowAnimPos > PORT_SELECT_FRAMES(11) - 1) {
+ 					mArrowAnimDir = false;
+ 				}
+ 			} else {
+@@ -999,7 +1014,7 @@
+ 				}
+ 			} else {
+ 				if (alpha < mMarkAlpha) {
+-					s32 next = alpha + 4;
++					s32 next = alpha + PORT_SELECT_STEP(4);
+ 					if (next > mMarkAlpha) {
+ 						next = mMarkAlpha;
+ 					}
+@@ -1010,7 +1025,7 @@
+ 			alpha = mArrowR->getAlpha();
+ 			if (getNextIndex() == -1) {
+ 				if (alpha != 0) {
+-					alpha -= 4;
++					alpha -= PORT_SELECT_STEP(4);
+ 					if (alpha < 0) {
+ 						mArrowR->hide();
+ 						alpha = 0;
+@@ -1020,7 +1035,7 @@
+ 			} else {
+ 				u8 alphaRef = mMarkAlpha;
+ 				if (alpha < alphaRef) {
+-					alpha = alpha + 4;
++					alpha = alpha + PORT_SELECT_STEP(4);
+ 					if (alpha > alphaRef) {
+ 						alpha = alphaRef;
+ 					}
+@@ -1043,13 +1058,13 @@
+ 		s32 alpha = mShineMarks[mSelectedShine]->getAlpha();
+ 		if (mMarkPulseDir) {
+ 			u8 alphaRef = mSelectedMarkAlpha;
+-			alpha       = alpha + 6;
++			alpha       = alpha + PORT_SELECT_STEP(6);
+ 			if (alpha > alphaRef) {
+ 				mMarkPulseDir = false;
+ 				alpha         = alphaRef;
+ 			}
+ 		} else {
+-			alpha = alpha - 6;
++			alpha = alpha - PORT_SELECT_STEP(6);
+ 			if (alpha < 64) {
+ 				mMarkPulseDir = true;
+ 				alpha         = 64;
+@@ -1060,7 +1075,7 @@
+ 	} break;
+ 	case DISAPPEAR_MENU: {
+ 		bool updated = true;
+-		s16 alpha    = mStageName->getAlpha() - 16;
++		s16 alpha    = mStageName->getAlpha() - PORT_SELECT_STEP(16);
+ 		if (alpha <= 0) {
+ 			alpha = 0;
+ 		} else {
+@@ -1091,14 +1106,14 @@
+ 			u32 ccol1 = ((J2DPicture*)mLetterBoxTop->getPane())->mCornerColor[0];
+ 			u32 ccol2 = ((J2DPicture*)mLetterBoxTop->getPane())->mCornerColor[2];
+ 
+-			var1 = (ccol1 & 0xFFu) + 16u;
++			var1 = (ccol1 & 0xFFu) + PORT_SELECT_STEP(16);
+ 			if (var1 > 255u) {
+ 				var1 = 255u;
+ 			} else {
+ 				updated = false;
+ 			}
+ 
+-			var2 = (ccol2 & 0xFFu) + 16u;
++			var2 = (ccol2 & 0xFFu) + PORT_SELECT_STEP(16);
+ 			if (var2 > 255u) {
+ 				var2 = 255u;
+ 			} else {
+@@ -1115,14 +1130,14 @@
+ 			u32 ccol1 = ((J2DPicture*)mLetterBoxBottom->getPane())->mCornerColor[0];
+ 			u32 ccol2 = ((J2DPicture*)mLetterBoxBottom->getPane())->mCornerColor[2];
+ 
+-			var1 = (ccol1 & 0xFFu) + 16u;
++			var1 = (ccol1 & 0xFFu) + PORT_SELECT_STEP(16);
+ 			if (var1 > 255u) {
+ 				var1 = 255u;
+ 			} else {
+ 				updated = false;
+ 			}
+ 
+-			var2 = (ccol2 & 0xFFu) + 16u;
++			var2 = (ccol2 & 0xFFu) + PORT_SELECT_STEP(16);
+ 			if (var2 > 255u) {
+ 				var2 = 255u;
+ 			} else {
+--- a/src/GC2D/SelectShine2.cpp
++++ b/src/GC2D/SelectShine2.cpp
+@@ -12,6 +12,13 @@
+ #include <JSystem/J3D/J3DGraphLoader/J3DAnmLoader.hpp>
+ #include <JSystem/JKernel/JKRFileLoader.hpp>
+ #include <JSystem/JParticle/JPAEmitterManager.hpp>
++#ifdef TARGET_PC
++#include "port_framerate.h"
++
++// Port: the episode select runs at the gameplay frame rate (SelectDir.cpp).
++// The shines' scroll, bob, fade and spin are steps per displayed frame, made
++// for 30; scale them to the frame rate in force (all exact at 30).
++#endif
+ 
+ // rogue include needed for matching the .rodata string pool prefix
+ #include <System/DummyMactorString.hpp>
+@@ -171,7 +178,11 @@
+ 	mShines[mIndex]->stopEmitters();
+ 
+ 	mIncreasing  = true;
++#ifdef TARGET_PC
++	mScrollSpeed = count * -40 / 10 * port_frame_scale();
++#else
+ 	mScrollSpeed = count * -40 / 10;
++#endif
+ 	mIndex += count;
+ 
+ 	mShines[mIndex]->playEmitters();
+@@ -182,7 +193,11 @@
+ 	mShines[mIndex]->stopEmitters();
+ 
+ 	mDecreasing  = true;
++#ifdef TARGET_PC
++	mScrollSpeed = count * 40 / 10 * port_frame_scale();
++#else
+ 	mScrollSpeed = count * 40 / 10;
++#endif
+ 	mIndex -= count;
+ 
+ 	mShines[mIndex]->playEmitters();
+@@ -371,12 +386,17 @@
+ 	if (frame < 30)
+ 		frame = 30;
+ 
++#ifdef TARGET_PC
++	int fadeStep = port_native_step_share(8, port_select_frame);
++#else
++	int fadeStep = 8;
++#endif
+ 	if (mAppearing) {
+-		mAnmFrame -= 8;
++		mAnmFrame -= fadeStep;
+ 		if (mAnmFrame < frame)
+ 			mAnmFrame = frame;
+ 	} else if (mDisappearing) {
+-		mAnmFrame += 8;
++		mAnmFrame += fadeStep;
+ 		if (mAnmFrame > mAnmColor->getFrameMax() - 1)
+ 			mAnmFrame = mAnmColor->getFrameMax() - 1;
+ 	} else {
+@@ -402,17 +422,31 @@
+ 
+ 	if (mSpinning) {
+ 		Mtx spin;
++#ifdef TARGET_PC
++		// Whole degrees, so mSpinAngle keeps up with the matrix's turn: the
++		// 1.5 degrees of a frame at 120 fps added 1 to it, and the shine
++		// stopped turned away from the camera. mSpinSpeed * 2 is a 30 fps
++		// frame's turn.
++		int spinStep = port_native_step_share(mSpinSpeed * 2, port_select_frame);
++		MTXRotRad(spin, 'y', 0.017453292f * (f32)spinStep);
++		mSpinAngle += spinStep;
++#else
+ 		MTXRotRad(spin, 'y',
+ 		          0.017453292f * ((f32)mSpinSpeed * SMSGetAnmFrameRate()));
+ 		mSpinAngle = (int)((f32)mSpinSpeed * SMSGetAnmFrameRate()
+ 		                   + (f32)mSpinAngle);
++#endif
+ 		if (mSpinAngle > 360)
+ 			mSpinAngle -= 360;
+ 		if (mSpinAngle < 0)
+ 			mSpinAngle += 360;
+ 		MTXConcat(mtx, spin, mtx);
+ 	} else if (mSpinAngle != 0) {
++#ifdef TARGET_PC
++		s16 step   = port_native_step_share(mSpinSpeed * 2, port_select_frame);
++#else
+ 		s16 step   = (s16)((f32)mSpinSpeed * SMSGetAnmFrameRate());
++#endif
+ 		mSpinAngle = mSpinAngle + step;
+ 		if (mSpinAngle > 360) {
+ 			step       = step - mSpinAngle + 360;
+@@ -423,7 +457,11 @@
+ 		MTXConcat(mtx, spin, mtx);
+ 	}
+ 
++#ifdef TARGET_PC
++	mBoundTimer = mBoundTimer + mBoundSpeed * port_frame_scale();
++#else
+ 	mBoundTimer = mBoundTimer + mBoundSpeed;
++#endif
+ 	if (mBoundTimer > 4.0f)
+ 		mBoundTimer = 0.0f;
+ }
+--- a/src/GC2D/SelectDir.cpp
++++ b/src/GC2D/SelectDir.cpp
+@@ -32,6 +32,19 @@
+ extern OSThread gSetupThread;
+ extern u8* gpSetupThreadStack;
+ 
++#ifdef TARGET_PC
++#include "port_framerate.h"
++
++// Port: the episode select runs at the frame rate set for gameplay (60 or
++// 120) instead of the 30 that proc sets for every director but a stage's.
++// Its timing that counts displayed frames is scaled where it is
++// (SelectMenu.cpp, SelectShine2.cpp, EmitterViewObj.cpp); port_select_frame
++// counts those frames for the steps that are spread over them. The sound
++// fades below are lengths of MSound frame work, which stays at 30 a second
++// (framerate-35), so they are given in 30 fps frames, as the stage exit's is.
++extern "C" void sms_port_set_gameplay_frame_rate(TApplication* app, int gameplay);
++#endif
++
+ TSelectDir::TSelectDir()
+     : unk20(0)
+     , unk24(0)
+@@ -71,6 +84,11 @@
+ 	unk18 = gamePad;
+ 	SMSRumbleMgr->reset();
+ 	unk40 = stage;
++#ifdef TARGET_PC
++	// Here rather than in proc, so BetterSunshineEngine's loop switches too.
++	sms_port_set_gameplay_frame_rate(SMSGetApplication(), 1);
++	port_select_frame = 0;
++#endif
+ 
+ 	OSCreateThread(&gSetupThread, &setupThreadFunc, this,
+ 	               gpSetupThreadStack + 0x10000, 0x10000, 0x11, 0);
+@@ -314,6 +332,9 @@
+ 		return TApplication::APP_STATE_WAIT;
+ 	}
+ 
++#ifdef TARGET_PC
++	port_select_frame++;
++#endif
+ 	JDrama::TDirector::direct();
+ 
+ 	int status = SMSGetApplication()->getFader()->mFadeStatus;
+@@ -329,7 +350,7 @@
+ 			SMSGetApplication()->getFader()->startWipe(0xf, 1.0f, 0.0f);
+ 			SMSGetApplication()->getFader()->setColor(
+ 			    JUtility::TColor(0xff, 0xff, 0xff, 0xff));
+-			SMSGetMSound()->fadeOutAllSound(port_cvt_fp2unsigned(SMSGetVSyncTimesPerSec()));
++			SMSGetMSound()->fadeOutAllSound(port_cvt_fp2unsigned(port_frame_scale() * SMSGetVSyncTimesPerSec()));
+ 		}
+ 		break;
+ 	}
+@@ -337,7 +358,7 @@
+ 	if (unk18->isSomethingPushed() && !unk4C) {
+ 		unk4C = true;
+ 		SMSGetApplication()->getFader()->startWipe(4, 1.0f, 0.0f);
+-		SMSGetMSound()->fadeOutAllSound(port_cvt_fp2unsigned(SMSGetVSyncTimesPerSec() * 0.4f));
++		SMSGetMSound()->fadeOutAllSound(port_cvt_fp2unsigned(port_frame_scale() * SMSGetVSyncTimesPerSec() * 0.4f));
+ 		unk10->unkC.on(CUE_MOVE | CUE_CALC_ANIM);
+ 	}
+ 
+--- a/src/System/EmitterViewObj.cpp
++++ b/src/System/EmitterViewObj.cpp
+@@ -16,8 +16,12 @@
+ // movement ticks, while drawing particles on every displayed frame.
+ static inline int portParticleSteps()
+ {
+-	if (port_active_frame_rate == 120)
++	if (port_active_frame_rate == 120) {
++		// The episode select has no stage director; it counts its own frames.
++		if (gpMarDirector == nullptr)
++			return (port_select_frame & 1) != 0;
+ 		return (gpMarDirector->unk5C & 1) != 0;
++	}
+ 	return (int)SMSGetAnmFrameRate();
+ }
+ #endif

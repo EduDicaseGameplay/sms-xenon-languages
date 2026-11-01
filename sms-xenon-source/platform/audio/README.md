@@ -1,0 +1,129 @@
+# platform/audio — software DSP and audio output
+
+SMS's audio driver (JAudio, in the decomp) runs unchanged on the emulated CPU.
+This module replaces the hardware it talks to: the DSP microcode that mixes voices (a software mixer that reads the same voice blocks the game writes), and the AI DMA engine that plays the mixed blocks (SDL2 output at 32 kHz).
+`PROTOCOL.md` documents the mail protocol, the voice-block layout and the evidence behind each choice.
+
+| File | Owner | What |
+| --- | --- | --- |
+| `dsp_mixer.{h,cpp}` | audio | The mixer: ADPCM4/ADPCM2/PCM8/PCM16 from ARAM, DirectPCM stream rings from main memory, 4-tap polyphase resampling with the game's `DSPRES_FILTER`, the per-voice biquad and low-pass filters, per-send Q15 volume ramps, the auto mixer, the four FX lines, the master level, the per-class (music, SFX) gains. No game headers. |
+| `dsp_hle.cpp` | audio | The DSP task's side of the mail protocol: setup (0x81), sync frame (0x82), release-halt → render one subframe → `0xF355FF00` through `__DSPHandler`. As the DSP is a processor of its own on the console, a subframe renders on a host thread of its own while the game's threads run, and its mail goes out once it is done (`SMS_AUDIO_DSP_THREAD=0`, a deterministic clock or one core render in place). The SDK-named `DSP*` functions are built only with `SMS_AUDIO_DSP_HLE` (see Integration). |
+| `ai.cpp` | audio | `AI*`: DMA latch/callback emulation, SDL2 output (loaded with `dlopen`), host-clock pacing without a device, WAV recording, and the settings menu's Volume, Music Volume and SFX Volume rows. |
+| `dtk.cpp` | audio | DVD audio streaming (DTK): the `AIS*` stream registers and trigger interrupt, the DTK ADPCM decoder, and the mix of the stream (scaled by the music volume) into each AI DMA block (48 kHz resampled to 32 kHz). Retail SMS never streams; Super Mario Eclipse's music does (BetterSunshineEngine's `AudioStreamer`). The DVD side is `../dvd/dvd.cpp`. |
+| `noaudio.cpp` | bring-up lead | `SMS_NO_AUDIO` (empty sound configuration). |
+| `tests/` | audio | `audio_test`: offline mixer test against the disc; `mixer_regression`: asset-free reverb and release checks (not part of the CMake build). |
+| `../../decomp-patches/audio-01-*.patch`, `audio-02-*.patch` | audio | JAudio bitfield/byte views that assumed big-endian layout (mix-config bus numbers, BMS note-on flags). |
+| `../../decomp-patches/audio-03-*.patch` | audio | No host-time "DSP overload" voice stealing on TARGET_PC. |
+| `../../decomp-patches/audio-05-*.patch` | audio | The voice block's class byte (music or SFX) written when a voice starts, and the music gain on THP movie audio (see Music and SFX volume). |
+
+## Integration (for the bring-up lead)
+
+The AI layer is already live: `ai.cpp`'s strong `AI*` definitions replace the weak stubs, so JAudio's DAC loop now runs on its real clock.
+With the current handshake-only fake DSP, that loop outputs silence.
+`SMS_AUDIO=0` drops the output but keeps that loop running (see Environment).
+
+To switch to the software DSP (two edits, both in your files):
+
+1. In `platform/misc/sdk_data.cpp`, remove or `#ifndef SMS_AUDIO_DSP_HLE` the fake DSP block: the `__DSP_curr_task`/`__DSP_first_task`/`__DSP_last_task` globals, the mail queue, `DSPCheckMailFromDSP`, `DSPReadMailFromDSP`, `DSPCheckMailToDSP`, `DSPSendMailToDSP`, `DSPAssertInt`, `DSPInit`, `__DSP_boot_task`, `__DSP_insert_task`, `__DSP_exec_task`, `__DSP_remove_task`.
+   `dsp_hle.cpp` defines the same set.
+2. Add `SMS_AUDIO_DSP_HLE=1` to the `sms` target's compile definitions in `CMakeLists.txt`.
+
+If you would rather keep your functions, forward to the hook instead.
+Each of these is `extern "C"` in `dsp_hle.cpp` and always built:
+
+```c
+void port_audio_dsp_boot(DSPTaskInfo* task);   /* from __DSP_boot_task, after setting __DSP_curr_task */
+u32  port_audio_dsp_check_mail_from(void);     /* DSPCheckMailFromDSP */
+u32  port_audio_dsp_read_mail_from(void);      /* DSPReadMailFromDSP */
+void port_audio_dsp_mail_to(u32 mail);         /* DSPSendMailToDSP */
+void port_audio_dsp_assert_int(void);          /* DSPAssertInt */
+/* DSPCheckMailToDSP must return 0 (mail is consumed at once). */
+```
+
+Replies are delivered with `port_irq_defer` → the decomp's `__DSPHandler`.
+That means the handshake, the setup acknowledgement and every subframe reach the game at the next interrupt check point, which is `OSRestoreInterrupts` at the end of `DSPSendCommands2`.
+The busy-wait loops in `DsetupTable` and `DspBoot` rely on this.
+Nothing else in the OS layer is needed.
+The ARAM lookup uses `port_aram_ptr` from `platform/ar`.
+
+This was verified by linking a private binary with `-DSMS_AUDIO_DSP_HLE=1` and `-Wl,--allow-multiple-definition` (audio objects first) against the `build/linux-32/` game library.
+It boots, and the logo, UI sounds, sequences and voice clips play; see Status.
+
+## Environment
+
+| Variable | Effect |
+| --- | --- |
+| `SMS_AUDIO=0` | no output device and no `SMS_AUDIO_WAV`; the AI DMA keeps its clock (as with no device), so the audio thread, the sequencer and the mixer run as with sound. An idle DMA (the old behaviour) stopped JAudio's sequencer, which is what frees a stopped sequence: after eight music changes no root sequence slot was left, and the game faulted on the next stage exit (docs/64-BIT.md, item 19) |
+| `SMS_NO_AUDIO=1` | an empty sound configuration (`noaudio.cpp`); the AI DMA stays idle |
+| `SMS_AUDIO_OUT=sdl\|null` | output device; the default is SDL, or `null` when headless. `null` paces DMA from the host clock |
+| `SMS_AUDIO_WAV=file.wav` | record everything played (32 kHz stereo) |
+| `SMS_AUDIO_TRACE=1` | log each voice start, each change of a voice's filters, and the voice counts every 5 s |
+| `SMS_AUDIO_FX=0` | bypass the FX (echo) lines |
+| `SMS_AUDIO_FILTERS=0` | bypass the per-voice biquad and low-pass filters (the under-water muffle; PROTOCOL.md, Voice filters) |
+| `SMS_AUDIO_SWAP=0` | keep DMA pair order (the default swaps the (right, left) DMA pairs for SDL) |
+| `SMS_AUDIO_MASTER_SHIFT=n` | fixed point of the DSP master level (default 15, measured) |
+| `SMS_AUDIO_SLOT_SHIFT=n` | fixed point of `mixChannels` volumes (default 13, measured) |
+| `SMS_AUDIO_ARAM_DUMP=file[,n]` | write the ARAM image after `n` subframes (default 16000) |
+| `SMS_VOLUME=0..100` | master volume (default 100): scales the stream the SDL callback plays, so `SMS_AUDIO_WAV` records it unscaled. The in-game Volume row changes it. Needs a real output device, as does the row |
+| `SMS_MUSIC_VOLUME=0..100` | Music Volume, percent (default 100); settings.txt `music_volume`, the in-game Music Volume row. Scales the music before it is mixed (see Music and SFX volume), so it is in `SMS_AUDIO_WAV` too |
+| `SMS_SFX_VOLUME=0..100` | SFX Volume, percent (default 100); settings.txt `sfx_volume`, the in-game SFX Volume row. Scales every sound that is not music, the same way |
+
+## Music and SFX volume
+
+Three gains stack, in this order: the voice's class gain (Music Volume or SFX Volume), the DSP master level, and `SMS_VOLUME`.
+The class gains are percent, 0 to 100, default 100.
+They live in atomics in the mixer (`port_dspmix_set_class_percent`); the in-game rows (`port_audio_settings` in `ai.cpp`) write them on the game's thread, and the mixer reads them once per 80-sample subframe and ramps linearly to a new value across that subframe, so a change does not click.
+The gain scales a voice's source samples before any send, so its dry level and the FX (echo) it feeds follow it together; echo already in a delay line keeps the level it was sent at and fades out on its own.
+At 100 the samples are not touched, so a default run is bit-identical to one without the feature.
+
+| Class | What it covers | How the port tells |
+| --- | --- | --- |
+| Music | every voice a BGM sequence plays: area and stage themes, and every jingle the game starts through `MSBgm::startBGM` (`MSD_BGM_*`, sound ids `0x8001xxxx`: Shine get, miss, game over, boss and race fanfares, the file select and title themes, ...) | `TChannel::playLogicalChannel` (patch `audio-05`) writes 1 into byte 0x006 of the voice block when the channel's track belongs to a root sequence other than the sound-effect sequence |
+| Music | JAudio stream sounds (`JAInter::StreamLib`: direct-PCM voices, source type 0x21); no retail code starts one (no `0xC000xxxx` id in the game's source), so this is for code mods | the mixer, by source type |
+| Music | the DVD stream (DTK): Super Mario Eclipse's music | `dtk.cpp` scales it by the music gain where it adds it to the block |
+| Music | THP movie audio (the cutscenes) | the game mixes it into the DAC block on the CPU (`THPPlayer` registers a mix callback, `JASystem::Kernel::mixInterleaveTrack`); patch `audio-05` scales it by the music gain (`port_audio_music_gain_q15`) |
+| SFX | every other sequenced or sampled voice: Mario's moves and voice (`MSD_SE_MV_*`), enemies, objects, water, menu and system sounds (`MSStartSysSE`), ambient and environment sounds | the same byte, 0 |
+
+Evidence.
+`JAIBasic` plays every sound effect (sound id type 0, e.g. `MSD_SE_YO_WALK_L = 0x1942`) as a note of the one sequence `startSeSequence` starts at boot (`0x80000800`, `JAIBasic::mSeSequence`): `JAIGFrameSe.cpp` writes each effect's parameters into that sequence's tracks, and `JAISystemInterface::trackToSeqp` treats ids with bit 0x800 as its two-level track tree.
+Background music is a separate sequence-type sound (`0x8001xxxx`, `MSoundBGM.cpp`; `MSD_STR_SPACEWORLD` is one too), each with its own root `TTrack` in `TrackMgr`, so a voice's owner decides its class: `TChannel::unk4` is the channel manager of the track that plays it, a member of one `TrackMgr::sTrackPool` entry; walking `mParent` reaches the root, which is either the sound-effect sequence's (`TrackMgr::handleToSeq(mSeSequence->getSeqParameter()->mSeqHandle)`) or a BGM's.
+The jingles are BGM too: `MSD_BGM_GET_SHINE`, `MSD_BGM_MISS` and `MSD_BGM_GAMEOVER` go through the same `MSBgm::startBGM`, which stops the other tracks and starts them as sequences.
+The class is chosen once, when the voice starts, and a channel released after its track closes keeps it.
+Movies never reach the DSP: `THPPlayer` registers `audioCallbackWithMSound` with `registerMixCallback(.., 3)`, the only registered mix callback in the decomp, and `mixInterleaveTrack` adds its samples to the DAC block on the CPU.
+That audio is one mixed stream that cannot be split into music and effects; it follows Music as a judgement (cutscene movies are score-led), not something checked against the disc's movies.
+
+A voice whose channel manager is not in `sTrackPool` counts as SFX; no case of that is known.
+Check a build with `SMS_AUDIO_TRACE=1`: each voice-start line ends with `music` or `sfx`.
+
+## Status
+
+Compared against retail running under Dolphin with DSP LLE (the game's own microcode), boot → title → file select; the numbers are in PROTOCOL.md.
+
+- The boot jingle matches retail sample for sample (correlation 1.000, gain 0.99–1.00).
+  This fixed the master at Q15 (earlier Q14 was 2× too loud); the auto mixer is Q15.
+- `mixChannels` volumes, which carry the music, are Q13: the file-select music then matches retail's level (whole-mix RMS within 0.1 dB over 46 s). They were Q14 until 2026-10-25, which played the music 6 dB under the sound effects (sms-launcher#127).
+- Voices, waves and volumes match retail's voice blocks (the same ARAM addresses, the same slot volumes).
+  File-select music plays with retail's voice count (11–13 vs 10.9) and a continuous floor, after two timing fixes: AI blocks wait for the DSP frame, and `audio-03` stops the host-time "DSP overload" voice stealing that cut notes to about a third.
+- Bus 1 is left, bus 2 right, as retail.
+- **Decoders are bit-exact against the disc** (all 449 ADPCM4 and 3 ADPCM2 loop histories; `tests/audio_test`).
+- FX returns use Q15 gains, mode-specific FIR ordering, and the game's RAM delay buffers. Auto-mixer wet sends use the front-effect buses and Sunshine's Q16 reverb factor (the highest game value is just under 0.5). Stop requests release gradually through zero. Asset-free impulse and release checks cover these rules in both word sizes; see PROTOCOL.md.
+- Slow frames: blocks are mixed on the emulated CPU, so when the game's thread holds it for longer than the output queue lasts (a load, a shader compile, a slow frame; three blocks, 52 ms), the output runs dry and clicks.
+  The queue then grows (up to eight blocks, 140 ms; one block back after each 30 s without) and the log says so.
+  While the output catches up, a block starts only after the audio thread has handled the one before; catching up used to replay DAC buffers and drop others, which a steady low frame rate made lasting distortion.
+- Untested against retail: stream voices (not used in this segment), surround mode, FX lines (no fx sends in this segment), oscillator voices, per-voice filters (retail's IIR coefficients were identity here; the biquad and low-pass follow Dolphin's HLE, see PROTOCOL.md, Voice filters).
+
+Debug aids: `SMS_AUDIO_TRACE=1` (voice starts, ends with reason and lifetime, counts every 5 s) and `SMS_AUDIO_ARAM_DUMP=file[,subframe]` (writes the ARAM image once, for replaying traced voice blocks offline).
+
+## Offline test
+
+```sh
+cd platform/audio/tests
+make check                 # no disc required
+make audio_test
+mkdir -p out
+./audio_test /path/to/disc/files out/
+```
+
+It reads `mSound.aaf` from `data/nintendo.szs` (Yaz0 + RARC), checks the decoders over all 24 wave archives, and writes WAVs.
+The WAVs are one-shots and loops from `w1stLoad_0.aw`/`wScene_0.aw`, a wave an octave up and down (lengths halve and double), and one through the AAF's FX scene 0.
+It prints lengths and levels.

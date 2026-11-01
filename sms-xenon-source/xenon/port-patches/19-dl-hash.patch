@@ -1,0 +1,79 @@
+Xbox 360: display lists' periodic hash checks spread over the 30-frame period by address (all lists made together were checked in one frame: a 29 ms GX core frame every 30 in plaza); hashBytes loads aligned words directly (memcpy into a stack array was a load-hit-store on each word); [spike] counters of lists hashed. Applied by xenon/tools/xstage to the staged copy only.
+diff -ru a/platform/gx/src/gx_fifo.cpp b/platform/gx/src/gx_fifo.cpp
+--- a/platform/gx/src/gx_fifo.cpp	2026-10-29 02:39:16.666989224 +0500
++++ b/platform/gx/src/gx_fifo.cpp	2026-10-29 03:03:57.717108975 +0500
+@@ -67,6 +67,26 @@
+     uint64_t h = seed ^ (0x9E3779B97F4A7C15ull * (n + 1));
+     if (n >= 32) {
+         uint64_t a = h, b = h ^ 0x2545F4914F6CDD1Dull, c = h ^ 0x632BE59BD9B4E019ull, d = h ^ 0x85EBCA77C2B2AE63ull;
++#ifdef _XBOX
++        // Xbox 360: aligned words loaded as they are; memcpy into the stack array and back is a
++        // load-hit-store on each word (display lists and textures hashed 4-5 MB in a plaza frame)
++        if (!(reinterpret_cast<uintptr_t>(p) & 7)) {
++            const uint64_t* q = reinterpret_cast<const uint64_t*>(p);
++            do {
++                a = (a ^ q[0] * 0xBF58476D1CE4E5B9ull);
++                b = (b ^ q[1] * 0xBF58476D1CE4E5B9ull);
++                c = (c ^ q[2] * 0xBF58476D1CE4E5B9ull);
++                d = (d ^ q[3] * 0xBF58476D1CE4E5B9ull);
++                a = (a << 27 | a >> 37) * 0x94D049BB133111EBull;
++                b = (b << 27 | b >> 37) * 0x94D049BB133111EBull;
++                c = (c << 27 | c >> 37) * 0x94D049BB133111EBull;
++                d = (d << 27 | d >> 37) * 0x94D049BB133111EBull;
++                q += 4;
++                n -= 32;
++            } while (n >= 32);
++            p = reinterpret_cast<const uint8_t*>(q);
++        } else
++#endif
+         do {
+             uint64_t w[4];
+             memcpy(w, p, 32);
+@@ -1223,6 +1243,17 @@
+     }
+ }
+ 
++#ifdef _XBOX
++// Xbox 360: each list's hash check falls on a frame of its own within the period (by its address):
++// lists made together all checked again in one frame, every 30, a 29 ms GX core frame in plaza
++static uint32_t dlCheckedFrame(const void* key) {
++    return g_displayFrames - (g_displayFrames + (uint32_t(uintptr_t(key)) >> 5) * 2654435761u) % kDlRecheckFrames;
++}
++uint32_t g_xeDlHashes, g_xeDlHashBytes;  // [spike] lists compared by hash, and their bytes
++#else
++static uint32_t dlCheckedFrame(const void*) { return g_displayFrames; }
++#endif
++
+ static bool dlReusable(DlEntry& e, const uint8_t* data, uint32_t size) {
+     if (!e.valid || e.size != size) return false;
+     if (!e.stateOnly && (e.vcdLo != g.cpVcdLo || e.vcdHi != g.cpVcdHi)) return false;
+@@ -1238,6 +1269,11 @@
+         unwritten = unwrittenSince(e.arrays[i].base + e.arrays[i].lo, e.arrays[i].hi - e.arrays[i].lo, e.checkedClock);
+     if (unwritten && g_displayFrames - e.checkedFrame < kDlRecheckFrames) return true;
+     uint32_t clock = writeClock();
++#ifdef _XBOX
++    g_xeDlHashes++;
++    g_xeDlHashBytes += size;
++    for (size_t i = 0; i < e.arrays.size(); i++) g_xeDlHashBytes += e.arrays[i].hi - e.arrays[i].lo;
++#endif
+     bool same = hashBytes(data, size) == e.hash;
+     for (size_t i = 0; same && i < e.arrays.size(); i++)
+         same = hashBytes(e.arrays[i].base + e.arrays[i].lo, e.arrays[i].hi - e.arrays[i].lo) == e.arrays[i].hash;
+@@ -1246,7 +1282,7 @@
+         return false;
+     }
+     e.checkedClock = clock;
+-    e.checkedFrame = g_displayFrames;
++    e.checkedFrame = dlCheckedFrame(data);
+     return true;
+ }
+ 
+@@ -1388,7 +1424,7 @@
+         s_dlElem[i] = 0;
+     }
+     e.checkedClock = writeClock();
+-    e.checkedFrame = g_displayFrames;
++    e.checkedFrame = dlCheckedFrame(data);
+     s_dlRec = &e;
+     s_dlRecFail = false;
+     uint32_t need = 0;

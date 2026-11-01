@@ -1,0 +1,91 @@
+Xbox 360: MEM1 cannot live at 0x80000000 (title image and kernel). It is an XPhysicalAlloc block anywhere, OS_BASE_CACHED/UNCACHED become its runtime base (no uncached mirror), GX gets the window, and JRenderer's texture/TLUT BP addresses use OSCachedToPhysical (the decomp's OSPhysicalToCached only worked by 2^32 wraparound with base 0x80000000). Applied by xenon/tools/xstage to the staged copy only.
+diff -ru a/game/libs/dolphin/include/dolphin/os.h b/game/libs/dolphin/include/dolphin/os.h
+--- a/game/libs/dolphin/include/dolphin/os.h	2026-10-24 09:32:50.453555819 +0500
++++ b/game/libs/dolphin/include/dolphin/os.h	2026-10-24 09:33:07.682326027 +0500
+@@ -42,8 +42,16 @@
+ #define OS_UNCACHED_REGION_PREFIX 0xC000
+ #define OS_PHYSICAL_MASK          0x3FFF
+ 
++#ifdef _XBOX
++/* Xbox 360: MEM1 is wherever XPhysicalAlloc put it (platform/port_runtime.cpp), and there is no
++ * uncached mirror: both views are the one block. */
++extern u32 xe_mem1_base;
++#define OS_BASE_CACHED   xe_mem1_base
++#define OS_BASE_UNCACHED xe_mem1_base
++#else
+ #define OS_BASE_CACHED   (OS_CACHED_REGION_PREFIX << 16)
+ #define OS_BASE_UNCACHED (OS_UNCACHED_REGION_PREFIX << 16)
++#endif
+ 
+ typedef struct BI2Debug {
+ 	/* 0x00 */ s32 debugMonSize;
+diff -ru a/game/libs/JSystem/src/JRenderer.cpp b/game/libs/JSystem/src/JRenderer.cpp
+--- a/game/libs/JSystem/src/JRenderer.cpp	2026-10-24 09:32:50.454711009 +0500
++++ b/game/libs/JSystem/src/JRenderer.cpp	2026-10-24 09:33:07.682394278 +0500
+@@ -280,7 +280,7 @@
+ {
+ 	// clang-format off
+ 	u32 reg =
+-		(u32) ((u32)OSPhysicalToCached(image) >> 5) |
++		(u32) (OSCachedToPhysical(image) >> 5) |
+ 		(u32) GXTexImage3Ids[map] << 24;
+ 	// clang-format on
+ 
+@@ -316,7 +316,7 @@
+ 	GDOverflowCheck(5);
+ 	// clang-format off
+ 	J3DGDWriteBPCmd(
+-		(u32) ((u32)OSPhysicalToCached(tlut) >> 5) |
++		(u32) (OSCachedToPhysical(tlut) >> 5) |
+ 		(u32) 0x64 << 24
+ 	);
+ 	// clang-format on
+diff -ru a/platform/port_runtime.cpp b/platform/port_runtime.cpp
+--- a/platform/port_runtime.cpp	2026-10-24 09:32:50.455753755 +0500
++++ b/platform/port_runtime.cpp	2026-10-24 09:33:07.682513786 +0500
+@@ -569,6 +569,12 @@
+ }
+ #endif
+ 
++#ifdef _XBOX
++extern "C" u32 xe_mem1_base;
++u32 xe_mem1_base;
++extern "C" void GXPC_SetMemoryWindow(void* base, uint32_t size);
++#endif
++
+ static void map_mem1()
+ {
+ 	// 64-bit hosts: objects holding pointers are larger, and the fixed-size
+@@ -578,7 +584,20 @@
+ 		mb = (u32)atoi(e);
+ 	port_mem1_size = mb << 20;
+ 	void* want = (void*)(uintptr_t)(PORT_GAME_HI + 0x80000000u);
+-#ifdef _WIN32
++#ifdef _XBOX
++	// 0x80000000 holds the title image and the kernel here: MEM1 goes where the kernel puts it, as
++	// 64 KiB physical pages (fewer TLB misses), and OS_BASE_CACHED follows it (os.h).
++	(void)want;
++	void* p = XPhysicalAlloc(port_mem1_size, MAXULONG_PTR, 0, PAGE_READWRITE | MEM_LARGE_PAGES);
++	if (!p) {
++		port_log("[port] out of memory for MEM1 (%u MiB)\n", mb);
++		exit(1);
++	}
++	memset(p, 0, port_mem1_size);
++	xe_mem1_base = (u32)p;
++	*(u32*)((u8*)p + 0x28) = port_mem1_size; // __OSPhysicalMemSize's GameCube home (JKRHeap reads it there)
++	GXPC_SetMemoryWindow(p, port_mem1_size);
++#elif defined(_WIN32)
+ 	void* p = VirtualAlloc(want, port_mem1_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+ 	if (p != want) {
+ 		port_log("[port] cannot map MEM1 at 0x80000000 (got %p)\n", p);
+@@ -1012,8 +1031,10 @@
+ 		}
+ 	atexit(port_stub_report);
+ 	map_mem1();
++#ifndef _XBOX // GX writes go through GXPC_WGPipe; nothing can be mapped at 0xCC000000 here
+ 	if (sizeof(void*) == 4)
+ 		map_hw_sink();
++#endif
+ 	port_os_init();
+ 	port_dvd_init();
+ 	port_window_icon_init();

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Build the Xbox 360 xex: stage the tree (xstage), write the project (xproj.py), run MSBuild on
+# win10vm, bring default.xex and the PDB back to ../build-xenon/out/<Config>/.
+# Usage: xbuild [master]    Release by default. Full log: /tmp/sms-xbuild.log. Exit 0 only on success.
+# Over ssh MSBuild misses changed headers, so a build is always a full Rebuild (~minutes for ~650 units).
+set -euo pipefail
+repo=$(readlink -f "$(dirname "$(readlink -f "$0")")/../..")
+top=$(readlink -f "$repo/..")/build-xenon
+case "${1:-}" in
+  "") config=Release ;;
+  master) config=Master ;;
+  *) echo "usage: xbuild [master]" >&2; exit 2 ;;
+esac
+"$repo/xenon/tools/xstage" --no-sync | grep -v '^$' || true
+python3 "$repo/xenon/tools/xproj.py" "$repo" "$top/stage"
+"$repo/xenon/tools/xstage" --sync-only
+
+ssh -o BatchMode=yes win10vm 'C:\Windows\Microsoft.NET\Framework\v4.0.30319\MSBuild.exe C:\work\sms-xenon\stage\xenon\sms.vcxproj /nologo /m /v:m /t:Rebuild /p:Configuration='"$config"' "/p:Platform=Xbox 360" && echo BUILD_OK || echo BUILD_FAILED & rem' 2>&1 \
+  | grep -av '^\*\*' | iconv -f cp866 -t utf-8 | tr -d '\r' | sed -e 's/ \[C:[^]]*\]$//' -e 's/C:\\work\\sms-xenon\\stage\\//g' > /tmp/sms-xbuild.log || true
+
+set +o pipefail
+pattern=': (fatal )?error [A-Z]+[0-9]+'
+echo "unique errors: $(grep -aE "$pattern" /tmp/sms-xbuild.log | sort -u | wc -l)"
+grep -aE "$pattern" /tmp/sms-xbuild.log | awk '!seen[$0]++' | head -${XBUILD_TOP:-40}
+grep -aqx 'BUILD_OK *' /tmp/sms-xbuild.log
+
+mkdir -p "$top/out/$config"
+rsync -rlt "win10vm:/c/work/sms-xenon/stage/xenon/out/$config/default.xex" "win10vm:/c/work/sms-xenon/stage/xenon/out/$config/sms.pdb" "$top/out/$config/"
+echo "$config $(sha256sum "$top/out/$config/default.xex" | cut -d' ' -f1)" > "$top/out/$config/default.xex.build"
+echo "default.xex ($config) -> $top/out/$config"

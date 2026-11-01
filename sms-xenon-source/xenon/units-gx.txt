@@ -1,0 +1,12 @@
+# The GX core the Xbox 360 build compiles: the API, the command parser and vertex
+# loader, the vertex calls, and GD (the decompiled SDK sources, as upstream builds them). The renderer
+# side of gx_internal.h is xenon/gx (Xenos).
+platform/gx/src/gx_api.cpp
+platform/gx/src/gx_fifo.cpp
+platform/gx/src/gx_vert.cpp
+game/libs/dolphin/src/gd/GDBase.c
+game/libs/dolphin/src/gd/GDGeometry.c
+game/libs/dolphin/src/gd/GDLight.c
+game/libs/dolphin/src/gd/GDPixel.c
+game/libs/dolphin/src/gd/GDTev.c
+game/libs/dolphin/src/gd/GDTransform.c

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Run the 360 build under gdb and, if it stops, show where: see xcrash.py.
+# Usage: xcrash [seconds]   (XCRASH_IDLE=30: seconds without log output that count as stopped)
+set -uo pipefail
+if pgrep -x xenia_canary > /dev/null; then echo "xcrash: Xenia is already running" >&2; exit 1; fi
+XCRASH_SECS=${1:-300} exec gdb -q -batch -x "$(dirname "$(readlink -f "$0")")/xcrash.py"

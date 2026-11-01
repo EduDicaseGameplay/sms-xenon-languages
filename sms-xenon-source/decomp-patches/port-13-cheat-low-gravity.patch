@@ -1,0 +1,36 @@
+Reason: port: Low Gravity (F9 menu, divisor 1/2/4, port_cheat_low_gravity in platform/misc/port_cheats.cpp): fallProcess pulls the player's Mario down by his gravity (normal, spin jump and dive) divided by the setting, so he jumps higher and falls slower; the terminal speed and everything else stay. TEnemyMario is left alone through isMario()
+--- a/src/Player/MarioPhysics.cpp
++++ b/src/Player/MarioPhysics.cpp
+@@ -540,10 +540,19 @@
+ 	return false;
+ }
+ 
++#ifdef TARGET_PC
++extern "C" int port_cheat_low_gravity;
++#endif
++
+ void TMario::fallProcess()
+ {
++	f32 gravityScale = 1.0f;
++#ifdef TARGET_PC
++	if (isMario())
++		gravityScale = 1.0f / (f32)port_cheat_low_gravity;
++#endif
+ 	if (getStatus() == MARIO_STATUS_DIVE) {
+-		mVel.y -= mDivingParams.mGravity.get();
++		mVel.y -= mDivingParams.mGravity.get() * gravityScale;
+ 		if (mVel.y < -75.0f)
+ 			mVel.y = -75.0f;
+ 	} else {
+@@ -563,9 +572,9 @@
+ 		                   getStatus() == MARIO_STATUS_LEFT_ROTATE_JUMP
+ 		                   || getStatus() == MARIO_STATUS_RIGHT_ROTATE_JUMP)
+ 		           && mVel.y < 0.0f) {
+-			mVel.y -= mJumpParams.mSpinJumpGravity.get();
++			mVel.y -= mJumpParams.mSpinJumpGravity.get() * gravityScale;
+ 		} else {
+-			mVel.y -= mJumpParams.mGravity.get();
++			mVel.y -= mJumpParams.mGravity.get() * gravityScale;
+ 		}
+ 		if (onYoshi()) {
+ 			mYoshi->thinkHoldOut();

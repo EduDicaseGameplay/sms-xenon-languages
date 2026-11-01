@@ -1,0 +1,97 @@
+Reason: port: code-mod hooks (sms_modhook.h): TMarioGamePad::updateMeaning debug input filter, and the Z and L meanings BetterSunshineMoveset's Long Jump/Crouch Button setting swaps
+--- a/src/System/MarioGamePad.cpp
++++ b/src/System/MarioGamePad.cpp
+@@ -1,8 +1,38 @@
+ #include <System/MarioGamePad.hpp>
+ #include <System/Application.hpp>
++#ifdef TARGET_PC
++#include <sms_modhook.h>
++#endif
+ 
+ JDrama::TFlagT<u16> TMarioGamePad::mResetFlag;
+ 
++#ifdef TARGET_PC
++// An updateMeaning(button, meaning, prevMeaning) inlined below, with the
++// instructions a mod may rewrite in it. Retail compiles each one as
++//   at-4  lwz    r0, mButton.mTrigger
++//   at    rlwinm. r0, r0, 0, <button>      bne set
++//   at+8  lwz    r0, mButton.mButton
++//   at+C  rlwinm. r0, r0, 0, <button>      beq skip
++//   at+14 rlwinm. r0, r31, 0, <meaning>    (r31 = prevMeaning)
++//   at+18 beq    skip
++//   set:  lwz r0, mMeaning; at+20 ori r0, r0, <meaning>; stw r0, mMeaning
++// BetterSunshineMoveset's Long Jump/Crouch Button setting
++// (LongJumpMappingSetting::valueChanged) rewrites the masks, the `ori` and
++// the `beq` at at+18 (to a nop: a held button keeps the meaning) to swap L
++// and Z: set to L, L crouches, long jumps and ground pounds (meaning 0x1000,
++// which it also makes TMario test for the ground pound) and Z centres the
++// camera (0x2000, 0x8000).
++static void smsModUpdateMeaning(TMarioGamePad* pad, u32 at, u32 button, u32 meaning,
++                                u32 prevMeaning)
++{
++	bool held = (pad->mButton.mButton & SMS_MOD_MASK(at + 0xC, button)) != 0
++	            && (SMS_MOD_WORD(at + 0x18, 0) == 0x60000000
++	                || (prevMeaning & SMS_MOD_MASK(at + 0x14, meaning)) != 0);
++	if ((pad->mButton.mTrigger & SMS_MOD_MASK(at, button)) != 0 || held)
++		pad->mMeaning |= SMS_MOD_ORI(at + 0x20, meaning);
++}
++#endif
++
+ // NOTE (linked from source, batch 279): the `.sdata2` pool order that used to
+ // block the link is fixed -- see considerMarioStick below. What is still
+ // dishonest here is the `u32 stackAlloc[83]` in updateMeaning: it is
+@@ -102,8 +132,13 @@
+ 			mCompSPos[1 * 2 + 1] = (f32)mButton.mAnalogR;
+ 
+ 			updateMeaning(R, MEANING_0x400, prevMeaning);
++#ifdef TARGET_PC
++			smsModUpdateMeaning(this, 0x802A8568, Z, MEANING_0x1000, prevMeaning);
++			smsModUpdateMeaning(this, 0x802A8594, L, MEANING_0x2000, prevMeaning);
++#else
+ 			updateMeaning(Z, MEANING_0x1000, prevMeaning);
+ 			updateMeaning(L, MEANING_0x2000, prevMeaning);
++#endif
+ 			mCompSPos[2 * 2]     = mMainStick.mPosX;
+ 			mCompSPos[2 * 2 + 1] = mMainStick.mPosY;
+ 			updateMeaning(A, MEANING_0x10000, prevMeaning);
+@@ -154,14 +189,23 @@
+ 			}
+ 
+ 			updateMeaning(R, MEANING_0x400, prevMeaning);
++#ifdef TARGET_PC
++			smsModUpdateMeaning(this, 0x802A8834, Z, MEANING_0x1000, prevMeaning);
++			smsModUpdateMeaning(this, 0x802A8860, L, MEANING_0x2000, prevMeaning);
++#else
+ 			updateMeaning(Z, MEANING_0x1000, prevMeaning);
+ 			updateMeaning(L, MEANING_0x2000, prevMeaning);
++#endif
+ 
+ 			mCompSPos[3 * 2]     = mSubStick.mPosX;
+ 			mCompSPos[3 * 2 + 1] = mSubStick.mPosY;
+ 
+ 			updateMeaning(Y, MEANING_0x4000, prevMeaning);
++#ifdef TARGET_PC
++			smsModUpdateMeaning(this, 0x802A88C8, L, MEANING_0x8000, prevMeaning);
++#else
+ 			updateMeaning(L, MEANING_0x8000, prevMeaning);
++#endif
+ 
+ 			if (((_DE & 0x1) != 0)
+ 			    || (((_DC & 1) != 0 && ((prevMeaning & MEANING_0x200) != 0)))) {
+@@ -173,6 +217,16 @@
+ 	}
+ 
+ finalize:
++#ifdef TARGET_PC
++	// BetterSunshineEngine (checkShouldUpdateMeaning, retail 0x802A8948,
++	// over the mMeaning load; the words at 0x802A894C, 0x802A8950 mask and
++	// store its result instead, `andc r3, r3, r31`, `stw r3, 0xd4(r30)`):
++	// the mod reads the pad from r30 and may clear mMeaning first.
++	if (void* sms_mod_t_ = SMS_MOD_SITE(0x802A8948)) {
++		SMS_MOD_GPR(30, this);
++		mEnabledFrameMeaning = ((u32(*)())sms_mod_t_)() & ~prevMeaning;
++	} else
++#endif
+ 	mEnabledFrameMeaning  = mMeaning & ~prevMeaning;
+ 	mDisabledFrameMeaning = prevMeaning & ~mMeaning;
+ }

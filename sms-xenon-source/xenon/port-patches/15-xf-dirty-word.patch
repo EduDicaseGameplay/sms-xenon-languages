@@ -1,0 +1,36 @@
+diff -ru a/platform/gx/src/gx_fifo.cpp b/platform/gx/src/gx_fifo.cpp
+--- a/platform/gx/src/gx_fifo.cpp	2026-10-28 04:19:56.510193130 +0500
++++ b/platform/gx/src/gx_fifo.cpp	2026-10-28 04:19:56.605004892 +0500
+@@ -323,7 +323,7 @@
+             if (g.xfMem[addr] != v) {
+                 onStateChange();
+                 g.xfMem[addr] = v;
+-                markXfMemDirty();
++                markXfMemDirty(addr);
+             }
+         } else if (addr >= XF_REG_BASE && addr < XF_REG_BASE + XF_REG_COUNT) {
+             uint32_t r = addr - XF_REG_BASE;
+diff -ru a/platform/gx/src/gx_internal.h b/platform/gx/src/gx_internal.h
+--- a/platform/gx/src/gx_internal.h	2026-10-28 04:07:08.000000000 +0500
++++ b/platform/gx/src/gx_internal.h	2026-10-28 04:19:56.605085586 +0500
+@@ -254,7 +254,7 @@
+ bool batchUsesArena();
+ void onStateChange();  // called before any register write that changes state
+ void executeCopy(uint32_t execReg);
+-void markXfMemDirty();
++void markXfMemDirty(uint32_t addr);  // an XF memory word changed
+ uint32_t peekColor(int x, int y);  // A<<24|R<<16|G<<8|B
+ uint32_t peekZ(int x, int y);      // 24-bit
+ void pixMetricClear();
+diff -ru a/platform/gx/src/gx_render.cpp b/platform/gx/src/gx_render.cpp
+--- a/platform/gx/src/gx_render.cpp	2026-10-28 04:07:08.000000000 +0500
++++ b/platform/gx/src/gx_render.cpp	2026-10-28 04:19:56.605409073 +0500
+@@ -361,7 +361,7 @@
+ static std::unordered_map<const void*, Xfb> s_xfbs;
+ static const void* s_lastXfb = nullptr;
+ 
+-void markXfMemDirty() { s_xfDirty = true; }
++void markXfMemDirty(uint32_t) { s_xfDirty = true; }
+ FILE* traceFile();
+ void traceFrameAdvance();
+ void traceDraw(int prim, uint32_t nverts, uint32_t nidx, const HostVertex* v, int progId);

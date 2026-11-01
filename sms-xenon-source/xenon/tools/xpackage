@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# The package users get: the Master default.xex, xenon/dist (README.txt, sms_env.txt,
+# sms_extract.py), the shader cache (data\shaders, made by xshaders), no game data. Builds Master
+# and its shader cache first unless given --no-build.
+# Output: ../build-xenon/package/sms-xenon/ and ../build-xenon/package/sms-xenon-<commit>.7z
+set -euo pipefail
+repo=$(readlink -f "$(dirname "$(readlink -f "$0")")/../..")
+top=$(readlink -f "$repo/..")/build-xenon
+[ "${1:-}" = --no-build ] || { "$repo/xenon/tools/xbuild" master && "$repo/xenon/tools/xshaders"; }
+"$repo/xenon/tools/xpathtest"
+rev=$(git -C "$repo" rev-parse --short HEAD)$(git -C "$repo" diff --quiet || echo -dirty)
+out=$top/package/sms-xenon
+rm -rf "$out"
+mkdir -p "$out"
+cp "$top/out/Master/default.xex" "$repo/xenon/dist/README.txt" "$repo/xenon/dist/sms_env.txt" \
+   "$repo/xenon/dist/sms_extract.py" "$repo/xenon/dist/LICENSE.txt" "$out/"
+mkdir -p "$out/data/shaders"
+cp "$top/shaders/pack.bin" "$top/shaders/programs.bin" "$out/data/shaders/"
+echo "build $rev ($(sha256sum "$out/default.xex" | cut -c1-16))" > "$out/VERSION.txt"
+# nothing of the disc may ride along: only the files named above
+extra=$(cd "$out" && find . -type f | grep -vxE '\./(default.xex|README.txt|LICENSE.txt|sms_env.txt|sms_extract.py|VERSION.txt|data/shaders/(pack|programs).bin)' || true)
+[ -z "$extra" ] || { echo "xpackage: unexpected files: $extra" >&2; exit 1; }
+(cd "$top/package" && rm -f "sms-xenon-$rev.7z" && 7z a -bd -mx=9 "sms-xenon-$rev.7z" sms-xenon > /dev/null)
+ls -la "$out" "$top/package/sms-xenon-$rev.7z"

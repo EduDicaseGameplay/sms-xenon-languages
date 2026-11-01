@@ -1,0 +1,75 @@
+VS2010 (Xbox 360 build), the GX core: a multi-statement lambda's return type, a two-argument map emplace, default member initialisers in one declaration, and braced lists of std::pair and of a nested aggregate. Applied by xenon/tools/xstage to the staged copy only.
+--- a/platform/gx/src/gx_api.cpp
++++ b/platform/gx/src/gx_api.cpp
+@@ -994,7 +994,7 @@
+ }
+ void GXSetTevIndTile(GXTevStageID s, GXIndTexStageID ind, u16 tileS, u16 tileT, u16 spS, u16 spT, GXIndTexFormat fmt,
+                      GXIndTexMtxID mtx, GXIndTexBiasSel bias, GXIndTexAlphaSel alpha) {
+-    auto wrapFor = [](u16 size) {
++    auto wrapFor = [](u16 size) -> GXIndTexWrap {
+         switch (size) {
+         case 256: return GX_ITW_256;
+         case 128: return GX_ITW_128;
+--- a/platform/gx/src/gx_fifo.cpp
++++ b/platform/gx/src/gx_fifo.cpp
+@@ -533,7 +533,7 @@
+         o += 12;
+     }
+     l.stride = o;
+-    return cache.emplace(fmt, l).first->second;
++    return cache.insert(std::make_pair(fmt, l)).first->second;
+ }
+ 
+ void unpackVertex(uint32_t fmt, const uint8_t* src, const uint8_t defMtx[9], HostVertex& hv) {
+@@ -744,7 +744,8 @@
+ // its layout, the vertex arrays or the matrix-index registers change (a frame
+ // loads thousands of primitives through a handful of setups).
+ struct DecSetup {
+-    uint32_t layoutGen = 0, arrayGen = 0, matA = 0, matB = 0;
++    DecSetup() : layoutGen(0), arrayGen(0), matA(0), matB(0) {}
++    uint32_t layoutGen, arrayGen, matA, matB;
+     uint32_t fmt, stride;
+     uint16_t mtxPresent;
+     uint8_t mtxDefault[12];
+@@ -1055,7 +1056,7 @@
+ static size_t s_dlCacheBytes = 0;
+ 
+ static DlEntry& dlLookup(const void* key) {
+-    if (s_dlIndex.empty()) s_dlIndex.assign(4096, {nullptr, nullptr});
++    if (s_dlIndex.empty()) s_dlIndex.assign(4096, std::pair<const void*, DlEntry*>(nullptr, nullptr));
+     size_t mask = s_dlIndex.size() - 1;
+     size_t i = size_t((uint64_t(reinterpret_cast<uintptr_t>(key)) * 0x9E3779B97F4A7C15ull) >> 32) & mask;
+     for (;; i = (i + 1) & mask) {
+@@ -1065,7 +1066,7 @@
+     if (s_dlEntries.size() * 2 >= s_dlIndex.size()) {  // grow, then insert into the new index
+         std::vector<std::pair<const void*, DlEntry*>> old;
+         old.swap(s_dlIndex);
+-        s_dlIndex.assign(old.size() * 2, {nullptr, nullptr});
++        s_dlIndex.assign(old.size() * 2, std::pair<const void*, DlEntry*>(nullptr, nullptr));
+         for (auto& kv : old)
+             if (kv.first) {
+                 size_t m = s_dlIndex.size() - 1;
+@@ -1075,8 +1076,8 @@
+             }
+         return dlLookup(key);
+     }
+-    s_dlEntries.emplace_back();
+-    s_dlIndex[i] = {key, &s_dlEntries.back()};
++    s_dlEntries.push_back(DlEntry());
++    s_dlIndex[i] = std::pair<const void*, DlEntry*>(key, &s_dlEntries.back());
+     return s_dlEntries.back();
+ }
+ 
+@@ -1110,8 +1111,10 @@
+     e.lastVat = uint8_t(vat);
+     if (S.fmt & VF_MTX) e.usesMtx = true;
+     PrimClass cls = primClass(opcode);
+-    if (e.runs.empty() || e.runs.back().cls != cls || e.runs.back().fmt != S.fmt)
+-        e.runs.push_back(DlRun{cls, S.fmt, S.stride, 0, {}, {}});
++    if (e.runs.empty() || e.runs.back().cls != cls || e.runs.back().fmt != S.fmt) {
++        DlRun nr = {cls, S.fmt, S.stride, 0};
++        e.runs.push_back(nr);
++    }
+     DlRun& r = e.runs.back();
+     r.verts.insert(r.verts.end(), out, out + size_t(count) * S.stride);
+     size_t at = r.idx.size();

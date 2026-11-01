@@ -1,0 +1,60 @@
+Reason: extensions (ext/, port_ext.h) hear of each effect the particle manager is asked for (TMarioParticleManager::emit and its kin): multiplayer shows the player's effects (a slide's spray, a landing's dust) at them in the other players' games
+
+--- a/src/System/EmitterViewObj.cpp
++++ b/src/System/EmitterViewObj.cpp
+@@ -1,4 +1,5 @@
+ #include <System/EmitterViewObj.hpp>
++#include "port_ext.h"
+ #include <JSystem/JParticle/JPAEmitterManager.hpp>
+ #include <JSystem/JParticle/JPAEmitter.hpp>
+ #include <JSystem/JUtility/JUTTexture.hpp>
+@@ -262,6 +263,9 @@
+ TMarioParticleManager::emit(s32 param_1, const JGeometry::TVec3<f32>* param_2,
+                             u8 param_3, const void* param_4)
+ {
++	// port: extensions hear of each effect (ext/multiplayer: the player's,
++	// shown at them in the other players' games)
++	port_ext_particle_emit(0, param_1, param_2, 0, 0, 0, param_3, param_4);
+ 	if (param_3 == 0)
+ 		if (JPABaseEmitter* emitter = EmitterMgr(this)->createSimpleEmitterID(
+ 		        *param_2, param_1, param_3, 0, nullptr, nullptr))
+@@ -315,6 +319,7 @@
+     s32 param_1, const JGeometry::TVec3<f32>* param_2, s16 param_3, s16 param_4,
+     s16 param_5, u8 param_6, const void* param_7)
+ {
++	port_ext_particle_emit(1, param_1, param_2, param_3, param_4, param_5, param_6, param_7);
+ 	u8 group = param_6;
+ 
+ 	if (group == 0)
+@@ -342,6 +347,7 @@
+                                            const JGeometry::TVec3<f32>* param_2,
+                                            u8 param_3, const void* param_4)
+ {
++	port_ext_particle_emit(2, param_1, param_2, 0, 0, 0, param_3, param_4);
+ 	if (param_3 == 0)
+ 		if (JPABaseEmitter* emitter = EmitterMgr(this)->createSimpleEmitterID(
+ 		        *param_2, param_1, param_3, 0, nullptr, nullptr)) {
+@@ -401,6 +407,7 @@
+                                                            u8 param_3,
+                                                            const void* param_4)
+ {
++	port_ext_particle_emit(3, param_1, param_2, 0, 0, 0, param_3, param_4);
+ 	JGeometry::TVec3<f32> local_24;
+ 	setVecX(local_24, param_2[0][3]);
+ 	local_24.y = param_2[1][3];
+@@ -464,6 +471,7 @@
+ TMarioParticleManager::emitAndBindToSRTMtxPtr(s32 param_1, MtxPtr param_2,
+                                               u8 param_3, const void* param_4)
+ {
++	port_ext_particle_emit(4, param_1, param_2, 0, 0, 0, param_3, param_4);
+ 	JGeometry::TVec3<f32> local_24;
+ 	setVecX(local_24, param_2[0][3]);
+ 	local_24.y = param_2[1][3];
+@@ -528,6 +536,7 @@
+                                                         u8 param_3,
+                                                         const void* param_4)
+ {
++	port_ext_particle_emit(5, param_1, param_2, 0, 0, 0, param_3, param_4);
+ 	JGeometry::TVec3<f32> local_24;
+ 	setVecX(local_24, param_2[0][3]);
+ 	local_24.y = param_2[1][3];

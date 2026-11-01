@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Build the Xbox 360 source tree the VM compiles: ../build-xenon/stage, then rsync it to win10vm.
+#   game/      decomp/ with the applied decomp-patches (build/linux-32/patched) laid over it
+#   src/ platform/ ext/ sdk/include/   the port's own code
+#   xenon/     our MSVC shims, project and tools
+# Needs a configured Linux build (./build.sh) for the patched copies. Usage: xstage [--no-sync]
+set -euo pipefail
+repo=$(readlink -f "$(dirname "$(readlink -f "$0")")/../..")
+stage=$(readlink -f "$repo/..")/build-xenon/stage
+patched=$repo/build/linux-32/patched
+[ -d "$patched" ] || { echo "xstage: no $patched, run ./build.sh first" >&2; exit 1; }
+mkdir -p "$stage"
+if [ "${1:-}" != --sync-only ]; then
+rs() { rsync -rlt --delete --exclude=.git "$@"; }
+rs --exclude='*.md' --exclude=/orig/ --exclude=/build/ "$repo/decomp/" "$stage/game/"
+rsync -rlt "$patched/" "$stage/game/"
+rs "$repo/src/" "$stage/src/"
+rs --exclude=/gx/src/vk/ "$repo/platform/" "$stage/platform/"
+rs "$repo/ext/" "$stage/ext/"
+mkdir -p "$stage/sdk"; rs "$repo/sdk/include/" "$stage/sdk/include/"
+rs --exclude=/tools/ "$repo/xenon/" "$stage/xenon/"
+rs "$repo/build/linux-32/ext-generated/" "$stage/ext-generated/"
+# Port patches: what the mechanical rewrite cannot spell (xenon/port-patches/*.patch, -p1 from the repo root).
+for p in "$repo"/xenon/port-patches/*.patch; do
+  [ -e "$p" ] || continue
+  patch -p1 --quiet --forward -d "$stage" -i "$p" || { echo "xstage: $(basename "$p") does not apply" >&2; exit 1; }
+done
+python3 "$repo/xenon/tools/xstubs.py" "$repo" "$stage"
+python3 "$repo/xenon/tools/xcodec.py" "$repo" "$stage/xenon/gx/xe_gx_codec.cpp"
+python3 "$repo/xenon/tools/xrewrite.py" "$stage/game" "$stage/src" "$stage/platform" "$stage/ext"
+[ "${1:-}" = --no-sync ] && exit 0
+fi
+ssh -o BatchMode=yes win10vm 'mkdir C:\work\sms-xenon\stage 2>nul & rem' 2>&1 | grep -v '^\*\*' || true
+# MSYS2 rsync cannot set the executable bit of #! files on NTFS (exit 23): leave scripts out.
+rsync -rlt --chmod=Fa-x --delete --exclude='*.sh' --exclude='*.py' --exclude='*.exe' --exclude='*.dll' \
+  --exclude=/xenon/out/ --exclude=/xenon/sms.vcxproj.user "$stage/" win10vm:/c/work/sms-xenon/stage/ 2>&1 | grep -v '^\*\*' || true
+echo "staged -> win10vm:C:\\work\\sms-xenon\\stage"

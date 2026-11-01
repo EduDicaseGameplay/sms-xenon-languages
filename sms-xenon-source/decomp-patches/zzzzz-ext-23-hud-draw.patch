@@ -1,0 +1,87 @@
+Reason: extensions, mods and the settings menu's HUD page hide parts of the HUD (port_hud_draw, ext/core/game/port_hud.cpp) for its draw only, so its own logic, animations and sounds never see them hidden; a hidden counter's digit-change sparkles are not made
+
+--- a/src/GC2D/GCConsole2.cpp
++++ b/src/GC2D/GCConsole2.cpp
+@@ -350,7 +350,9 @@
+ 	bounds = pane->getPane()->getGlobalBounds();
+ 	position.set(bounds.x1 + bounds.getWidth() * 0.5f,
+ 	             bounds.y1 + bounds.getHeight() * 0.5f, 0.0f);
+-	manager->createEmitter(position, 0x1FC, nullptr, nullptr);
++	// port: no burst over a counter that is hidden (port_hud_hidden)
++	if (!(port_hud_hidden() & PORT_HUD_COINS))
++		manager->createEmitter(position, 0x1FC, nullptr, nullptr);
+ }
+ 
+ // fabricated
+@@ -2506,7 +2508,10 @@
+ 	JGeometry::TVec3<f32> position(bounds.x1 + bounds.getWidth() * 0.5f,
+ 	                               bounds.y1 + bounds.getHeight() * 0.5f, 0.0f);
+ 	JPAEmitterManager* manager = gpEmitterManager4D2;
+-	manager->createEmitter(position, 0x1FC, nullptr, nullptr);
++	// port: no burst over a counter that is hidden (changeNum is the Shine
++	// counter's alone)
++	if (!(port_hud_hidden() & PORT_HUD_SHINES))
++		manager->createEmitter(position, 0x1FC, nullptr, nullptr);
+ }
+ 
+ // TODO: frame 0x50 short, instructions exact. The getWhite()/mWhite temps sit
+@@ -2751,8 +2756,10 @@
+ 			position.x = bounds.x1 + bounds.getWidth() * 0.5f;
+ 			position.y = bounds.y1 + bounds.getHeight() * 0.5f;
+ 			position.z = 0.0f;
+-			gpEmitterManager4D2->createEmitter(position, 0x1FC, nullptr,
+-			                                   nullptr);
++			// port: no burst over a counter that is hidden (port_hud_hidden)
++			if (!(port_hud_hidden() & PORT_HUD_BLUE_COINS))
++				gpEmitterManager4D2->createEmitter(position, 0x1FC, nullptr,
++				                                   nullptr);
+ 
+ 			if (blueCoins % 10 == 0) {
+ 				bounds   = unk154[0]->getPane()->getGlobalBounds();
+@@ -2760,7 +2767,8 @@
+ 				position.y = bounds.y1 + bounds.getHeight() * 0.5f;
+ 				position.z = 0.0f;
+ 				JPAEmitterManager* manager = gpEmitterManager4D2;
+-				manager->createEmitter(position, 0x1FC, nullptr, nullptr);
++				if (!(port_hud_hidden() & PORT_HUD_BLUE_COINS))
++					manager->createEmitter(position, 0x1FC, nullptr, nullptr);
+ 			}
+ 		} else {
+ 			startAppearStar();
+@@ -4433,7 +4441,9 @@
+ 			JGeometry::TVec3<f32> position;
+ 			position.set(bounds.x1 + bounds.getWidth() * 0.5f,
+ 			             bounds.y1 + bounds.getHeight() * 0.5f, 0.0f);
+-			manager->createEmitter(position, 0x1FC, nullptr, nullptr);
++			// port: no burst over a counter that is hidden (port_hud_hidden)
++			if (!(port_hud_hidden() & PORT_HUD_RED_COINS))
++				manager->createEmitter(position, 0x1FC, nullptr, nullptr);
+ 		}
+ 		console->unk444 = redCoins;
+ 	}
+@@ -4857,7 +4867,10 @@
+ 	graphics->setScissor(graphics->mViewportRect);
+ 	graph.setup2D();
+ 
+-	if (gpMarioOriginal->mYoshi->onYoshi()) {
++	// port: the juice gauge (Yoshi's) is drawn by hand, apart from the panes:
++	// left out with the water gauge when that is hidden (port_hud_draw)
++	if (gpMarioOriginal->mYoshi->onYoshi()
++	    && !(port_hud_hidden() & PORT_HUD_WATER)) {
+ 		switch (gpModelWaterManager->unk5D5F) {
+ 		case 1:
+ 			console->drawJuice(graph, (console->unkA2.r << 24)
+@@ -4930,6 +4943,12 @@
+ 	if (flags & 2)
+ 		updateBalloon(this);
+ 
+-	if (flags & 8)
++	if (flags & 8) {
++		// port: the HUD's hidden parts (port_ext.h, "the HUD") are left out of
++		// this draw only and put back after it, so the HUD's own logic never
++		// sees them hidden
++		port_hud_draw(this, 0);
+ 		drawConsole(this, graphics);
++		port_hud_draw(this, 1);
++	}
+ }

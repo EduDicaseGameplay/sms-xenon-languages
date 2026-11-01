@@ -1,0 +1,8 @@
+[submodule "decomp"]
+	path = decomp
+	url = git@gitverse.ru:18woldemar/sms-english.git
+	branch = xenon
+[submodule "sdk"]
+	path = sdk
+	url = git@gitverse.ru:18woldemar/sms-mod-sdk.git
+	branch = xenon

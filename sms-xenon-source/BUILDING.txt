@@ -1,0 +1,28 @@
+Building the Xbox 360 xex
+=========================
+
+You need Linux (for the preparation steps), Python 3, and a Windows machine with Visual Studio 2010
+and Microsoft's Xbox 360 SDK (XDK), which is not included and is not redistributable.
+
+1. ./build.sh
+   The PC port's own Linux build. Its configure step applies decomp-patches/ to decomp/ and writes
+   build/linux-32/patched and build/linux-32/ext-generated, which the Xbox build takes from.
+
+2. xenon/tools/xstage --no-sync
+   Lays the tree the Xbox compiler sees into ../build-xenon/stage: the patched decompilation, the
+   port's code, xenon/ (renderer, platform layer, MSVC shims), xenon/port-patches, and the mechanical
+   rewrites (xstubs.py, xcodec.py, xrewrite.py) that make the C++ build with the XDK's compiler.
+
+3. python3 xenon/tools/xproj.py . ../build-xenon/stage
+   Writes ../build-xenon/stage/xenon/sms.vcxproj.
+
+4. On Windows, with the stage directory copied over:
+   MSBuild.exe stage\xenon\sms.vcxproj /t:Rebuild /p:Configuration=Master "/p:Platform=Xbox 360"
+   The xex is stage\xenon\out\Master\default.xex.
+
+xenon/tools/xbuild [master] does steps 2-4 against a Windows VM reached over ssh as "win10vm"; change
+that name for your own setup. xenon/tools/xshaders warms a shader cache (data\shaders) in the Xenia
+emulator; the game also builds shaders itself on first use. xenon/README.md and xenon/ARCHITECTURE.md
+describe the rest of the tools and the design.
+
+No game data is in this tree: the game reads it from the player's own disc.

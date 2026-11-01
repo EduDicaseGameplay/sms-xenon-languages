@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Run ../build-xenon/out/Release/default.xex in Xenia on the headless display :1 and print the title's log.
+# Usage: xrun [seconds] (default 30). XRUN_ARGS adds emulator flags; XRUN_LOG_LEVEL=3 traces kernel calls.
+# Run tree ~/src/xbox-dev/run/sms: default.xex, GMSE01.iso (hardlinked, read-only), sms_env.txt (the
+# SMS_* switches; the console has no environment). Title log there as sms.log, emulator log
+# /tmp/xenia-sms.log. Xenia ignores SIGTERM, so the run ends with SIGKILL.
+set -uo pipefail
+here=$(dirname "$(readlink -f "$0")")
+run=~/src/xbox-dev/run/sms
+xenia=~/src/xbox-dev/xenia-canary/build/bin/Linux/Release/xenia_canary
+cp --remove-destination "$here/../../../build-xenon/out/${XRUN_CONFIG:-Release}/default.xex" "$run/"
+rm -f "$run/sms.log" /tmp/xenia-sms.log
+apu=nop
+[ -n "${XRUN_AUDIO:-}" ] && { apu=sdl; export SDL_AUDIODRIVER=disk SDL_DISKAUDIOFILE=$XRUN_AUDIO; }
+DISPLAY=:1 timeout -s KILL "${1:-30}" "$xenia" --apu=$apu --allow_game_relative_writes=true \
+  --async_shader_compilation=false --readback_resolve=full --kernel_display_gamma_type=1 \
+  --log_level=${XRUN_LOG_LEVEL:-2} ${XRUN_ARGS:-} \
+  --log_file=/tmp/xenia-sms.log --flush_log=true "$run/default.xex" > /dev/null 2>&1
+# a killed Xenia leaves its guest memory and code cache in /dev/shm
+pgrep -x xenia_canary > /dev/null || find /dev/shm -maxdepth 1 -user "$(id -u)" -name 'xenia_*' -delete
+if [ -f "$run/sms.log" ]; then tail -n 80 "$run/sms.log"; else echo "=== no sms.log"; fi

@@ -1,0 +1,36 @@
+Reason: port: with frame_rate = 60 or 120 a 1-Up mushroom about to vanish blinked at 20 Hz instead of retail's 10 Hz; its blink tests the movement-tick count as it is drawn, which samples it every fourth tick only at 30 fps; test the count of the 30 fps frame
+--- a/src/MoveBG/MapObjItem2.cpp
++++ b/src/MoveBG/MapObjItem2.cpp
+@@ -24,6 +24,9 @@
+ #include <Map/MapCollisionManager.hpp>
+ #include <Map/MapCollisionEntry.hpp>
+ #include <M3DUtil/InfectiousStrings.hpp>
++#ifdef TARGET_PC
++#include "port_framerate.h"
++#endif
+ 
+ // Parked: a binding level over TMarDirector's frame counter. The map shows no
+ // such accessor, so it stays TU-local; `TMushroom1up::perform` needs exactly
+@@ -171,9 +174,22 @@
+ 
+ void TMushroom1up::perform(u32 cue, JDrama::TGraphics* graphics)
+ {
++#ifdef TARGET_PC
++	// Port: the blink tests the movement-tick count as the 1-Up is drawn:
++	// every fourth tick at 30 fps (a 10 Hz blink, two frames on, one off),
++	// but every second or every tick at 60 and 120 (20 Hz). Test it as at
++	// 30, the count at the start of the 30 fps frame.
++	int portBlinkFrame = MapObjItem2GetDirectorFrame(gpMarDirector);
++	if (port_high_fps_active)
++		portBlinkFrame &= ~3;
++	if (unk139 != 2 && getStateTimer() < 240 && (cue & CUE_ENTRY)
++	    && portBlinkFrame % 6 > 2)
++		cue &= ~CUE_ENTRY;
++#else
+ 	if (unk139 != 2 && getStateTimer() < 240 && (cue & CUE_ENTRY)
+ 	    && MapObjItem2GetDirectorFrame(gpMarDirector) % 6 > 2)
+ 		cue &= ~CUE_ENTRY;
++#endif
+ 
+ 	if ((cue & CUE_MOVE) && unk13A == 0 && unk139 != 2 && getStateTimer() <= 0)
+ 		kill();

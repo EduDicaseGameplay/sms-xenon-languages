@@ -1,0 +1,209 @@
+Reason: port: extensions (port_ext.h, ext/) are called at the top of each frame, after everything moves each tick, when a stage's objects are set up, on stage changes, losing a life (the last one too), file select and item pickups and as the player is drawn, and can switch save states off
+--- a/src/GC2D/CardLoad.cpp
++++ b/src/GC2D/CardLoad.cpp
+@@ -1,4 +1,7 @@
+ #include <GC2D/CardLoad.hpp>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ #include <stdio.h>
+ #include <JSystem/JKernel/JKRFileLoader.hpp>
+ #include <JSystem/JDrama/JDRNameRefGen.hpp>
+@@ -2846,6 +2849,8 @@
+ 			gpMarDirector->setNextStage(1, nullptr);
+ #ifdef TARGET_PC
+ 		port_warp_after_file_select();
++		// where the chosen file starts, for extensions (port_ext.h)
++		port_ext_after_file_select();
+ #endif
+ 		gpCardManager->unmount();
+ 	} break;
+--- a/src/MoveBG/Item.cpp
++++ b/src/MoveBG/Item.cpp
+@@ -1,4 +1,7 @@
+ #include <MoveBG/Item.hpp>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ #include <MoveBG/ItemManager.hpp>
+ #include <Map/MapMirror.hpp>
+ #include <Map/Map.hpp>
+@@ -59,6 +62,10 @@
+ 
+ void TItem::taken(THitActor* param_1)
+ {
++#ifdef TARGET_PC
++	// extensions hear of every pickup (port_ext.h)
++	port_ext_item_taken(this, param_1);
++#endif
+ 	param_1->receiveMessage(this, HIT_MESSAGE_ATTACK);
+ 	kill();
+ 	if (checkMapObjFlag(MAP_OBJ_FLAG_RESPAWNING)) {
+--- a/src/Player/MarioMain.cpp
++++ b/src/Player/MarioMain.cpp
+@@ -1,4 +1,7 @@
+ #include <Player/Mario.hpp>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ #include <Player/MarioCap.hpp>
+ #include <Player/WaterGun.hpp>
+ #include <Player/Yoshi.hpp>
+@@ -217,9 +220,17 @@
+ #else
+ 			if (
+ #endif
+-			    checkFlag(MARIO_FLAG_HAS_FLUDD))
++			    checkFlag(MARIO_FLAG_HAS_FLUDD)
++#ifdef TARGET_PC
++			    // an extension may draw the player its own way (port_ext.h)
++			    && !port_ext_hide_player_model(this)
++#endif
++			    )
+ 				MarioMainGetFludd(this)->perform(CUE_ENTRY, graphics);
+ 
++#ifdef TARGET_PC
++			if (!port_ext_hide_player_model(this))
++#endif
+ 			({ typedef __typeof__(entryModels(graphics)) sms_mod_r_; void* sms_mod_t_ = SMS_MOD_SITE(0x8024D6D0); if (sms_mod_t_) ((__typeof__(sms_mod_as_free(static_cast<sms_mod_r_ (TMario::*)(JDrama::TGraphics*)>(&TMario::entryModels))))sms_mod_t_)(this, graphics); else entryModels(graphics); });
+ 			mYoshi->entry();
+ 
+--- a/src/System/Application.cpp
++++ b/src/System/Application.cpp
+@@ -996,6 +996,7 @@
+ 
+ #ifdef TARGET_PC
+ #include "port_savestate.h"
++#include "port_ext.h"
+ #include "port_savestate_menu.h"
+ #include <Camera/Camera.hpp>
+ #include <GC2D/GCConsole2.hpp>
+@@ -1198,6 +1199,15 @@
+ 
+ static void ApplicationSaveStateFrame(TApplication* app)
+ {
++	// an extension can switch save states off (multiplayer shares one world)
++	const char* offReason = nullptr;
++	if (!port_ext_allow_save_states(&offReason)) {
++		char ignored[PORT_SAVESTATE_PATH_LEN];
++		port_savestate_set_ready(0);
++		if (port_savestate_take(ignored, sizeof ignored) != PORT_SAVESTATE_NONE)
++			port_savestate_notify(offReason);
++		return;
++	}
+ 	TMarDirector* dir
+ 	    = app->mAppState == TApplication::APP_STATE_GAMEPLAY ? gpMarDirector : nullptr;
+ 	const bool playing = dir && gpMarioOriginal && dir->mState == TMarDirector::STATE_UNK4
+@@ -1281,6 +1291,8 @@
+ 	u32 nextState = APP_STATE_DEFAULT;
+ 	while (nextState <= APP_STATE_DEFAULT) {
+ #ifdef TARGET_PC
++		// extensions (port_ext.h), then save states
++		port_ext_frame();
+ 		ApplicationSaveStateFrame(this);
+ #endif
+ 		mDisplay->startRendering();
+--- a/src/System/MarDirectorDirect.cpp
++++ b/src/System/MarDirectorDirect.cpp
+@@ -1,4 +1,7 @@
+ #include <System/MarDirector.hpp>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ #include <JSystem/JDrama/JDRNameRefGen.hpp>
+ #include <JSystem/JKernel/JKRFileLoader.hpp>
+ #include <JSystem/JDrama/JDRCamera.hpp>
+@@ -217,6 +220,10 @@
+ 			u32 unk30Cue = ~someCue;
+ 			unk30->perform(unk30Cue, &local_140);
+ 			movement();
++#ifdef TARGET_PC
++			// everything has moved this tick; nothing is drawn from it yet
++			port_ext_after_movement();
++#endif
+ 			if (!(blacklistedCues & CUE_CALC_ANIM)) {
+ 				if (checkDemoFlag(DEMO_FLAG_SHINE_GET_STOP_THE_WORLD))
+ 					mShinePfLstAnm->perform(~blacklistedCues, &local_140);
+@@ -685,9 +692,18 @@
+ 	case STATE_UNK7:
+ 		if (SMSGetApplication()->getFader()->isFullyFadedOut()
+ 		    && (MSBgm::getHandle(2) == 0 || unk5C - unk60 >= 1200)) {
++#ifdef TARGET_PC
++			// an extension may carry on past the last life (port_ext.h)
++			if (TFlagManager::getInstance()->getFlag(0x20001) >= 0 || port_ext_take_game_over()) {
++#else
+ 			if (TFlagManager::getInstance()->getFlag(0x20001) >= 0) {
++#endif
+ 				TFlagManager::getInstance()->setBool(true, 0x30002);
+ 				decideNextStageOfClear();
++#ifdef TARGET_PC
++				// where Mario goes after losing a life (port_ext.h)
++				port_ext_miss_next_area();
++#endif
+ 				unk4C &= ~DIRECTOR_FLAG_MOVIE_PENDING;
+ #ifdef TARGET_PC
+ 				SMS_MOD_MOVE_STAGE(0x8029946C);
+@@ -1223,6 +1239,9 @@
+ 			if (checkFlag(DIRECTOR_FLAG_GAME_OVER_PENDING)) {
+ 				offFlag(DIRECTOR_FLAG_GAME_OVER_PENDING);
+ 				r29 = STATE_UNK7;
++#ifdef TARGET_PC
++				if (!port_ext_keep_coins_on_miss())
++#endif
+ 				TFlagManager::getInstance()->setFlag(0x40002, 0);
+ 				break;
+ 			}
+@@ -1483,6 +1502,10 @@
+ // getFludd() for the nozzle read (research c-r29, hsearch).
+ void TMarDirector::moveStage()
+ {
++#ifdef TARGET_PC
++	// an extension may send the game elsewhere (port_ext.h)
++	port_ext_move_stage();
++#endif
+ 	unkB4 = TApplication::APP_STATE_GAMEPLAY;
+ 	unkE4 = 15;
+ 	SMSGetApplication()->getFader()->setColor(JUtility::TColor(0, 0, 0, 0xff));
+--- a/src/System/MarDirectorEvent.cpp
++++ b/src/System/MarDirectorEvent.cpp
+@@ -1,4 +1,7 @@
+ #include <System/MarDirector.hpp>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ #include <System/TalkCursor.hpp>
+ #include <System/MarioGamePad.hpp>
+ #include <System/FlagManager.hpp>
+@@ -238,6 +241,11 @@
+ {
+ 	if (checkUnk4CFlag(0x2))
+ 		return;
++#ifdef TARGET_PC
++	// an extension may keep the game where it is (port_ext.h)
++	if (!port_ext_allow_next_stage(param_1, param_2))
++		return;
++#endif
+ 
+ 	TGameSequence next;
+ 	if (param_1 >= 0x100) {
+--- a/src/System/MarDirectorSetupObjects.cpp
++++ b/src/System/MarDirectorSetupObjects.cpp
+@@ -1,4 +1,7 @@
+ #include <System/MarDirector.hpp>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ #include <JSystem/JKernel/JKRFileFinder.hpp>
+ #include <JSystem/JKernel/JKRMemArchive.hpp>
+ #include <JSystem/J3D/J3DGraphBase/J3DDrawBuffer.hpp>
+@@ -553,6 +556,10 @@
+ 	preEntry(unk34);
+ 	({ typedef __typeof__(setup2()) sms_mod_r_; void* sms_mod_t_ = SMS_MOD_SITE(0x802B9760); if (sms_mod_t_) ((__typeof__(sms_mod_as_free(static_cast<sms_mod_r_ (TMarDirector::*)()>(&TMarDirector::setup2))))sms_mod_t_)(this); else setup2(); });
+ 	JKRHeap::getCurrentHeap()->getTotalFreeSize();
++#ifdef TARGET_PC
++	// extensions add their own objects to the loaded stage (port_ext.h)
++	port_ext_stage_setup();
++#endif
+ 
+ 	return 0;
+ }

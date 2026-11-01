@@ -1,0 +1,30 @@
+Reason: port: with frame_rate = 60 or 120 regrowing goop came back two or four times as fast; its stamps are drawn into the goop map (and their interval counted) once per displayed frame; stamp once per 1/30 s
+--- a/src/Map/PollutionCount.cpp
++++ b/src/Map/PollutionCount.cpp
+@@ -8,6 +8,10 @@
+ #include <JSystem/JGeometry.hpp>
+ #include <JSystem/JUtility/JUTTexture.hpp>
+ #include <JSystem/J3D/J3DGraphBase/J3DSys.hpp>
++#ifdef TARGET_PC
++#include <System/MarDirector.hpp>
++#include "port_framerate.h"
++#endif
+ #include <JSystem/J3D/J3DGraphBase/J3DDrawBuffer.hpp>
+ #include <JSystem/J3D/J3DGraphBase/J3DShape.hpp>
+ #include <JSystem/J3D/J3DGraphAnimator/J3DModel.hpp>
+@@ -585,6 +589,15 @@
+ 	GXSetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
+ 	GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP);
+ 
++#ifdef TARGET_PC
++	// Port: the regrowing goop is stamped (and its interval counted) as the
++	// layer is drawn, once a frame, so at 60 or 120 fps it grew back two or
++	// four times as fast. Stamp once per 1/30 s; the state above stays set
++	// for cleanProhibitArea, which follows. The director counts a movement
++	// tick in unk5C, so every layer of a frame sees the same value.
++	if (!port_native_frame_step(gpMarDirector->unk5C))
++		return;
++#endif
+ 	for (int i = 0; i < getRevivalTexStampNum(); ++i) {
+ 		TPollutionRevivalTexStamp& stamp = mRevivalTexStamps[i];
+ 

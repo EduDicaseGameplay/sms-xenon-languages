@@ -1,0 +1,48 @@
+Reason: extensions (ext/, port_ext.h) hear of each ground pound this game's player lands on what it stands on (TMario's landing: a tub, a platform) and may stop one: multiplayer passes them to the other games
+
+--- a/src/Player/MarioJump.cpp
++++ b/src/Player/MarioJump.cpp
+@@ -10,6 +10,14 @@
+ #include <MarioUtil/DrawUtil.hpp>
+ #ifdef TARGET_PC
+ #include <sms_modhook.h>
++#include "port_ext.h"
++
++// port: extensions hear of each ground pound this game's player lands on what
++// it stands on (port_ext.h: ext/multiplayer passes them to the other games)
++static inline BOOL portGroundHit(THitActor* to, THitActor* from, u32 message)
++{
++	return port_ext_object_hit(to, from, message) ? FALSE : to->receiveMessage(from, message);
++}
+ 
+ // checkBackTrig as retail inlines it into jumpMain's handlers, stayWall and
+ // landing: each inlined copy has its own setPlayerVelocity call, which a mod
+@@ -1352,20 +1360,20 @@
+ 					emitParticle(PARTICLE_MS_M_AMIATTACK, &mPosition);
+ 					f32 oldY    = mPosition.y;
+ 					mPosition.y = oldY - 160.0f;
+-					((THitActor*)mGroundPlane->getActor())
+-					    ->receiveMessage(this, HIT_MESSAGE_SUPER_HIP_DROP);
++					portGroundHit((THitActor*)mGroundPlane->getActor(), this,
++					                  HIT_MESSAGE_SUPER_HIP_DROP);
+ 					startVoice(MSD_SE_MV28_SPRISE_SMALL_01);
+ 					return changePlayerStatus(MARIO_STATUS_KICK_ROOF_ROLL_DOWN,
+ 					                          0, 0);
+ 				}
+ 				if (mStatusState == 2) {
+-					((THitActor*)mGroundPlane->getActor())
+-					    ->receiveMessage(this, HIT_MESSAGE_HIP_DROP);
++					portGroundHit((THitActor*)mGroundPlane->getActor(), this,
++					                  HIT_MESSAGE_HIP_DROP);
+ 				} else {
+-					((THitActor*)mGroundPlane->getActor())
+-					    ->receiveMessage(this, HIT_MESSAGE_SUPER_HIP_DROP);
+-					((THitActor*)mGroundPlane->getActor())
+-					    ->receiveMessage(this, HIT_MESSAGE_HIP_DROP);
++					portGroundHit((THitActor*)mGroundPlane->getActor(), this,
++					                  HIT_MESSAGE_SUPER_HIP_DROP);
++					portGroundHit((THitActor*)mGroundPlane->getActor(), this,
++					                  HIT_MESSAGE_HIP_DROP);
+ 				}
+ 			}
+ 

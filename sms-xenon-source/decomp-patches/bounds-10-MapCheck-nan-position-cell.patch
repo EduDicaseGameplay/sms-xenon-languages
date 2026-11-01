@@ -1,0 +1,56 @@
+Reason: port: a NaN position's grid cell converts to 0x80000000; the console's 32-bit address wraps to cell 0 on that axis, a 64-bit x86 host read gigabytes away (Eclipse Peach's Castle crash on Mac/Rosetta, sms+0x1F5A7C). checkWalls, checkRoof and checkGround read cell 0 for a NaN axis, as the console does
+--- a/src/Map/MapCheck.cpp
++++ b/src/Map/MapCheck.cpp
+@@ -6,6 +6,19 @@
+ #include <MSound/MSSetSound.hpp>
+ #include <MSound/MSoundBGM.hpp>
+ 
++#ifdef TARGET_PC
++// The port: a NaN position passes the grid's bounds tests (every comparison
++// with NaN is false), and its cell number converts to 0x80000000. On the
++// console the cell's address then wraps around 32 bits to cell 0 on that axis,
++// which is read; on a 64-bit x86 host it pointed gigabytes away and the game
++// crashed (Eclipse's Peach's Castle on a Mac under Rosetta). Read the cell
++// the console reads.
++static inline int PortGridCell(f32 v) { return v != v ? 0 : (int)v; }
++#define PORT_GRID_CELL(v) PortGridCell(v)
++#else
++#define PORT_GRID_CELL(v) (v)
++#endif
++
+ // fabricated
+ static inline f32 skewProduct(f32 x1, f32 y1, f32 x2, f32 y2)
+ {
+@@ -165,8 +178,8 @@
+ 	    || mGridExtentY <= param_1->mCenter.z)
+ 		return 0;
+ 
+-	int gridX = (param_1->mCenter.x + getGridExtentX()) * (1.0f / 1024);
+-	int gridZ = (param_1->mCenter.z + mGridExtentY) * (1.0f / 1024);
++	int gridX = PORT_GRID_CELL((param_1->mCenter.x + getGridExtentX()) * (1.0f / 1024));
++	int gridZ = PORT_GRID_CELL((param_1->mCenter.z + mGridExtentY) * (1.0f / 1024));
+ 
+ 	int iVar6
+ 	    = checkWallList(getGridRoot18(gridX, gridZ).getWallList(), param_1);
+@@ -245,8 +258,8 @@
+ 		return 9999999.0f;
+ 	}
+ 
+-	int gridX = (x + getGridExtentX()) * (1.0f / 1024);
+-	int gridZ = (z + mGridExtentY) * (1.0f / 1024);
++	int gridX = PORT_GRID_CELL((x + getGridExtentX()) * (1.0f / 1024));
++	int gridZ = PORT_GRID_CELL((z + mGridExtentY) * (1.0f / 1024));
+ 
+ 	const TBGCheckListRoot& gridRoot = getGridRoot18(gridX, gridZ);
+ 	const TBGCheckList* roofList = gridRoot.getRoofList();
+@@ -336,8 +349,8 @@
+ 		return -32767.0f;
+ 	}
+ 
+-	int gridX = (x + mGridExtentX) * (1.0f / 1024);
+-	int gridZ = (z + mGridExtentY) * (1.0f / 1024);
++	int gridX = PORT_GRID_CELL((x + mGridExtentX) * (1.0f / 1024));
++	int gridZ = PORT_GRID_CELL((z + mGridExtentY) * (1.0f / 1024));
+ 
+ 	const TBGCheckListRoot& gridRoot = getGridRoot18(gridX, gridZ);
+ 	const TBGCheckData* local_60;

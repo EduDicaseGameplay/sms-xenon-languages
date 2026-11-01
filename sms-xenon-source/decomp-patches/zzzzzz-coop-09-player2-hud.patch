@@ -1,0 +1,46 @@
+Reason: port: split-screen co-op (ext/coop) - TGCConsole2::perform lets co-op run player 2's own HUD with the game's and draw both a part at a time, each player's health and FLUDD in their own view; a draw of the meters alone runs no code mod's draw callbacks and draws no radar (port_hud_drawing_rest)
+--- a/src/GC2D/GCConsole2.cpp
++++ b/src/GC2D/GCConsole2.cpp
+@@ -592,6 +592,9 @@
+ extern "C" void GXPC_HudPaneBegin(float x1, float x2);
+ extern "C" void GXPC_HudPaneEnd(void);
+ #include "port_radar.h"
++// Split-screen co-op (ext/coop): player 2's own HUD, for their health and
++// FLUDD, kept and drawn with this one; each player's in their own view.
++extern "C" int port_coop_hud(void* console, unsigned flags, void* graphics);
+ #endif
+ 
+ TGCConsole2::TGCConsole2(const char* name)
+@@ -4856,7 +4859,9 @@
+ 	// BetterSunshineEngine (drawStageCallbacks, retail 0x80143F14 in
+ 	// perform): the draw pass's first setup2D call runs the mod's stage draw
+ 	// callbacks, which set the orthograph up themselves.
+-	if (void* sms_mod_t_ = SMS_MOD_SITE(0x80143F14))
++	// (once a frame: not again for a draw of the HUD's meters alone, as
++	// split-screen co-op makes, port_hud_drawing_rest)
++	if (void* sms_mod_t_ = port_hud_drawing_rest() ? SMS_MOD_SITE(0x80143F14) : nullptr)
+ 		((void (*)(J2DGrafContext*))sms_mod_t_)(&graph);
+ 	else
+ #endif
+@@ -4928,7 +4933,7 @@
+ 	// the radar at the HUD's top right, over everything else of the HUD
+ 	// (src/radar.cpp), told where the life meter is this frame (its back,
+ 	// l_ba, in the group l_0 that slides in and out) so it can make room
+-	if (port_radar) {
++	if (port_radar && port_hud_drawing_rest()) {
+ 		const J2DPane* group = console->unk1C4->getPane();
+ 		const J2DPane* back  = console->unk174->getPane();
+ 		if (group->isVisible() && back->isVisible()) {
+@@ -4963,6 +4968,12 @@
+ // regress exact sites (docs/catalog/frame-model.md, c-s2).
+ void TGCConsole2::perform(u32 flags, JDrama::TGraphics* graphics)
+ {
++#ifdef TARGET_PC
++	// split-screen co-op runs player 2's HUD with this one, and draws each
++	// player's health and FLUDD in their own view (ext/coop)
++	if (port_coop_hud(this, flags, graphics))
++		return;
++#endif
+ 	if (flags & 1)
+ 		updateConsole(this);
+ 

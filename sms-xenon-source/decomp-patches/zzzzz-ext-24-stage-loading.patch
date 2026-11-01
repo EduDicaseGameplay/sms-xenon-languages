@@ -1,0 +1,32 @@
+Reason: extensions (ext/, port_ext.h) hear of every stage about to load, its episode chosen (after a world's episode select, after TMarDirector::moveStage picks the plaza's), before the movie it opens with, and may load another or change where Mario comes from: the native mod API's SMS_EV_STAGE_LOADING (ext/modapi)
+--- a/src/System/Application.cpp
++++ b/src/System/Application.cpp
+@@ -82,6 +82,10 @@
+ 
+ #ifdef TARGET_PC
+ extern "C" void sms_mod_start(void);
++#include "port_ext.h"
++// The stage's opening movie (checkAdditionalMovie) was this pass's: the next
++// pass loads that stage (port_ext_stage_loading's afterMovie).
++static bool portStageMovie;
+ #endif
+ #ifdef TARGET_PC
+ #include <sms_modhook.h>
+@@ -671,7 +675,17 @@
+ 		} break;
+ 
+ 		case APP_STATE_GAMEPLAY:
++#ifdef TARGET_PC
++			// extensions hear of the stage about to load, its episode chosen,
++			// and may load another, before the movie it opens with is decided
++			// (port_ext.h's chooseStageLoad); not again after that movie
++			port_ext_stage_loading(portStageMovie);
++			portStageMovie = false;
++#endif
+ 			if (checkAdditionalMovie()) {
++#ifdef TARGET_PC
++				portStageMovie = true;
++#endif
+ 				// Show a movie before entering a stage, e.g. the secret levels
+ 				SMSSetupMovieRenderingInfo(mDisplay);
+ 				mFader->setDisplaySize((u16)SMSGetGameRenderWidth(),

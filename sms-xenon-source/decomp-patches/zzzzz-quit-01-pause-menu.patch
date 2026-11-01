@@ -1,0 +1,361 @@
+Reason: port: QUIT GAME in the pause menu (src/pause_quit.cpp), after EXIT AREA (or in its place in Delfino Plaza): a picture made like EXIT AREA's, kept outside TPauseMenu2 (Eclipse's code reads its fields); picking it opens the quit prompt over the menu
+--- a/src/GC2D/PauseMenu2.cpp
++++ b/src/GC2D/PauseMenu2.cpp
+@@ -20,6 +20,7 @@
+ #include <JSystem/JUtility/JUTColor.hpp>
+ #include <JSystem/JUtility/JUTRect.hpp>
+ #include <JSystem/JUtility/JUTResFont.hpp>
++#include <JSystem/JUtility/JUTTexture.hpp>
+ #include <MarioUtil/RumbleMgr.hpp>
+ #include <MSound/MSound.hpp>
+ #include <System/Application.hpp>
+@@ -35,6 +36,7 @@
+ extern JPAEmitterManager* gpEmitterManager4D2;
+ 
+ #ifdef TARGET_PC
++#include "port_pause_quit.h"
+ #include "port_pause_tracker.h"
+ #include "port_savestate.h"
+ #include "port_savestate_menu.h"
+@@ -220,6 +222,110 @@
+ 	menu->mSelectionConfirmed = true;
+ 	menu->setDrawEnd();
+ }
++
++// Port: QUIT GAME (src/pause_quit.cpp), an item after the menu's own: after
++// EXIT AREA, or after SAVE where there is none (Delfino Plaza), in EXIT
++// AREA's place. It is a picture as theirs are, made from EXIT AREA's (tx_3's
++// PIC1 in pause_1.blo) with its own lettering. The menu's fields stay where
++// retail has them (Eclipse's code reads and sets them, mNumItems among them),
++// so it is kept here, as item mNumItems.
++static J2DPicture* sQuitItem;
++static JUTRect sQuitBounds;
++static s32 sMenuPaneY; // t_0's y in the layout, before the moves in load()
++
++static inline bool PauseIsQuitItem(const TPauseMenu2* menu, s32 i)
++{
++	return sQuitItem && i == menu->mNumItems;
++}
++
++static inline s32 PauseItemCount(const TPauseMenu2* menu)
++{
++	return menu->mNumItems + (sQuitItem ? 1 : 0);
++}
++
++static inline J2DPicture* PauseItem(TPauseMenu2* menu, s32 i)
++{
++	return PauseIsQuitItem(menu, i) ? sQuitItem : menu->mMenuItems[i];
++}
++
++static inline JUTRect& PauseItemBounds(TPauseMenu2* menu, s32 i)
++{
++	return PauseIsQuitItem(menu, i) ? sQuitBounds : menu->mOrigItemBounds[i];
++}
++
++static u32 PauseBE32(const u8* p)
++{
++	return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3];
++}
++
++// The menu gets the item when there is a picture for it.
++static void PauseQuitItemMake(TPauseMenu2* menu, J2DPicture* exitArea)
++{
++	sQuitItem             = nullptr;
++	int artWidth          = 0;
++	const ResTIMG* art    = PauseQuitArt(&artWidth);
++	const u8* blo         = (const u8*)JKRGetResource("/game_6/scrn/pause_1.blo");
++	if (!art || !exitArea || !exitArea->getTexture(0) || !blo || memcmp(blo, "SCRNblo1", 8) != 0)
++		return;
++	// tx_3's PIC1 (the layout is big-endian, as J2DScreen reads it)
++	const u32 size = PauseBE32(blo + 8);
++	for (u32 at = 0x20; at + 16 <= size;) {
++		const u32 n = PauseBE32(blo + at + 4);
++		if (n < 8 || at + n > size)
++			return;
++		if (!memcmp(blo + at, "PIC1", 4) && !memcmp(blo + at + 12, "tx_3", 4)) {
++			JSUMemoryInputStream stream(blo + at, n);
++			J2DPicture* item = new J2DPicture(menu->mMenuPane, &stream, true);
++			item->hide();
++			if (!item->getTexture(0))
++				return;
++			item->changeTexture(art, 0);
++			item->setUserInfo('tx_4');
++			// as wide as its lettering, at EXIT AREA's scale; placed in loadAfter()
++			const JUTRect& bounds = exitArea->getBounds();
++			const s32 w           = artWidth * bounds.getWidth() / exitArea->getTexture(0)->getWidth();
++			item->setBounds(JUTRect(0, 0, w, bounds.getHeight()));
++			// it turns about its own middle (the layout's base position was
++			// worked out for EXIT AREA's size)
++			item->setBasePosition(item->mBasePosition);
++			sQuitItem = item;
++			return;
++		}
++		at += n;
++	}
++}
++
++// The items lean 12 degrees, their centres on a slant down and to the right.
++// QUIT GAME goes on under the others: in EXIT AREA's place without it, else
++// a fourth row, the rows a little closer (36 apart, not 40 and 39) to keep
++// it clear of the stage name under them; and where the menu comes down 30 for
++// a stage with no episode name (load(), and Eclipse's own), only 15.
++static void PauseQuitItemLayout(TPauseMenu2* menu)
++{
++	if (!sQuitItem)
++		return;
++	const JUTRect& first = menu->mMenuItems[0]->getBounds();
++	const JUTRect& third = menu->mMenuItems[2]->getBounds();
++	const f32 x0 = (first.x1 + first.x2) * 0.5f, y0 = (first.y1 + first.y2) * 0.5f;
++	const f32 slant = ((third.x1 + third.x2) * 0.5f - x0) / ((third.y1 + third.y2) * 0.5f - y0);
++	const bool closer = menu->mNumItems == 3;
++	const f32 pitch   = closer ? 36.0f : ((third.y1 + third.y2) * 0.5f - y0) / 2;
++	if (closer) {
++		const s32 down = menu->mMenuPane->getBounds().y1 - sMenuPaneY;
++		if (down > 15)
++			menu->mMenuPane->add(0, 15 - down);
++	}
++	for (s32 i = 1; i < PauseItemCount(menu); i++) {
++		if (!closer && !PauseIsQuitItem(menu, i))
++			continue; // the game's own rows stay where they are
++		J2DPicture* item = PauseItem(menu, i);
++		const JUTRect& r = item->getBounds();
++		const s32 w = r.getWidth(), h = r.getHeight();
++		const s32 x = (s32)(x0 + slant * pitch * i - w * 0.5f + 0.5f);
++		const s32 y = (s32)(y0 + pitch * i - h * 0.5f + 0.5f);
++		item->setBounds(JUTRect(x, y, x + w, y + h));
++	}
++}
+ #endif
+ 
+ // rogue includes needed for matching sinit & bss
+@@ -358,6 +464,11 @@
+ 
+ 	mBackground = mScreen->search('mask');
+ 	mMenuPane   = mScreen->search('t_0');
++#ifdef TARGET_PC
++	// QUIT GAME, made from EXIT AREA (above)
++	sMenuPaneY = mMenuPane->getBounds().y1;
++	PauseQuitItemMake(this, (J2DPicture*)mScreen->search('tx_3'));
++#endif
+ 
+ 	for (s32 i = 0; i < 5; i++) {
+ 		mPauseLetters[i] = PauseSearchPicture(mScreen, 'pa00' + i);
+@@ -366,7 +477,12 @@
+ 	for (s32 i = 0; i < 3; i++) {
+ 		mMenuItems[i] = (J2DPicture*)mScreen->search('tx_1' + i);
+ 
++#ifdef TARGET_PC
++		// with QUIT GAME in EXIT AREA's place they stay where they are
++		if (mNumItems == 2 && !sQuitItem) {
++#else
+ 		if (mNumItems == 2) {
++#endif
+ 			mMenuItems[i]->add(
+ 			    0, VERSION_SELECT(GMSJ01(14), GMSP01(20), GMSE01(20)));
+ 		}
+@@ -473,8 +589,9 @@
+ 
+ 	mItemColor = PauseMenuItem(mMenuItems, 0)->getWhite();
+ 
+-	for (s32 i = 0; i < mNumItems; i++) {
+-		mOrigItemBounds[i] = PauseMenuItem(mMenuItems, i)->getBounds();
++	PauseQuitItemLayout(this);
++	for (s32 i = 0; i < PauseItemCount(this); i++) {
++		PauseItemBounds(this, i) = PauseItem(this, i)->getBounds();
+ 	}
+ 
+ 	for (s32 i = 0; i < 5; i++) {
+@@ -529,20 +646,20 @@
+ 
+ 	// Animate in menu items.
+ 	if (mFadeAnim >= 30.0f) {
+-		for (s32 i = 0; i < mNumItems; ++i) {
+-			if (!mMenuItems[i]->isVisible()) {
+-				mMenuItems[i]->show();
+-				mMenuItems[i]->setAlpha(0);
++		for (s32 i = 0; i < PauseItemCount(this); ++i) {
++			if (!PauseItem(this, i)->isVisible()) {
++				PauseItem(this, i)->show();
++				PauseItem(this, i)->setAlpha(0);
+ 			}
+ 
+-			JUTRect rect = mOrigItemBounds[i];
++			JUTRect rect = PauseItemBounds(this, i);
+ 
+ 			if (mFadeAnim <= 40.0f) {
+ 				s32 hx = 3.0f * (mFadeAnim - 35.0f);
+ 				s32 hy = 1.5f * (mFadeAnim - 35.0f);
+ 				rect.reform(-hx, -hy, hx, hy);
+ 
+-				mMenuItems[i]->setBounds(rect);
++				PauseItem(this, i)->setBounds(rect);
+ 
+ 				// TODO: This looks a bit fake...
+ 				f32 alphaF = 26.0f * (mFadeAnim - 30.0f);
+@@ -550,7 +667,7 @@
+ 				if ((s32)alphaF > 0xFF) {
+ 					alpha = 0xFF;
+ 				}
+-				mMenuItems[i]->setAlpha(alpha);
++				PauseItem(this, i)->setAlpha(alpha);
+ 
+ 				// The first item gets some extra "bounce".
+ 				if (i == 0) {
+@@ -562,7 +679,7 @@
+ 				s32 hy = 1.5f * (mFadeAnim - 45.0f);
+ 				rect.reform(hx, hy, -hx, -hy);
+ 
+-				mMenuItems[i]->setBounds(rect);
++				PauseItem(this, i)->setBounds(rect);
+ 			} else if (mFadeAnim >= 46.0f) {
+ 				// Fade in animation complete; set state to open.
+ 				if (mState != MENU_OPEN) {
+@@ -587,7 +704,7 @@
+ 	// Delete emitter and reset selected item back to its original size.
+ 	if (mFadeAnim == 0.0f && mEmitter != 0) {
+ 		gpEmitterManager4D2->forceDeleteEmitter(mEmitter);
+-		mMenuItems[mSelectedItem]->setBounds(mOrigItemBounds[mSelectedItem]);
++		PauseItem(this, mSelectedItem)->setBounds(PauseItemBounds(this, mSelectedItem));
+ 	}
+ 
+ 	if (mFadeAnim <= 10.0f) {
+@@ -619,12 +736,12 @@
+ 		}
+ 
+ 		// ... and now shrink the menu items in the same manner.
+-		for (s32 i = 0; i < mNumItems; i++) {
+-			JUTRect rect = mMenuItems[i]->getBounds();
++		for (s32 i = 0; i < PauseItemCount(this); i++) {
++			JUTRect rect = PauseItem(this, i)->getBounds();
+ 			rect.add(0.025f * -rect.x1 + 0.01f * rect.getWidth(),
+ 			         0.025f * -rect.y1 + 0.01f * rect.getHeight());
+ 			rect.resize(0.98f * rect.getWidth(), 0.98f * rect.getHeight());
+-			mMenuItems[i]->setBounds(rect);
++			PauseItem(this, i)->setBounds(rect);
+ 		}
+ 
+ 		// Rotate menu clockwise.
+@@ -669,6 +786,12 @@
+ 		s32 curSelectedItem = mSelectedItem;
+ 		if (mGamePad->checkFrameMeaning(0x21)) {
+ 			// Confirm currently selected item.
++			if (PauseIsQuitItem(this, curSelectedItem)) {
++				// QUIT GAME: the quit prompt, over the menu, which stays open
++				SMSGetMSound()->startSoundSystemSE(MSD_SE_SY_DECIDE, 0,
++				                                   nullptr, 0);
++				PauseQuitRequest();
++			} else
+ 			switch (curSelectedItem) {
+ 			case 0:
+ 				mSelectionConfirmed = true;
+@@ -703,22 +826,22 @@
+ 			setDrawEnd();
+ 		} else if (mGamePad->checkFrameMeaning(0x4)) {
+ 			// Select the next item.
+-			if (mNumItems > 2) {
+-				mSelectedItem = curSelectedItem < (mNumItems - 1)
++			if (PauseItemCount(this) > 2) {
++				mSelectedItem = curSelectedItem < (PauseItemCount(this) - 1)
+ 				                    ? curSelectedItem + 1
+ 				                    : 0;
+ 			} else {
+ 				// don't loop back around with less than three items
+-				mSelectedItem = mNumItems - 1;
++				mSelectedItem = PauseItemCount(this) - 1;
+ 			}
+ 			if (mSelectedItem != curSelectedItem) {
+ 				SMSGetMSound()->startSoundSystemSE(MSD_SE_SY_CURSOR,
+ 				                                   0, nullptr, 0);
+ 
+-				JUTRect& bounds = mOrigItemBounds[curSelectedItem];
+-				mMenuItems[mSelectedItem]->setWhite(mItemColor);
+-				mMenuItems[curSelectedItem]->setWhite(JUtility::TColor());
+-				mMenuItems[curSelectedItem]->setBounds(bounds);
++				JUTRect& bounds = PauseItemBounds(this, curSelectedItem);
++				PauseItem(this, mSelectedItem)->setWhite(mItemColor);
++				PauseItem(this, curSelectedItem)->setWhite(JUtility::TColor());
++				PauseItem(this, curSelectedItem)->setBounds(bounds);
+ 
+ 				mBounceAnim = 0.0f; // reset animation
+ 
+@@ -730,9 +853,9 @@
+ 			}
+ 		} else if (mGamePad->checkFrameMeaning(0x2)) {
+ 			// Select the previous item.
+-			if (mNumItems > 2) {
++			if (PauseItemCount(this) > 2) {
+ 				mSelectedItem = (curSelectedItem == 0u)
+-				                    ? mNumItems - 1
++				                    ? PauseItemCount(this) - 1
+ 				                    : curSelectedItem - 1;
+ 			} else {
+ 				mSelectedItem = 0;
+@@ -742,10 +865,10 @@
+ 				SMSGetMSound()->startSoundSystemSE(MSD_SE_SY_CURSOR,
+ 				                                   0, nullptr, 0);
+ 
+-				JUTRect& bounds = mOrigItemBounds[curSelectedItem];
+-				mMenuItems[mSelectedItem]->setWhite(mItemColor);
+-				mMenuItems[curSelectedItem]->setWhite(JUtility::TColor());
+-				mMenuItems[curSelectedItem]->setBounds(bounds);
++				JUTRect& bounds = PauseItemBounds(this, curSelectedItem);
++				PauseItem(this, mSelectedItem)->setWhite(mItemColor);
++				PauseItem(this, curSelectedItem)->setWhite(JUtility::TColor());
++				PauseItem(this, curSelectedItem)->setBounds(bounds);
+ 
+ 				mBounceAnim = 0.0f;
+ 
+@@ -756,14 +879,14 @@
+ 			}
+ 		}
+ 
+-		JUTRect animItemBounds = mOrigItemBounds[mSelectedItem];
++		JUTRect animItemBounds = PauseItemBounds(this, mSelectedItem);
+ 		if (mBounceAnim == mEffectKeyFrame) {
+ 			// Spawn a "spark" effect from the selected item.
+-			f32 width = mMenuItems[mSelectedItem]->getWidth();
++			f32 width = PauseItem(this, mSelectedItem)->getWidth();
+ 			f32 emitterWidth = width / mEffectStretch;
+ 
+ 			JUTRect itemBounds
+-			    = mMenuItems[mSelectedItem]->getGlobalBounds();
++			    = PauseItem(this, mSelectedItem)->getGlobalBounds();
+ 
+ 			JGeometry::TVec3<f32> pos(
+ 			    itemBounds.x1 + 0.5f * itemBounds.getWidth(),
+@@ -780,18 +903,18 @@
+ 			s32 hw = mBounceAnim;
+ 			s32 hh = 0.5f * mBounceAnim;
+ 			animItemBounds.reform(-hw, -hh, hw, hh);
+-			mMenuItems[mSelectedItem]->setBounds(animItemBounds);
++			PauseItem(this, mSelectedItem)->setBounds(animItemBounds);
+ 
+ 			s32 colorShift = 10.0f * mBounceAnim;
+-			mMenuItems[mSelectedItem]->setWhite(mItemColor + (colorShift << 24));
++			PauseItem(this, mSelectedItem)->setWhite(mItemColor + (colorShift << 24));
+ 		} else if (mBounceAnim < 35.0f) {
+ 			s32 hw = mBounceAnim - 35.0f;
+ 			s32 hh = 0.5f * (mBounceAnim - 35.0f);
+ 			animItemBounds.reform(hw, hh, -hw, -hh);
+-			mMenuItems[mSelectedItem]->setBounds(animItemBounds);
++			PauseItem(this, mSelectedItem)->setBounds(animItemBounds);
+ 
+ 			s32 colorShift = (35.0f - mBounceAnim) * 10.0f;
+-			mMenuItems[mSelectedItem]->setWhite(mItemColor + (colorShift << 24));
++			PauseItem(this, mSelectedItem)->setWhite(mItemColor + (colorShift << 24));
+ 		} else {
+ 			// Loop animation.
+ 			mBounceAnim = -0.5f;
+@@ -893,9 +1016,9 @@
+ 	PauseMenuItem(mMenuItems, 0)->mWhite   = mItemColor;
+ 	PauseMenuItem(mMenuItems, 0)->mVisible = false;
+ 
+-	for (s32 i = 1; i < mNumItems; ++i) {
+-		PauseMenuItem(mMenuItems, i)->mWhite   = 0xFFFFFFFF;
+-		PauseMenuItem(mMenuItems, i)->mVisible = false;
++	for (s32 i = 1; i < PauseItemCount(this); ++i) {
++		PauseItem(this, i)->mWhite   = 0xFFFFFFFF;
++		PauseItem(this, i)->mVisible = false;
+ 	}
+ 
+ 	mPauseLetters[0]->mRotation = u16(mOrigLetterAngles[0] + 180.0f);

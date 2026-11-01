@@ -1,0 +1,59 @@
+Xbox 360: [perf] times the GX core's own work (display lists, pipe commands, parsing, vertex loading) less the renderer's time inside it, for the per-frame split of the bench (xenon/platform/xe_bench.cpp). Applied by xenon/tools/xstage to the staged copy only.
+--- a/platform/gx/src/gx_fifo.cpp	2026-10-28 00:34:56.253654708 +0500
++++ b/platform/gx/src/gx_fifo.cpp	2026-10-28 00:34:56.336135527 +0500
+@@ -502,6 +502,31 @@
+ double g_decodeSeconds = 0;  // detailed timers: time in the vertex loader
+ extern double g_flushSeconds;
+ 
++#ifdef _XBOX
++// [perf] on the Xbox 360: the GX core's own time (display lists, the pipe's commands, their parsing
++// and vertex loading), less the renderer's inside it (xeRenderSeconds: drawing, copies, textures,
++// GPU waits). Only the outermost scope counts; GX runs on one host thread.
++double g_coreSeconds = 0;
++double xeRenderSeconds();
++struct CoreClock {
++    static int depth;
++    double t0, r0;
++    CoreClock() {
++        if (depth++ == 0) {
++            t0 = monoSeconds();
++            r0 = xeRenderSeconds();
++        }
++    }
++    ~CoreClock() {
++        if (--depth == 0) g_coreSeconds += monoSeconds() - t0 - (xeRenderSeconds() - r0);
++    }
++};
++int CoreClock::depth = 0;
++#define GX_CORE_CLOCK CoreClock coreClock
++#else
++#define GX_CORE_CLOCK
++#endif
++
+ // ------------------------------------------------------------------ packed vertex formats
+ // A batch's vertices carry only the attributes the GX vertex descriptor
+ // enables (position always); the renderer feeds the others as constant
+@@ -987,6 +1012,7 @@
+ }
+ 
+ void runCommands(const uint8_t* data, uint32_t size) {
++    GX_CORE_CLOCK;
+     uint32_t need = 0;
+     uint32_t used = parse(data, size, &need);
+     if (used < size) logmsg("display list ends inside a command (%u of %u bytes used)", used, size);
+@@ -1240,6 +1266,7 @@
+ }
+ 
+ void callDisplayList(const uint8_t* data, uint32_t size) {
++    GX_CORE_CLOCK;
+     if (!data || !dlCacheEnabled() || !rendererReady() || s_dlRec) {
+         runCommands(data, size);
+         return;
+@@ -1376,6 +1403,7 @@
+ }
+ 
+ static void pipeRun() {
++    GX_CORE_CLOCK;
+     uint32_t need = 1;
+     uint32_t used = parse(s_pipeBuf, s_pipeLen, &need);
+     if (used == s_pipeLen) {

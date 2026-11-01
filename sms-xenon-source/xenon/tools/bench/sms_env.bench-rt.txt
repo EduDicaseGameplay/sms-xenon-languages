@@ -1,0 +1,8 @@
+# Bench at the real clock (vsync, audio out, the DSP on its own thread): every run of bench.txt in one launch
+SMS_DISC_IMAGE=game:\GMSE01.iso
+SMS_TRACE_SYNC=+0
+SMS_TEXTURE_PACKS=0
+SMS_XE_SCALE=1
+SMS_WIDESCREEN=0
+SMS_FRAME_RATE=30
+SMS_XE_BENCH=game:\bench.txt

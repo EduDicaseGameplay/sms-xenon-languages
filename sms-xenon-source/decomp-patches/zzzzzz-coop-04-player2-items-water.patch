@@ -1,0 +1,64 @@
+Reason: port: split-screen co-op (ext/coop) - the item group (Shines, coins, 1-Ups) is hit-checked against player 2 too, and FLUDD water lives near either player, so player 2 picks items up and sprays far from Mario
+--- a/src/Strategic/ObjHitCheck.cpp
++++ b/src/Strategic/ObjHitCheck.cpp
+@@ -234,6 +234,13 @@
+ 		(*it)->mColCount = 0;
+ }
+ 
++#ifdef TARGET_PC
++// Split-screen co-op (ext/coop): player 2 while they play, or null. The item
++// group (Shines, coins, 1-Ups) is checked against the player alone, so player
++// 2 touches items as Mario does.
++extern "C" THitActor* port_coop_player2_actor(void);
++#endif
++
+ void TObjHitCheck::checkGroupPlayer(TIdxGroupObj* group)
+ {
+ 	JGadget::TList_pointer<THitActor*>& children = group->getChildren();
+@@ -252,6 +259,14 @@
+ 		                  mario->getDamageHeight())) {
+ 			suffererIsInAttackArea(*it, mario);
+ 		}
++#ifdef TARGET_PC
++		if (THitActor* p2 = port_coop_player2_actor())
++			if (!(*it)->checkHitFlag(HIT_FLAG_NO_COLLISION)
++			    && checkDistance((*it)->mPosition, (*it)->getAttackRadius(),
++			                     (*it)->getAttackHeight(), p2->mPosition,
++			                     p2->getDamageRadius(), p2->getDamageHeight()))
++				suffererIsInAttackArea(*it, p2);
++#endif
+ 	}
+ }
+ 
+--- a/src/Player/ModelWaterManager.cpp
++++ b/src/Player/ModelWaterManager.cpp
+@@ -53,6 +53,11 @@
+ 
+ TModelWaterManager* gpModelWaterManager;
+ TWaterHitActor TModelWaterManager::mStaticHitActor;
++
++#ifdef TARGET_PC
++// Split-screen co-op (ext/coop): player 2's position while they play, or null.
++extern "C" const Vec* port_coop_player2_pos(void);
++#endif
+ GXColor gModelWaterManagerWaterColor[4] = {
+ 	{ 0x3C, 0x46, 0x78, 0x14 },
+ 	{ 0xFE, 0xA8, 0x02, 0x6E },
+@@ -514,7 +519,17 @@
+ 		JGeometry::TVec3<f32> thing;
+ 		thing.sub(SMS_GetMarioPos(), mParticlePositionSOA[i]);
+ 
++#ifdef TARGET_PC
++		// co-op: water lives near either player (player 2's spray far from Mario)
++		const Vec* p2pos = port_coop_player2_pos();
++		const bool nearP2 = p2pos
++		                    && (p2pos->x - mParticlePositionSOA[i].x) * (p2pos->x - mParticlePositionSOA[i].x)
++		                               + (p2pos->z - mParticlePositionSOA[i].z) * (p2pos->z - mParticlePositionSOA[i].z)
++		                           <= fVar1;
++		if (!nearP2 && thing.x * thing.x + thing.z * thing.z > fVar1) {
++#else
+ 		if (thing.x * thing.x + thing.z * thing.z > fVar1) {
++#endif
+ 			mParticleLifetimeSOA[i] = 0.0f;
+ 			continue;
+ 		}

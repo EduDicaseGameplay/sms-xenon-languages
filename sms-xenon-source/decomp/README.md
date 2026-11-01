@@ -1,0 +1,137 @@
+# Super Mario Sunshine — North American decompilation
+
+This is a hobby fork of [doldecomp/sms](https://github.com/doldecomp/sms) focused on `GMSE01` (USA Rev 0).
+The fork began from the upstream project when its Japanese decompilation was around 38% matched code.
+AI has been used extensively to help reconstruct and match the North American game code; the resulting source is checked against the original binary.
+
+## GMSE01 progress
+
+As of 2026-09-29, the local `GMSE01` build report measures:
+
+![GMSE01 progress: fuzzy similarity, byte-perfect code, and source-linked code](assets/progress.svg)
+
+| Code | Fuzzy match | Perfect match | Fully linked |
+| --- | ---: | ---: | ---: |
+| Game | 99.52% | 67.75% | 20.84% |
+| JSystem | 99.90% | 93.95% | 81.22% |
+| SDK | 100.00% | 99.71% | 99.54% |
+| **Total** | **99.60%** | **73.65%** | **34.79%** |
+
+Fuzzy match measures approximate code similarity; perfect match counts bytes identical to the original; fully linked counts code built from matching source.
+12,052 of 12,904 functions match exactly, and 542 of 732 object files are linked from source.
+The rebuilt `mario.dol` is byte-identical to the original; unfinished objects still use code extracted from the user's own disc.
+These USA figures are measured separately from the Japanese starting point.
+See [current progress and open work](PROGRESS.md) and the [North American build notes](config/GMSE01/README.md).
+
+The [native PC port](https://github.com/chasem-dev/sms-pc-port) uses this fork as its decompilation submodule.
+The dedicated [SMS Launcher](https://github.com/chasem-dev/sms-launcher) guides setup and launching on Windows, macOS, and Linux using your own supported disc image.
+
+## Versions and assets
+
+This repository does **not** contain any game assets or assembly whatsoever. An existing copy of the game is required.
+
+Supported versions:
+
+- `GMSJ01`: Rev 0 (JPN)
+- ~~`GMSP01`: Rev 0 (PAL)~~ slightly broken, feel free to fix
+- `GMSE01`: Rev 0 (USA), the main target of this fork; see
+  [North American build notes](config/GMSE01/README.md).
+
+Dependencies
+============
+
+Windows
+--------
+
+On Windows, it's **highly recommended** to use native tooling. WSL or msys2 are **not** required.  
+When running under WSL, [objdiff](#diffing) is unable to get filesystem notifications for automatic rebuilds.
+
+- Install [Python](https://www.python.org/downloads/) and add it to `%PATH%`.
+  - Also available from the [Windows Store](https://apps.microsoft.com/store/detail/python-311/9NRWMJP3717K).
+- Download [ninja](https://github.com/ninja-build/ninja/releases) and add it to `%PATH%`.
+  - Quick install via pip: `pip install ninja`
+
+macOS
+------
+
+- Install [ninja](https://github.com/ninja-build/ninja/wiki/Pre-built-Ninja-packages):
+
+  ```sh
+  brew install ninja
+  ```
+
+- Install [wine-crossover](https://github.com/Gcenx/homebrew-wine):
+
+  ```sh
+  brew install --cask --no-quarantine gcenx/wine/wine-crossover
+  ```
+
+After OS upgrades, if macOS complains about `Wine Crossover.app` being unverified, you can unquarantine it using:
+
+```sh
+sudo xattr -rd com.apple.quarantine '/Applications/Wine Crossover.app'
+```
+
+Linux
+------
+
+- Install [ninja](https://github.com/ninja-build/ninja/wiki/Pre-built-Ninja-packages).
+- For non-x86(_64) platforms: Install wine from your package manager.
+  - For x86(_64), [wibo](https://github.com/decompals/wibo), a minimal 32-bit Windows binary wrapper, will be automatically downloaded and used.
+
+Building
+========
+
+- Clone the repository:
+
+  ```sh
+  git clone https://github.com/chasem-dev/sms-english.git
+  ```
+
+- Copy your North American Rev 0 disc image to `orig/GMSE01`.
+  - Supported formats: ISO (GCM), RVZ, WIA, WBFS, CISO, NFS, GCZ, TGC
+  - After the initial build, the disc image can be deleted to save space.
+
+- Configure:
+
+  ```sh
+  python3 configure.py --version GMSE01
+  ```
+
+  On Windows, use `python` instead of `python3`.
+  To build another version, change the `--version` value and provide that version's disc image.
+
+- Build:
+
+  ```sh
+  ninja
+  ```
+
+### Build and play on Windows
+
+Use PowerShell for the decompilation build.
+After installing native Windows Python and Ninja as described above, run from the `sms-english` directory:
+
+```powershell
+Copy-Item -LiteralPath 'Super Mario Sunshine (2002)(Nintendo)(US).iso' -Destination 'orig/GMSE01/'
+python configure.py --version GMSE01
+ninja
+```
+
+If Ninja was installed through MSYS2 and PowerShell cannot find `ninja`, use
+`C:\msys64\mingw32\bin\ninja.exe` for the last command.
+The build produces `build/GMSE01/mario.dol` and verifies it against the extracted original DOL.
+To play the GameCube version, open the original disc image in Dolphin on Windows.
+The disc image supplies the game files; the built DOL alone does not contain them.
+For the native Windows PC port, see its [MSYS2 build and play instructions](https://github.com/chasem-dev/sms-pc-port/blob/main/BUILD.md#windows-msys2-mingw32).
+
+Diffing
+=======
+
+Once the initial build succeeds, an `objdiff.json` should exist in the project root.
+
+Download the latest release from [encounter/objdiff](https://github.com/encounter/objdiff). Under project settings, set `Project directory`. The configuration should be loaded automatically.
+
+Select an object from the left sidebar to begin diffing. Changes to the project will rebuild automatically: changes to source files, headers, `configure.py`, `splits.txt` or `symbols.txt`.
+
+![](assets/objdiff.png)

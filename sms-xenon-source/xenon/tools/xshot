@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Screenshots of the 360 build under Xenia: xrun for the last time given plus 2 s, and the whole
+# display :1 grabbed at each time (seconds after the start) into /tmp/xshot_<s>.png.
+# Usage: xshot 15 25 40
+set -uo pipefail
+here=$(dirname "$(readlink -f "$0")")
+last=${!#}
+"$here/xrun" $((last + 2)) > /tmp/xshot_xrun.out 2>&1 &
+start=$(date +%s)
+for t in "$@"; do
+  while [ $(($(date +%s) - start)) -lt "$t" ]; do sleep 0.2; done
+  DISPLAY=:1 import -window root "/tmp/xshot_$t.png" && echo "/tmp/xshot_$t.png"
+done
+wait

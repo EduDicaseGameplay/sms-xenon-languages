@@ -1,0 +1,53 @@
+Xbox 360: the DSP mixer thread on hardware thread 4; port_audio_dsp_reply_ready for the renderer; the game-CPU mixing time for the bench (g_dspSeconds). Applied by xenon/tools/xstage to the staged copy only.
+--- a/platform/audio/dsp_hle.cpp	2026-10-30 01:09:47.283368931 +0500
++++ b/platform/audio/dsp_hle.cpp	2026-10-30 02:22:15.446758191 +0500
+@@ -124,10 +124,29 @@
+ 	return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+ }
+ 
++#ifdef _XBOX
++} // namespace
++// Xbox 360: the mixing done on the game's CPU, the bench's audio part (xenon/gx/xe_gx_render.cpp):
++// 0 with the mixer thread, whose time is not the game's (SMS_AUDIO_DSP_STATS=1 logs it)
++double g_dspSeconds;
++// The DSP's reply is ready: the renderer delivers it between draws (xenon/gx), the GX code calling
++// no OS function that would poll the interrupt sources
++extern "C" int port_audio_dsp_reply_ready(void);
++extern "C" void xe_pin_thread(int hw); // xenon/platform/xe_pthread.cpp
++namespace {
++#endif
++
+ void mix(int16_t* outA, int16_t* outB, int n, u16 master)
+ {
++#ifdef _XBOX
++	const double tx = g_threaded <= 0 ? mono_seconds() : 0;
++#endif
+ 	const double t0 = mx.stats ? mono_seconds() : 0;
+ 	port_dspmix_render(outA, outB, n, master);
++#ifdef _XBOX
++	if (g_threaded <= 0)
++		g_dspSeconds += mono_seconds() - tx;
++#endif
+ 	if (!mx.stats)
+ 		return;
+ 	const double t1 = mono_seconds();
+@@ -144,6 +163,9 @@
+ 
+ void mixer_main()
+ {
++#ifdef _XBOX
++	xe_pin_thread(4); // as the GameCube's DSP, a processor of its own: hardware thread 4
++#endif
+ 	std::unique_lock<std::mutex> l(mx.m);
+ 	for (;;) {
+ 		mx.cv.wait(l, [] { return mx.state.load() == 1; });
+@@ -315,6 +337,9 @@
+ // thread or its mail is not sent yet; port_audio_dsp_settle finishes it.
+ extern "C" int port_audio_dsp_busy(void) { return mx.state.load() != 0; }
+ extern "C" void port_audio_dsp_settle(void) { mixer_settle(); }
++#ifdef _XBOX
++extern "C" int port_audio_dsp_reply_ready(void) { return g_threaded > 0 && mx.state.load() == 2; }
++#endif
+ 
+ // True while a frame started by 0x82 still has subframes to render. The AI
+ // layer does not start another DMA block until it is done: on hardware the

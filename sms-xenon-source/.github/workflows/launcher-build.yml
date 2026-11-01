@@ -1,0 +1,62 @@
+name: Launcher build
+# Builds this commit the way SMS Launcher does for players, with the launcher's
+# private toolsets: 64- and 32-bit on Linux and Windows, Intel and Apple Silicon
+# Macs (x86_64 and arm64), and Super Mario Eclipse on all three, each started
+# far enough to reach its disc check. No disc image is used. The builds are the
+# launcher's own workflow (chasem-dev/sms-launcher, .github/workflows/game-build.yml),
+# the one its releases and Beta must pass too; this points it at this commit.
+# "Launcher build" is the check that pull requests need.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      launcher-ref:
+        description: sms-launcher branch, tag or commit whose build tools to use (the workflow itself is main's)
+        type: string
+        default: main
+permissions:
+  contents: read
+concurrency:
+  # One run per pull request, and one for main: a newer push (or a merge, which
+  # pushes to main) cancels the older run still in progress or queued. Manual
+  # runs get a group of their own. cancel-superseded.yml stops a pull
+  # request's runs once it is merged or closed.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || (github.event_name == 'push' && github.ref) || github.run_id }}
+  cancel-in-progress: true
+jobs:
+  pin:
+    runs-on: ubuntu-24.04
+    outputs:
+      commit: ${{ steps.pin.outputs.commit }}
+      decomp: ${{ steps.pin.outputs.decomp }}
+    steps:
+      # For a pull request this is the merge with its base, as GitHub would merge it.
+      - uses: actions/checkout@v4
+      - id: pin
+        run: |
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "decomp=$(git rev-parse HEAD:decomp)" >> "$GITHUB_OUTPUT"
+  # The compiler caches are this repository's: saved by main's runs, which
+  # pull requests start from.
+  build:
+    needs: pin
+    uses: chasem-dev/sms-launcher/.github/workflows/game-build.yml@main
+    with:
+      launcher-ref: ${{ inputs.launcher-ref || 'main' }}
+      game-repository: ${{ github.server_url }}/${{ github.repository }}.git
+      game-commit: ${{ needs.pin.outputs.commit }}
+      game-decomp: ${{ needs.pin.outputs.decomp }}
+  # One stable check name to require in branch protection, whatever the matrix.
+  launcher-build:
+    name: Launcher build
+    needs: [pin, build]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Results: $RESULTS"
+          for result in $RESULTS; do [ "$result" = success ] || exit 1; done

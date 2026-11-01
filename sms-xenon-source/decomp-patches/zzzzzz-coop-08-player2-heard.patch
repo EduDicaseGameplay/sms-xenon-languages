@@ -1,0 +1,138 @@
+Reason: port: split-screen co-op (ext/coop) - sounds are heard from the nearer of the two players' cameras (each sound effect's and sequence's place, and MSound's distance from the camera), and a room either player is in is heard where a stage hears only the listener's (Delfino Hotel's cubes); the second player, their camera and HUD are forgotten as the stage goes
+--- a/libs/JSystem/src/JAudio/JAInterface/JAIGFrameSe.cpp
++++ b/libs/JSystem/src/JAudio/JAInterface/JAIGFrameSe.cpp
+@@ -5,6 +5,12 @@
+ #include <JSystem/JAudio/JAInterface/JAIConst.hpp>
+ #include <math.h>
+ 
++#ifdef TARGET_PC
++// Split-screen co-op (ext/coop): a sound's place as the nearer of the two
++// players' cameras hears it, while a second player plays.
++extern "C" void port_coop_hear(Vec* camSpace, Vec* prevCamSpace, const Vec* pos);
++#endif
++
+ // TODO: 99.3%, frame 0x190 and every instruction exact; three GPR webs differ.
+ // Closure c-k4 (debugger): retail loads the category's mMaxPlaying straight
+ // into the register of the candidate counter (r26), so the two are one u8
+@@ -114,6 +120,10 @@
+ 					} else {
+ 						MTXMultVec(mAudioCameras[cam].nViewMtx,
+ 						           (Vec*)it->mActorTrans, &pi->mCamSpacePos);
++#ifdef TARGET_PC
++						port_coop_hear(&pi->mCamSpacePos, &pi->mPrevCamSpacePos,
++						               it->mActorTrans);
++#endif
+ 					}
+ 
+ 					pi->unk18 = pi->mCamSpacePos.x * pi->mCamSpacePos.x
+--- a/libs/JSystem/src/JAudio/JAInterface/JAIGFrameSequence.cpp
++++ b/libs/JSystem/src/JAudio/JAInterface/JAIGFrameSequence.cpp
+@@ -7,6 +7,12 @@
+ #include <JSystem/JAudio/JASystem/JASVload.hpp>
+ #include <math.h>
+ 
++#ifdef TARGET_PC
++// Split-screen co-op (ext/coop): a sound's place as the nearer of the two
++// players' cameras hears it, while a second player plays.
++extern "C" void port_coop_hear(Vec* camSpace, Vec* prevCamSpace, const Vec* pos);
++#endif
++
+ void JAIBasic::stopSeq(JAISound* param_1)
+ {
+ 	if (param_1->getSwBit() & JAISeqSwBit_PauseOthers) {
+@@ -261,6 +267,10 @@
+ 			pi->mPrevCamSpacePos = pi->mCamSpacePos;
+ 			MTXMultVec(mAudioCameras[i].nViewMtx, (Vec*)sound->mActorTrans,
+ 			           &pi->mCamSpacePos);
++#ifdef TARGET_PC
++			port_coop_hear(&pi->mCamSpacePos, &pi->mPrevCamSpacePos,
++			               sound->mActorTrans);
++#endif
+ 
+ 			pi->unk18 = std::sqrtf(pi->mCamSpacePos.x * pi->mCamSpacePos.x
+ 			                       + pi->mCamSpacePos.y * pi->mCamSpacePos.y
+--- a/src/MSound/MSound.cpp
++++ b/src/MSound/MSound.cpp
+@@ -485,8 +485,21 @@
+ 	}
+ }
+ 
++#ifdef TARGET_PC
++// Split-screen co-op (ext/coop): the second player's camera while they play,
++// or null. Sounds are as near as the nearer camera.
++extern "C" const Vec* port_coop_ear_pos;
++#endif
++
+ f32 MSound::getDistFromCamera(Vec* pos)
+ {
++#ifdef TARGET_PC
++	if (port_coop_ear_pos) {
++		const f32 d1 = JALCalc::getDist(pos, mAudioCameras->mPosition);
++		const f32 d2 = JALCalc::getDist(pos, (Vec*)port_coop_ear_pos);
++		return d2 < d1 ? d2 : d1;
++	}
++#endif
+ 	return JALCalc::getDist(pos, mAudioCameras->mPosition);
+ }
+ 
+@@ -494,6 +507,15 @@
+ f32 MSound::getDistPowFromCamera(const Vec& pos)
+ {
+ 	const Vec* camera = mAudioCameras->mPosition;
++#ifdef TARGET_PC
++	if (const Vec* ear = port_coop_ear_pos) {
++		const f32 d1 = powf(pos.x - camera->x, 2.0f) + powf(pos.y - camera->y, 2.0f)
++		               + powf(pos.z - camera->z, 2.0f);
++		const f32 d2 = powf(pos.x - ear->x, 2.0f) + powf(pos.y - ear->y, 2.0f)
++		               + powf(pos.z - ear->z, 2.0f);
++		return d2 < d1 ? d2 : d1;
++	}
++#endif
+ 	return powf(pos.x - camera->x, 2.0f)
+ 	       + powf(pos.y - camera->y, 2.0f)
+ 	       + powf(pos.z - camera->z, 2.0f);
+--- a/src/MSound/MSoundSE.cpp
++++ b/src/MSound/MSoundSE.cpp
+@@ -16,6 +16,8 @@
+ #include <sms_modhook.h>
+ #ifdef TARGET_PC
+ #include "port_ext.h"
++// Split-screen co-op (ext/coop): player 2's place while they play, or null.
++extern "C" const Vec* port_coop_player2_pos(void);
+ #endif
+ 
+ using namespace MSoundSESystem;
+@@ -627,6 +629,13 @@
+ 		    MSGetEarPos(*MSoundSECameraPos(MSGMSound, 0)));
+ 		int iVar3 = gpCubeCamera->getInCubeNo(MSGetEarPos(param_2));
+ 
++#ifdef TARGET_PC
++		// co-op: a room either player is in is heard
++		if (iVar3 != -1 && iVar3 != iVar2)
++			if (const Vec* p2 = port_coop_player2_pos())
++				if (gpCubeCamera->getInCubeNo(MSGetEarPos(*p2)) == iVar3)
++					iVar2 = iVar3;
++#endif
+ 		if (iVar3 != -1) {
+ 			if (iVar3 == iVar2)
+ 				result = true;
+--- a/src/System/MarDirectorSetup2.cpp
++++ b/src/System/MarDirectorSetup2.cpp
+@@ -168,8 +168,17 @@
+ 	return arch;
+ }
+ 
++#ifdef TARGET_PC
++// Split-screen co-op (ext/coop): the stage's second player, camera and HUD go
++// with it.
++extern "C" void port_coop_stage_exit(void);
++#endif
++
+ TMarDirector::~TMarDirector()
+ {
++#ifdef TARGET_PC
++	port_coop_stage_exit();
++#endif
+ 	gpMSound->exitStage();
+ 	if (gpApplication.mCurrArea.unk0 == 15) {
+ 		if (JKRMemArchive* arch = Setup2GetMemArchive("option"))

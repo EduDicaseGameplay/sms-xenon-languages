@@ -1,0 +1,141 @@
+Reason: port: mouse orbit and zoom (platform/pad): the mouse's up/down tilts the normal camera around Mario at the same distance instead of acting as the C-stick's up/down (nearer and lower, or further and higher; SMS_MOUSE_ORBIT=0 keeps that), the mouse wheel sets the camera's distance as a share of the game's, and the camera follows the mouse as closely as it follows the C-stick
+--- a/src/Camera/CameraNormal.cpp
++++ b/src/Camera/CameraNormal.cpp
+@@ -21,6 +21,10 @@
+ // look adds the mouse's motion to the C-stick's.
+ extern "C" int port_free_camera;
+ extern "C" int port_camera_take_mouse(f32* dx, f32* dy);
++// Mouse orbit (zzz-camera-02): the mouse's up/down tilts the camera around
++// Mario instead of moving it nearer or further as the C-stick's does.
++extern "C" int port_mouse_orbit;
++extern "C" f32 port_camera_mouse_pitch, port_camera_speed_y;
+ #endif
+ 
+ static const char* dummyMactorStringValue1 = "\0\0\0\0\0\0\0\0\0\0\0";
+@@ -207,8 +211,20 @@
+ 		f32 mouseX, mouseY;
+ 		if (port_camera_take_mouse(&mouseX, &mouseY)) {
+ 			fVar2 += mouseX;
+-			fVar3 += mouseY;
++			if (!port_mouse_orbit)
++				fVar3 += mouseY;
++			else if (!SMS_IsMarioOpeningDoor())
++				// tilts as fast as it turns (rotateY_ByStickX_)
++				port_camera_mouse_pitch
++				    -= mouseY * port_camera_speed_y
++				       * CLBLinearInbetween(
++				           mCurrentParams->mYAngleManualSpeedXMin,
++				           mCurrentParams->mYAngleManualSpeedXMax,
++				           mCurrentTarget.unk28);
+ 		}
++		// L (or Y) swinging the camera behind Mario levels the tilt again
++		if (unk64 & CAMERA_FLAG_UNK4)
++			port_camera_mouse_pitch *= 0.8f;
+ 	}
+ #endif
+ 
+--- a/src/Camera/cameragc.cpp
++++ b/src/Camera/cameragc.cpp
+@@ -39,6 +39,20 @@
+ #ifdef TARGET_PC
+ // PC camera speed (platform/pad, SMS_CAMERA_SPEED): scales manual rotation.
+ extern "C" f32 port_camera_speed_x, port_camera_speed_y;
++// Mouse orbit and zoom (platform/pad): the tilt the mouse gave the camera (s16
++// angle units), the distance as a share of the game's (the mouse wheel), and
++// frames left in which the camera follows the mouse as closely as the C-stick.
++// Both shape only the cameras the mouse turns (ctrlNormalOrTowerCamera_).
++extern "C" f32 port_camera_mouse_pitch, port_camera_zoom;
++extern "C" int port_camera_mouse_busy;
++// How far the tilt may take the camera: a little under Mario, looking up, to
++// well over him (CLBPolarToCross: above is positive).
++static const s16 kPcMousePitchMin = -0x0C00, kPcMousePitchMax = 0x3400;
++#define PC_MOUSE_CAMERA()                                                     \
++	(!isFixOrDefiniteCameraSpecifyMode(mMode)                                 \
++	 && !isLButtonCameraSpecifyMode(mMode) && !isTalkCameraSpecifyMode(mMode) \
++	 && mMode != CAMERA_MODE_MULTI_PLAYER && mMode != CAMERA_MODE_JET_COASTER \
++	 && !isNormalDeadDemo())
+ #endif
+ 
+ CPolarSubCamera* gpCamera;
+@@ -424,7 +438,11 @@
+ 	mInbetween->unk44
+ 	    = d
+ 	      - CLBLinearInbetween(mCurrentParams->mDistMin,
+-	                           mCurrentParams->mDistMax, mCurrentTarget.unk28);
++	                           mCurrentParams->mDistMax, mCurrentTarget.unk28)
++#ifdef TARGET_PC
++	            * (PC_MOUSE_CAMERA() ? port_camera_zoom : 1.0f)
++#endif
++	    ;
+ }
+ 
+ // TMario::checkStatusType is called out of line from the five sites this
+@@ -695,6 +713,20 @@
+ 				    mCurrentTarget.unk28);
+ 				s16 xAngle = mCurrentTarget.mPitch
+ 				             + mCurrentParams->mOffsetAngleX + unk2AC->unk0;
++#ifdef TARGET_PC
++				const bool pcMouse = PC_MOUSE_CAMERA();
++				if (pcMouse) {
++					// the tilt stays within range of the game's own angle, so
++					// moving the mouse back undoes it at once
++					f32 lo = kPcMousePitchMin - xAngle, hi = kPcMousePitchMax - xAngle;
++					if (lo > 0.0f)
++						lo = 0.0f;
++					if (hi < 0.0f)
++						hi = 0.0f;
++					port_camera_mouse_pitch = MsClamp(port_camera_mouse_pitch, lo, hi);
++					xAngle += (s16)port_camera_mouse_pitch;
++				}
++#endif
+ 				s16 yAngle
+ 				    = mCurrentTarget.mYaw + mCurrentParams->mOffsetAngleY;
+ 
+@@ -741,6 +773,10 @@
+ 						f32 dist = CLBLinearInbetween<f32>(
+ 						    mCurrentParams->mDistMin, mCurrentParams->mDistMax,
+ 						    mCurrentTarget.unk28);
++#ifdef TARGET_PC
++						if (pcMouse)
++							dist *= port_camera_zoom;
++#endif
+ 						s16 cushAng = CLBLinearInbetween<s16>(
+ 						    mCurrentParams->mXAngleMin,
+ 						    mCurrentParams->mXAngleMax, mCurrentTarget.unk28);
+@@ -843,6 +879,10 @@
+ 							f32 d = CLBLinearInbetween<f32>(
+ 							    mCurrentParams->mDistMin,
+ 							    mCurrentParams->mDistMax, mCurrentTarget.unk28);
++#ifdef TARGET_PC
++							if (pcMouse)
++								d *= port_camera_zoom;
++#endif
+ 							CLBPolarToCross(mInbetween->mAt, warpPos,
+ 							                d + mInbetween->unk44, xAngle,
+ 							                yAngle);
+@@ -901,7 +941,11 @@
+ 			if (unk64 & CAMERA_FLAG_UNK4) {
+ 				chaseXZ = 1.0f;
+ 			} else if (unk120->mSubStick.mPosY != 0.0f
+-			           || unk120->mSubStick.mPosX != 0.0f) {
++			           || unk120->mSubStick.mPosX != 0.0f
++#ifdef TARGET_PC
++			           || port_camera_mouse_busy > 0
++#endif
++			) {
+ 				f32 v = gpCameraMario->mFrameMoveDistHorizontal;
+ 				if (v > 20.0f)
+ 					v = 20.0f;
+@@ -910,7 +954,11 @@
+ 				    mCurrentParams->mPosChaseRateXZ_C,
+ 				    CLBCalcRatio<f32>(20.0f, 0.0f, v));
+ 			}
+-			if (unk120->mSubStick.mPosY != 0.0f) {
++			if (unk120->mSubStick.mPosY != 0.0f
++#ifdef TARGET_PC
++			    || port_camera_mouse_busy > 0
++#endif
++			) {
+ 				f32 v = gpCameraMario->mFrameMoveDistVertical;
+ 				if (v > 20.0f)
+ 					v = 20.0f;

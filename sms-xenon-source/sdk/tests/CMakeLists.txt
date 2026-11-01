@@ -1,0 +1,31 @@
+# Checks of the SDK itself: the headers build warning-free as C99 and C++11
+# on every compiler, SMS_API_HAS reads a table's size right, and a built mod
+# exports what the game looks for (ctest).
+add_library(sms_header_c OBJECT header_c.c)
+add_library(sms_header_cpp OBJECT header_cpp.cpp)
+set_target_properties(sms_header_c PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+set_target_properties(sms_header_cpp PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+foreach(t sms_header_c sms_header_cpp)
+  target_link_libraries(${t} PRIVATE sms::mod_sdk)
+  sms_mod_target_arch(${t})
+  if(MSVC)
+    target_compile_options(${t} PRIVATE /W4 /WX)
+  else()
+    target_compile_options(${t} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  endif()
+endforeach()
+
+add_executable(sms_api_has api_has.c)
+add_executable(sms_mod_exports mod_exports.c)
+foreach(t sms_api_has sms_mod_exports)
+  target_link_libraries(${t} PRIVATE sms::mod_sdk)
+  sms_mod_target_arch(${t})
+endforeach()
+if(CMAKE_DL_LIBS)
+  target_link_libraries(sms_mod_exports PRIVATE ${CMAKE_DL_LIBS})
+endif()
+
+add_test(NAME api_has COMMAND sms_api_has)
+if(TARGET smsmod_lua)
+  add_test(NAME lua_mod_exports COMMAND sms_mod_exports $<TARGET_FILE:smsmod_lua>)
+endif()

@@ -1,0 +1,173 @@
+Reason: extensions (ext/, port_ext.h) hear of each hit this game's player or its water lands (TModelWaterManager's sprays, TMario's ground pounds, punches and stomps) and may stop one: multiplayer passes them to the other games
+
+--- a/src/Player/ModelWaterManager.cpp
++++ b/src/Player/ModelWaterManager.cpp
+@@ -2,6 +2,7 @@
+ #include <Player/MarioAccess.hpp>
+ #include <Player/SplashManager.hpp>
+ #include <Strategic/LiveActor.hpp>
++#include "port_ext.h"
+ #include <Camera/Camera.hpp>
+ #include <Map/Map.hpp>
+ #include <Map/MapData.hpp>
+@@ -34,6 +35,13 @@
+ #include <sms_modhook.h>
+ #include <sms_modhook.h>
+ 
++// port: extensions hear of each hit this game's player (or its water) lands,
++// and may stop one (port_ext.h: ext/multiplayer passes them to the other games)
++static inline BOOL portHit(THitActor* to, THitActor* from, u32 message)
++{
++	return port_ext_object_hit(to, from, message) ? FALSE : to->receiveMessage(from, message);
++}
++
+ // Port: the position the shine shadow sphere is drawn at is a constant in
+ // the retail game, which code mods overwrite (retail map name gShineShadowPos).
+ Vec gShineShadowPos = { 0.0f, 3600.0f, -7458.0f };
+@@ -487,7 +495,7 @@
+ 			mStaticHitActor.mPosition = mParticlePositionSOA[i];
+ 			mStaticHitActor.mParticleIndex = i;
+ 
+-			if (unk2514[i]->receiveMessage(&mStaticHitActor,
++			if (portHit(unk2514[i], &mStaticHitActor,
+ 			                               HIT_MESSAGE_SPRAYED_BY_WATER)) {
+ 				splashSound(mParticlePositionSOA[i], mParticleSizeSOA[i]);
+ 
+@@ -617,7 +625,7 @@
+ 				if (actor != nullptr) {
+ 					mStaticHitActor.mPosition = mParticlePositionSOA[i];
+ 					mStaticHitActor.mParticleIndex = i;
+-					if (((THitActor*)actor)->receiveMessage(&mStaticHitActor,
++					if (portHit((THitActor*)actor, &mStaticHitActor,
+ 					                        HIT_MESSAGE_SPRAYED_BY_WATER))
+ 						mParticleLifetimeSOA[i] = 0.0f;
+ 				}
+@@ -654,7 +662,7 @@
+ 						mStaticHitActor.mPosition = mParticlePositionSOA[i];
+ 						mStaticHitActor.mParticleIndex = i;
+ 						THitActor* hit            = (THitActor*)r27->mActor;
+-						hit->receiveMessage(&mStaticHitActor,
++						portHit(hit, &mStaticHitActor,
+ 						                    HIT_MESSAGE_SPRAYED_BY_WATER);
+ 					}
+ 
+@@ -703,7 +711,7 @@
+ 					if (actor != nullptr) {
+ 						mStaticHitActor.mPosition = mParticlePositionSOA[i];
+ 						mStaticHitActor.mParticleIndex = i;
+-						((THitActor*)actor)->receiveMessage(&mStaticHitActor,
++						portHit((THitActor*)actor, &mStaticHitActor,
+ 						                    HIT_MESSAGE_SPRAYED_BY_WATER);
+ 					}
+ 
+--- a/src/Player/MarioCheckCol.cpp
++++ b/src/Player/MarioCheckCol.cpp
+@@ -6,6 +6,7 @@
+ #include <Enemy/SmallEnemy.hpp>
+ #include <MoveBG/MapObjItem2.hpp>
+ #include <NPC/NpcBase.hpp>
++#include "port_ext.h"
+ #include <math.h>
+ 
+ // rogue includes needed for matching sinit & bss
+@@ -15,6 +16,13 @@
+ #ifdef TARGET_PC
+ #include <sms_modhook.h>
+ #include <sms_modhook.h>
++
++// port: extensions hear of each hit this game's player (or its water) lands,
++// and may stop one (port_ext.h: ext/multiplayer passes them to the other games)
++static inline BOOL portHit(THitActor* to, THitActor* from, u32 message)
++{
++	return port_ext_object_hit(to, from, message) ? FALSE : to->receiveMessage(from, message);
++}
+ #endif
+ 
+ void TMario::hitNormal(THitActor* actor)
+@@ -22,7 +30,7 @@
+ 	if (checkStatusType(MARIO_STATUS_FLAG_JUMPING) && mVel.y < 0.0f
+ 	    && actor->mPosition.y < mPosition.y) {
+ 		if (getStatus() == MARIO_STATUS_HIP_DROP) {
+-			if (actor->receiveMessage(this, HIT_MESSAGE_HIP_DROP)) {
++			if (portHit(actor, this, HIT_MESSAGE_HIP_DROP)) {
+ 				if (actor->isActorType(0x8000001)) {
+ 					changePlayerTriJump();
+ 					unk78 &= ~0x100;
+@@ -37,15 +45,15 @@
+ 	}
+ 
+ 	if (checkFlag(MARIO_FLAG_UNK200) && actor->mPosition.y > mPosition.y) {
+-		actor->receiveMessage(this, HIT_MESSAGE_SUPER_HIP_DROP);
++		portHit(actor, this, HIT_MESSAGE_SUPER_HIP_DROP);
+ 		return;
+ 	}
+ 
+ 	if (getStatus() == MARIO_STATUS_CATCH
+ 	    || getStatus() == MARIO_STATUS_OIL_SLIP
+ 	    || getStatus() == MARIO_STATUS_JUMP_CATCH) {
+-		actor->receiveMessage(this, HIT_MESSAGE_PUNCH);
+-		actor->receiveMessage(this, HIT_MESSAGE_TRAMPLE);
++		portHit(actor, this, HIT_MESSAGE_PUNCH);
++		portHit(actor, this, HIT_MESSAGE_TRAMPLE);
+ 	}
+ 
+ 	TWaterGun* wg = mWaterGun;
+@@ -57,7 +65,7 @@
+ 		(water = &TModelWaterManager::mStaticHitActor)->mPosition = mPosition;
+ 		water->mPosition.y += 80.0f;
+ 		water->mParticleIndex = 0;
+-		actor->receiveMessage(water, HIT_MESSAGE_SPRAYED_BY_WATER);
++		portHit(actor, water, HIT_MESSAGE_SPRAYED_BY_WATER);
+ 	}
+ }
+ 
+@@ -67,14 +75,14 @@
+ 	if (mStatus == MARIO_STATUS_HIP_DROP
+ 	    && (mStatusState == 2 || mStatusState == 3)
+ 	    && actor->mPosition.y < mPosition.y) {
+-		actor->receiveMessage(this, HIT_MESSAGE_HIP_DROP);
++		portHit(actor, this, HIT_MESSAGE_HIP_DROP);
+ 	}
+ }
+ 
+ void TMario::hitPushup(THitActor* actor)
+ {
+ 	if (checkStatusType(MARIO_STATUS_FLAG_JUMPING) && mVel.y > 0.0f)
+-		actor->receiveMessage(this, HIT_MESSAGE_PUSH_UP);
++		portHit(actor, this, HIT_MESSAGE_PUSH_UP);
+ 	hitNormal(actor);
+ }
+ 
+@@ -139,7 +147,7 @@
+ 	if (checkStatusType(MARIO_STATUS_FLAG_JUMPING) && mVel.y < 0.0f
+ 	    && actor->mPosition.y < mPosition.y
+ 	    && mStatus == MARIO_STATUS_HIP_DROP) {
+-		actor->receiveMessage(this, HIT_MESSAGE_HIP_DROP);
++		portHit(actor, this, HIT_MESSAGE_HIP_DROP);
+ 		if (checkFlag(MARIO_FLAG_HAS_FLUDD)) {
+ 			TWaterGun* wg     = mWaterGun;
+ 			wg->mCurrentWater = (s32)((const TWaterGun*)wg)
+@@ -161,7 +169,7 @@
+ 	if (checkStatusType(MARIO_STATUS_FLAG_JUMPING) && mVel.y < 0.0f
+ 	    && actor->mPosition.y < mPosition.y
+ 	    && mStatus == MARIO_STATUS_HIP_DROP) {
+-		actor->receiveMessage(this, HIT_MESSAGE_HIP_DROP);
++		portHit(actor, this, HIT_MESSAGE_HIP_DROP);
+ 	}
+ }
+ 
+@@ -448,12 +456,12 @@
+ 			if (getStatus() == MARIO_STATUS_FENCE_PUNCH
+ 			    && 5.0f <= getMotionFrameCtrl().getFrame()
+ 			    && getMotionFrameCtrl().getFrame() < 9.0f) {
+-				getCollision(i)->receiveMessage(this, HIT_MESSAGE_PUNCH);
++				portHit(getCollision(i), this, HIT_MESSAGE_PUNCH);
+ 			}
+ 			if (getStatus() == MARIO_STATUS_KICK_ROOF
+ 			    && 9.0f <= getMotionFrameCtrl().getFrame()
+ 			    && getMotionFrameCtrl().getFrame() < 13.0f) {
+-				getCollision(i)->receiveMessage(this, HIT_MESSAGE_PUNCH);
++				portHit(getCollision(i), this, HIT_MESSAGE_PUNCH);
+ 			}
+ 			break;
+ 

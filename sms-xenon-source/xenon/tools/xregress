@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Frame regression under Xenia against the PC port's shots of the same movie: each suite runs the
+# movie in the run tree (fresh card), grabs its fields, and prints the MAE of each (worst last).
+# Usage: [XREGRESS_SECS=s] xregress [suite...]   suites: it3 plaza stageN (area N by SMS_WARP=N,0; default: all with refs)
+# References: ~/src/xbox-dev/shots/sms-port-{it3,plaza,tour/stageN}, made with portrun.sh
+# (plaza and the stages with SMS_WARP); their movies are copied into the run tree. Logs and frames of
+# each suite: /tmp/xregress_<suite>.log, /tmp/xregress_<suite>/.
+set -uo pipefail
+export LC_ALL=C
+here=$(dirname "$(readlink -f "$0")")
+run=~/src/xbox-dev/run/sms
+shots=~/src/xbox-dev/shots
+suites=("$@")
+[ ${#suites[@]} -eq 0 ] && suites=(it3 plaza $(cd "$shots/sms-port-tour" && ls -d stage* | sort -V))
+cp "$run/sms_env.txt" /tmp/xregress_env.bak
+for s in "${suites[@]}"; do
+  case $s in
+    it3) movie=it3.dtm; ref=$shots/sms-port-it3; warp=; fields=600,1200,2000,3000,4500,5500,6200; secs=200 ;;
+    plaza) movie=plaza.dtm; ref=$shots/sms-port-plaza; warp=1,0,1; fields=$(seq -s, 3000 400 6600); secs=300 ;;
+    stage[0-9]*) movie=tour.dtm; ref=$shots/sms-port-tour/$s; warp=${s#stage},0; fields=3400,3800,4200,4600,5000; secs=110 ;;
+    *) echo "xregress: no suite $s" >&2; continue ;;
+  esac
+  secs=${XREGRESS_SECS:-$secs}  # a slower configuration needs longer
+  cp "$ref/$movie" "$run/" 2>/dev/null || cp "$shots/sms-port-tour/$movie" "$run/"
+  { printf 'SMS_DISC_IMAGE=game:\\GMSE01.iso\nSMS_MOVIE=game:\\%s\nSMS_TRACE_SYNC=+0\nSMS_VI_DETERMINISTIC=1\n' "$movie"
+    printf 'SMS_TEXTURE_PACKS=0\nSMS_XE_SCALE=1\nSMS_WIDESCREEN=0\nSMS_FRAME_RATE=60\nSMS_SHOTS=%s\nSMS_SHOT_DIR=game:\\shots\n' "$fields"
+    [ -n "$warp" ] && printf 'SMS_WARP=%s\n' "$warp"
+    for e in ${XREGRESS_ENV:-}; do printf '%s\n' "$e"; done; } > "$run/sms_env.txt"  # extra NAME=value words
+  rm -rf "$run/data/sms-port" "$run/shots"
+  mkdir -p "$run/shots"
+  "$here/xrun" "$secs" > "/tmp/xregress_$s.out" 2>&1
+  cp "$run/sms.log" "/tmp/xregress_$s.log"
+  rm -rf "/tmp/xregress_$s" && cp -r "$run/shots" "/tmp/xregress_$s"  # the frames, for a look
+  line="$s:"; worst=0
+  for f in ${fields//,/ }; do
+    n=$(printf 'field%05d' "$f")
+    if [ ! -f "$run/shots/$n.ppm" ]; then line+=" $f=MISSING"; worst=1; continue; fi
+    m=$(compare -metric MAE "$run/shots/$n.ppm" "$ref/$n.png" null: 2>&1 | grep -o '([^)]*)' | tr -d '()')
+    line+=" $(printf '%.5f' "$m")"
+    worst=$(python3 -c "print(max($worst, $m))")
+  done
+  echo "$line  worst $worst"
+done
+cp /tmp/xregress_env.bak "$run/sms_env.txt"

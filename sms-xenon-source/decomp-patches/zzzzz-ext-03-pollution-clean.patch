@@ -1,0 +1,22 @@
+Reason: extensions (ext/, port_ext.h) hear of goop cleaned (TPollutionManager::clean): multiplayer cleans it in every player's game
+
+--- a/src/Map/PollutionManager.cpp
++++ b/src/Map/PollutionManager.cpp
+@@ -2,6 +2,7 @@
+ #include <Map/PollutionLayer.hpp>
+ #include <Map/MapEventSink.hpp>
+ #include <System/MarDirector.hpp>
++#include "port_ext.h"
+ 
+ // rogue includes needed for matching sinit & bss
+ #include <MSound/MSSetSound.hpp>
+@@ -33,6 +34,9 @@
+ 	if (SMSGetMarDirector()->getCurrentMap() == 1 && y < -10.0f)
+ 		return;
+ 
++	// port: extensions hear of goop cleaned (ext/multiplayer cleans it in
++	// the other players' games too)
++	port_ext_pollution_clean(x, y, z, size);
+ 	stamp(0, x, y, z, size);
+ }
+ 

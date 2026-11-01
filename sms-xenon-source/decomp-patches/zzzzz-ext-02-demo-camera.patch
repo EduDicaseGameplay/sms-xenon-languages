@@ -1,0 +1,17 @@
+Reason: extensions (ext/, port_ext.h) hear of each camera cutscene as it is asked for (TMarDirector::fireStartDemoCamera), and may leave it out: multiplayer plays it in every player's game, and leaves out one that played already
+
+--- a/src/System/MarDirectorEvent.cpp
++++ b/src/System/MarDirectorEvent.cpp
+@@ -290,6 +290,12 @@
+                                        JDrama::TActor* param_8,
+                                        JDrama::TFlagT<u16> param_9)
+ {
++	// port: extensions hear of every camera cutscene as it is asked for
++	// (ext/multiplayer plays it in the other players' games too), and may
++	// leave it out (one that played here already, from another game)
++	if (port_ext_demo_camera(param_1, param_2 ? &param_2->x : nullptr, param_3, param_4, param_5, param_6 != nullptr,
++	                         param_8, param_9.mValue))
++		return;
+ 	// The named difference is the 15th statement: retail calls this body
+ 	// out of line from fireGetStar where 14 statements would expand it.
+ 	u8 diff = unk24C - unk24D;

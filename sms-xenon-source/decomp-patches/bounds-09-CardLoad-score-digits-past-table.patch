@@ -1,0 +1,38 @@
+Reason: Retail out-of-bounds access: the file select's Score screen takes each digit from the ten textures unkC8[0..9]. Its total's tens digit is (shines - 100) / 10, which is 10 or more from 200 Shines, and its Delfino Plaza count (all Shines less those counted for the seven stages and the plaza's own) becomes 99 only above 100, so exactly 100 also reads unkC8[10]. unkC8[10] is the next member, unkF0 (a TExPane), whose bytes where a JUTTexture keeps mTexInfo are zero, so the digit is left as it was; from 210 Shines the index reaches the members after it, which are not textures, and the game crashed opening the Score screen (Super Mario Eclipse, 240 Shines: SIGSEGV at the tens digit). Regular Sunshine never gets there (at most 120 Shines, at most about 40 of them counted for the plaza); in Super Mario Eclipse its own stages' Shines (120 to 239) all count toward the total and the plaza. Show the total's real digits (at most 999) and 99 from 100 Delfino Plaza Shines.
+--- a/src/GC2D/CardLoad.cpp
++++ b/src/GC2D/CardLoad.cpp
+@@ -394,9 +394,20 @@
+ 		unk74C->changeTexture(unkC8[iVar2 % 10]->getTexInfo(), 0);
+ 		unk750->hide();
+ 	} else {
++#ifdef TARGET_PC
++		// port: from 200 Shines (only mods have that many) retail's tens digit
++		// (iVar2 - 100) / 10 is past the ten digit textures; show the real
++		// digits, at most 999.
++		if (iVar2 > 999)
++			iVar2 = 999;
++		unk748->changeTexture(unkC8[iVar2 / 100]->getTexInfo(), 0);
++		unk74C->changeTexture(unkC8[iVar2 % 100 / 10]->getTexInfo(), 0);
++		unk750->changeTexture(unkC8[iVar2 % 10]->getTexInfo(), 0);
++#else
+ 		unk748->changeTexture(unkC8[iVar2 / 100]->getTexInfo(), 0);
+ 		unk74C->changeTexture(unkC8[(iVar2 - 100) / 10]->getTexInfo(), 0);
+ 		unk750->changeTexture(unkC8[(iVar2 - 100) % 10]->getTexInfo(), 0);
++#endif
+ 		unk750->show();
+ 	}
+ 
+@@ -513,7 +524,13 @@
+ 	}
+ 
+ 	int asdf2 = TFlagManager::getInstance()->getFlag(0x40000) - iVar8;
++#ifdef TARGET_PC
++	// port: retail shows 99 from 101 Delfino Plaza Shines but reads the
++	// eleventh of ten digit textures at exactly 100.
++	if (asdf2 >= 100)
++#else
+ 	if (asdf2 > 100)
++#endif
+ 		asdf2 = 99;
+ 	if (asdf2 < 0)
+ 		asdf2 = 0;

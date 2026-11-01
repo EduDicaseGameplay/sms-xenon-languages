@@ -1,0 +1,57 @@
+Reason: port: mouse look (SMS_MOUSE_CAMERA, platform/pad) on Pinna Park's coaster: its up/down tilts the aim view, and so FLUDD, as it tilts the Y close-up camera, and it moves the view from behind the car as the C-stick does; it is taken every frame there, so none is left to turn the normal camera at once when the ride ends
+--- a/src/Camera/CameraJetCoaster.cpp
++++ b/src/Camera/CameraJetCoaster.cpp
+@@ -22,6 +22,14 @@
+ #include <MSound/MSoundBGM.hpp>
+ #include <sms_modhook.h>
+ 
++#ifdef TARGET_PC
++// Mouse look (platform/pad, SMS_MOUSE_CAMERA) on the coaster: its up/down tilts
++// the aim view (and so FLUDD, TNozzleBase::calcGunAngle) as it tilts the Y
++// close-up camera (zzz-camera-05), and in the view from behind the car it moves
++// the camera as the C-stick does. The aim view's left/right stays the car's.
++extern "C" int port_camera_take_mouse(f32* dx, f32* dy);
++#endif
++
+ // NOTE: it is weak but I don't want to put it in the header since it's pretty
+ // big and only used in one function. Also, dunno even if the size is correct
+ inline void CPolarSubCamera::drawJetCoasterBalloonMessage_()
+@@ -118,11 +126,25 @@
+ 
+ 	JGeometry::TVec3<f32> newTarget;
+ 
++#ifdef TARGET_PC
++	// taken in both views every frame, so none of it is kept for the normal
++	// camera; a fast flick moves it further than a held stick, as in the
++	// close-up camera
++	f32 mouseX = 0.0f, mouseY = 0.0f;
++	if (port_camera_take_mouse(&mouseX, &mouseY)) {
++		mouseX = MsClamp(mouseX, -8.0f, 8.0f);
++		mouseY = MsClamp(mouseY, -8.0f, 8.0f);
++	}
++#endif
++
+ 	if (unk2B8->isLButtonMode()) {
+ 		if (startedLButton)
+ 			setUpToLButtonCamera_(CAMERA_MODE_JET_COASTER);
+ 
+ 		f32 stickY = -unk120->mCompSPos[1];
++#ifdef TARGET_PC
++		stickY += mouseY;
++#endif
+ 		if (mTargetFreezeFrames == 0)
+ 			getNozzleTopPos_(&mCurrentTarget.mTarget);
+ 
+@@ -185,7 +207,12 @@
+ 		if (startedLButton)
+ 			setUpFromLButtonCamera_();
+ 
++#ifdef TARGET_PC
++		unk2B8->calcNowOffsetAngle(unk120->mCompSPos[6] + mouseX,
++		                           unk120->mCompSPos[7] + mouseY);
++#else
+ 		unk2B8->calcNowOffsetAngle(unk120->mCompSPos[6], unk120->mCompSPos[7]);
++#endif
+ 
+ 		mCurrentTarget.unk18   = unk2B8->unk10;
+ 		mCurrentTarget.mTarget = unk2B8->unk1C;

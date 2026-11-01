@@ -1,0 +1,130 @@
+Reason: port: FLUDD's nozzle hook for extensions and native mods (port_ext.h playerNozzle, SMS_EV_PLAYER_NOZZLE): a nozzle switch, the nozzle button's swap, the nozzle a stage starts with, and a nozzle's box can be changed or refused (a refused box is not in the stage)
+--- a/src/MoveBG/Item.cpp
++++ b/src/MoveBG/Item.cpp
+@@ -1713,6 +1713,17 @@
+ 		}
+ 		break;
+ 	}
++#ifdef TARGET_PC
++	{
++		// extensions may leave the box out of the stage (port_ext.h)
++		int nozzle = mContainedNozzleType;
++		if (port_ext_player_nozzle(0, (JDrama::TNameRef*)this, &nozzle, 0, PORT_NOZZLE_BOX)) {
++			if (!mContainedNozzleItem->checkLiveFlag(LIVE_FLAG_DEAD))
++				mContainedNozzleItem->kill();
++			makeObjDead();
++		}
++	}
++#endif
+ }
+ 
+ static inline J3DModel* NozzleBoxLoadModel(const TNozzleBox* p)
+--- a/src/Player/WaterGun.cpp
++++ b/src/Player/WaterGun.cpp
+@@ -4,6 +4,9 @@
+ #include <Player/NozzleDeform.hpp>
+ #include <Player/MarioAccess.hpp>
+ #include <Player/Mario.hpp>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ 
+ #include <JSystem/J3D/J3DGraphLoader/J3DModelLoader.hpp>
+ #include <JSystem/J3D/J3DGraphBase/J3DSys.hpp>
+@@ -1679,6 +1682,15 @@
+ 
+ void TWaterGun::changeNozzle(TNozzleType nozzleType, bool animate)
+ {
++#ifdef TARGET_PC
++	// extensions may change or refuse the nozzle (port_ext.h)
++	if (!port_ext_nozzle_asked) {
++		int to = nozzleType;
++		if (port_ext_player_nozzle(mMario, 0, &to, animate, PORT_NOZZLE_SWITCH))
++			return;
++		nozzleType = (TNozzleType)to;
++	}
++#endif
+ 	f32 usedWater = (f32)mCurrentWater
+ 	                / WaterGunCurNozzle2(this)->mEmitParams.mAmountMax.get();
+ 	if (nozzleType == Spray) {
+@@ -1751,11 +1763,18 @@
+ 		after += mSwitchToSecondNozzleSpeed;
+ 		mSwitchToSecondNozzleProgress = after;
+ 
++#ifdef TARGET_PC
++		// the swap's own steps: changeBackup asked for it (port_ext.h)
++		port_ext_nozzle_asked++;
++#endif
+ 		if (before < 0.5f && 0.5f <= after)
+ 			changeNozzle((TNozzleType)mSecondNozzle, false);
+ 
+ 		if (after < 0.5f && 0.5f <= before)
+ 			changeNozzle(Spray, false);
++#ifdef TARGET_PC
++		port_ext_nozzle_asked--;
++#endif
+ 
+ 		if (mSwitchToSecondNozzleProgress < 0.0f) {
+ 			mSwitchToSecondNozzleProgress = 0.0f;
+@@ -2195,6 +2214,18 @@
+ 
+ void TWaterGun::changeBackup()
+ {
++#ifdef TARGET_PC
++	// extensions may refuse the swap, or swap to another second nozzle
++	// (port_ext.h); it starts only from either end
++	if (mSwitchToSecondNozzleProgress == 0.0f || mSwitchToSecondNozzleProgress == 1.0f) {
++		const bool up = mSwitchToSecondNozzleProgress == 0.0f;
++		int to        = up ? (int)mSecondNozzle : (int)Spray;
++		if (port_ext_player_nozzle(mMario, 0, &to, 1, PORT_NOZZLE_SWAP))
++			return;
++		if (up && to != Spray && to != Yoshi)
++			mSecondNozzle = to;
++	}
++#endif
+ 	// TODO: Missing stack space
+ 	// volatile u32 unused2[5];
+ 	if (WaterGunSwitchToSecondNozzleProgress(this) == 0.0f) {
+--- a/src/System/MarDirectorDirect.cpp
++++ b/src/System/MarDirectorDirect.cpp
+@@ -939,16 +939,40 @@
+ 			break;
+ 
+ 		case 0x3C:
++#ifdef TARGET_PC
++		{
++			// extensions may give FLUDD another nozzle, or none (port_ext.h)
++			int to = TWaterGun::Rocket;
++			if (port_ext_player_nozzle(gpMarioOriginal, 0, &to, 1, PORT_NOZZLE_STAGE_START))
++				break;
++			port_ext_nozzle_asked++;
++			gpMarioOriginal->getFludd()->changeNozzle((TWaterGun::TNozzleType)to, true);
++			port_ext_nozzle_asked--;
++		}
++#else
+ 			gpMarioOriginal->getFludd()->changeNozzle(TWaterGun::Rocket, true);
++#endif
+ 			break;
+ 
+ 		default: {
++#ifdef TARGET_PC
++			// extensions may give FLUDD another nozzle, or none (port_ext.h)
++			int to = TFlagManager::getInstance()->getFlag(0x40004);
++			if (port_ext_player_nozzle(gpMarioOriginal, 0, &to, 1, PORT_NOZZLE_STAGE_START))
++				break;
++			port_ext_nozzle_asked++;
++			waterGun = gpMarioOriginal->getFludd();
++			waterGun->changeNozzle((TWaterGun::TNozzleType)to, true);
++			gpMarioOriginal->getFludd()->changeNozzle(TWaterGun::Spray, true);
++			port_ext_nozzle_asked--;
++#else
+ 			waterGun = gpMarioOriginal->getFludd();
+ 			waterGun->changeNozzle(
+ 			    (TWaterGun::TNozzleType)TFlagManager::getInstance()->getFlag(
+ 			        0x40004),
+ 			    true);
+ 			gpMarioOriginal->getFludd()->changeNozzle(TWaterGun::Spray, true);
++#endif
+ 		} break;
+ 		}
+ 	}

@@ -1,0 +1,98 @@
+Reason: port: split-screen co-op (ext/coop): extensions hear when a stage's scene is loaded with its parameter files still open, and may draw the stage themselves; the view-frustum check counts the other player's view as in view; goop is stamped from the first view's entry pass only
+--- a/src/System/MarDirectorSetupObjects.cpp
++++ b/src/System/MarDirectorSetupObjects.cpp
+@@ -425,6 +425,8 @@
+ 		               / (u16)SMSGetGameVideoHeight();
+ #ifdef TARGET_PC
+ 		cam->mAspect *= port_widescreen;
++		// the scene is in, its parameter files still open (port_ext.h)
++		port_ext_scene_loaded();
+ #endif
+ 	}
+ 
+--- a/src/System/MarDirectorDirect.cpp
++++ b/src/System/MarDirectorDirect.cpp
+@@ -238,6 +238,12 @@
+ 			}
+ 		} else {
+ 			local_140.unk0 = 0;
++#ifdef TARGET_PC
++			// an extension may draw the stage its own way (port_ext.h)
++			if (port_ext_draw_stage(this, &local_140)) {
++				GXInvalidateTexAll();
++			} else {
++#endif
+ 			unk40->perform(CUE_ALL, &local_140);
+ 			unk38->perform(CUE_ALL, &local_140);
+ 			unk3C->perform(CUE_ALL, &local_140);
+@@ -260,6 +266,9 @@
+ 		mPerformListGXPost->perform(CUE_ALL, &local_140);
+ #endif
+ 			GXInvalidateTexAll();
++#ifdef TARGET_PC
++			}
++#endif
+ 		}
+ 		desiredAppState = ({ typedef __typeof__(changeState()) sms_mod_r_; void* sms_mod_t_ = SMS_MOD_SITE(0x80299D0C); sms_mod_t_ ? ((__typeof__(sms_mod_as_free(static_cast<sms_mod_r_ (TMarDirector::*)()>(&TMarDirector::changeState))))sms_mod_t_)(this) : changeState(); });
+ 		offFlag(DIRECTOR_FLAG_LAST_SIMULATION_TICK
+--- a/src/MarioUtil/DrawUtil.cpp
++++ b/src/MarioUtil/DrawUtil.cpp
+@@ -722,6 +722,15 @@
+ 	}
+ }
+ 
++#ifdef TARGET_PC
++// Split-screen co-op (ext/coop): the other player's view matrix while the
++// stage has two views, so whatever either player sees is in view in both
++// passes and moves as it would on screen.
++extern "C" {
++extern Mtx* port_coop_other_view;
++}
++#endif
++
+ BOOL ViewFrustumClipCheck(JDrama::TGraphics* gfx, Vec* position, f32 radius)
+ {
+ 	Vec local_18;
+@@ -729,7 +738,19 @@
+ 
+ 	for (int i = 0; i < 6; ++i)
+ 		if (-radius > sViewPlane[i].sdf(&local_18))
++#ifdef TARGET_PC
++		{
++			if (!port_coop_other_view)
++				return false;
++			MTXMultVec(*port_coop_other_view, position, &local_18);
++			for (int k = 0; k < 6; ++k)
++				if (-radius > sViewPlane[k].sdf(&local_18))
++					return false;
++			return true;
++		}
++#else
+ 			return false;
++#endif
+ 
+ 	return true;
+ }
+--- a/src/Map/PollutionManager.cpp
++++ b/src/Map/PollutionManager.cpp
+@@ -14,8 +14,20 @@
+ 
+ TPollutionManager* gpPollution;
+ 
++#ifdef TARGET_PC
++// Split-screen co-op (ext/coop) makes the stage's entry pass again for the
++// second player's view: a model stamps goop once a frame, in the first.
++extern "C" {
++extern int port_coop_second_entry;
++}
++#endif
++
+ void TPollutionManager::stampModel(J3DModel* model)
+ {
++#ifdef TARGET_PC
++	if (port_coop_second_entry)
++		return;
++#endif
+ 	for (int i = 0; i < getJointModelNum(); ++i)
+ 		if (getLayer(i)->getPlaneType() == 0)
+ 			getLayer(i)->stampModel(model);

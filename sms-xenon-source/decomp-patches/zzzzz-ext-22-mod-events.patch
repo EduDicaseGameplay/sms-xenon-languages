@@ -1,0 +1,1004 @@
+Reason: extensions (ext/, port_ext.h) hear of the player's status taken, healing, death and its cause, his start's place (which they may change), what touches him, Yoshi and Blooper rides, water, Yoshi's hatching and meals; of actors spawned, the player's hits that take an enemy's health, enemies and bosses defeated, Shines appearing and taken; of save-file flags, sound effects and music (which they may change or leave out), talks and their messages, cutscenes ending, saves, the HUD's timer, scripts' calls and map events: the native mod API (ext/modapi) passes them to mods
+
+--- a/include/Strategic/spcinterp.hpp
++++ b/include/Strategic/spcinterp.hpp
+@@ -13,6 +13,9 @@
+ #include <stdio.h>
+ #include <dolphin/os.h>
+ #include <sms_modhook.h>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ // BetterSunshineEngine rewrites the first word of the one SpcTrace copy every
+ // caller links to (retail 0x8003DB3C) into `b OSReport` (0x80344644), which
+ // restores Sunscript logging: the arguments go to OSReport unchanged.
+@@ -737,6 +740,10 @@
+ 			if (call != nullptr) {
+ 				mCurrentlyExecutingBuiltinName
+ 				    = mBinary->getSymbolName(sym);
++#ifdef TARGET_PC
++				// extensions hear of each function a script calls (port_ext.h)
++				port_ext_script_call(mCurrentlyExecutingBuiltinName, unk10, (int)arg_count);
++#endif
+ 				call(this, arg_count);
+ 				return;
+ 			}
+--- a/src/Enemy/bosseel.cpp
++++ b/src/Enemy/bosseel.cpp
+@@ -2256,6 +2256,9 @@
+ // waits for one to end (spins, breath, bites), ran at half speed. Use the
+ // 30 fps value.
+ #include "port_framerate.h"
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ static inline f32 BossEelPortTickAnmRate()
+ {
+ 	f32 rate = SMSGetAnmFrameRate();
+@@ -2680,6 +2683,11 @@
+ DEFINE_NERVE(TNerveBossEelDie, TLiveActor)
+ {
+ 	TBossEel* eel = static_cast<TBossEel*>(spine->getBody());
++#ifdef TARGET_PC
++	// extensions hear of the boss's defeat (port_ext.h)
++	if (spine->getTime() == 0)
++		port_ext_actor_death((THitActor*)eel, 0);
++#endif
+ 	if (spine->getTime() == 0) {
+ 		SMSGetMSound()->startSoundActor(MSD_SE_BS_UNG_VOICE_LAST,
+ 		                                &eel->mPosition, 0, nullptr, 0, 4);
+--- a/src/Enemy/bossgesso.cpp
++++ b/src/Enemy/bossgesso.cpp
+@@ -1635,6 +1635,9 @@
+ // pass but count down once per 1/30 s: on the calc pass of every other frame
+ // at 60 (the director counts one unk5C per tick, two a frame).
+ #include "port_framerate.h"
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ static inline bool BossGessoPortCalcStep()
+ {
+ 	return port_native_frame_step(gpMarDirector->unk5C);
+@@ -2163,6 +2166,11 @@
+ DEFINE_NERVE(TNerveBGDie, TLiveActor)
+ {
+ 	TBossGesso* self = (TBossGesso*)spine->getBody();
++#ifdef TARGET_PC
++	// extensions hear of the boss's defeat (port_ext.h)
++	if (spine->getTime() == 0)
++		port_ext_actor_death((THitActor*)self, 0);
++#endif
+ 
+ 	if (spine->getTime() == 0) {
+ 		self->changeBck(2);
+--- a/src/Enemy/bosspakkun.cpp
++++ b/src/Enemy/bosspakkun.cpp
+@@ -49,6 +49,9 @@
+ #include <MSound/MSoundBGM.hpp>
+ #ifdef TARGET_PC
+ #include <sms_modhook.h>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ #endif
+ 
+ // The .bas table the shared model's BCK slots index into. Slots with no sound
+@@ -2080,6 +2083,11 @@
+ {
+ 	TBossPakkun* boss = (TBossPakkun*)spine->getBody();
+ 	MActor* actor     = boss->getMActor();
++#ifdef TARGET_PC
++	// extensions hear of the boss's defeat (port_ext.h)
++	if (spine->getTime() == 0)
++		port_ext_actor_death((THitActor*)boss, 0);
++#endif
+ 
+ 	// Both arms of this test compile to the same call; only the branch
+ 	// itself is evidence that two statements were written. The accessor in
+--- a/src/Enemy/bosstelesa.cpp
++++ b/src/Enemy/bosstelesa.cpp
+@@ -55,6 +55,9 @@
+ #include <Map/MapCollisionEntry.hpp>
+ #ifdef TARGET_PC
+ #include <sms_modhook.h>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ #endif
+ 
+ static const char* btelesa_bastable[] = {
+@@ -2325,6 +2328,11 @@
+ 
+ 		if (boss->unk350)
+ 			boss->decHitPoints();
++#ifdef TARGET_PC
++		// extensions hear of the boss's defeat (port_ext.h)
++		if (!boss->mHitPoints)
++			port_ext_actor_death((THitActor*)boss, 0);
++#endif
+ 
+ 		boss->onAllCollision();
+ 
+--- a/src/Enemy/bosswanwan.cpp
++++ b/src/Enemy/bosswanwan.cpp
+@@ -46,6 +46,9 @@
+ #include <MSound/MSSetSound.hpp>
+ #include <MSound/MSoundBGM.hpp>
+ #include <M3DUtil/InfectiousStrings.hpp>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ 
+ // The three fixed points of the fight, in .bss with a static initialiser:
+ // the hot spring the boss has to be led into, where the stake starts out and
+@@ -1867,6 +1870,11 @@
+ {
+ 	TBossWanwan* boss = (TBossWanwan*)spine->getBody();
+ 	MActor* actor     = boss->getMActor();
++#ifdef TARGET_PC
++	// extensions hear of the boss's defeat (port_ext.h)
++	if (spine->getTime() == 0)
++		port_ext_actor_death((THitActor*)boss, 0);
++#endif
+ 
+ 	if (spine->getTime() == 0) {
+ 		JGeometry::TVec3<f32> zero;
+--- a/src/Enemy/enemy.cpp
++++ b/src/Enemy/enemy.cpp
+@@ -17,6 +17,9 @@
+ // rogue includes needed for matching sinit & bss
+ #include <MSound/MSSetSound.hpp>
+ #include <MSound/MSoundBGM.hpp>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ 
+ TSpineEnemy::TSpineEnemy(const char* name)
+     : TLiveActor(name)
+@@ -192,6 +195,10 @@
+ 	onLiveFlag(LIVE_FLAG_UNK8000);
+ 	onLiveFlag(LIVE_FLAG_AIRBORNE);
+ 	control();
++#ifdef TARGET_PC
++	// extensions hear of it (port_ext.h)
++	port_ext_actor_spawn((THitActor*)this);
++#endif
+ }
+ 
+ void TSpineEnemy::resetSRTV(const JGeometry::TVec3<f32>& position,
+@@ -211,6 +218,10 @@
+ 	onLiveFlag(LIVE_FLAG_UNK8000);
+ 	onLiveFlag(LIVE_FLAG_AIRBORNE);
+ 	control();
++#ifdef TARGET_PC
++	// extensions hear of it (port_ext.h)
++	port_ext_actor_spawn((THitActor*)this);
++#endif
+ }
+ 
+ f32 TSpineEnemy::calcMinimumTurnRadius(f32 param_1, f32 param_2) const
+--- a/src/Enemy/smallEnemy.cpp
++++ b/src/Enemy/smallEnemy.cpp
+@@ -41,6 +41,9 @@
+ #include <M3DUtil/InfectiousStrings.hpp>
+ #ifdef TARGET_PC
+ #include <sms_modhook.h>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ #endif
+ 
+ int TSmallEnemyManager::mBlockWaitTime   = 400;
+@@ -363,6 +366,10 @@
+ 
+ void TSmallEnemy::genRandomItem()
+ {
++#ifdef TARGET_PC
++	// extensions hear of the defeat, or the stage's kill (port_ext.h)
++	port_ext_actor_death((THitActor*)this, checkLiveFlag(LIVE_FLAG_UNK20000) ? 1 : 0);
++#endif
+ 	if (!getSaveParams())
+ 		return;
+ 
+--- a/src/GC2D/CardSave.cpp
++++ b/src/GC2D/CardSave.cpp
+@@ -26,6 +26,9 @@
+ #include <MSound/MSoundBGM.hpp>
+ #ifdef TARGET_PC
+ #include <sms_modhook.h>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ #endif
+ 
+ extern JPAEmitterManager* gpEmitterManager4D2;
+@@ -2064,8 +2067,13 @@
+ 			if (status == CARD_RESULT_READY) {
+ 				if (unk2DC != 0) {
+ 					unk2DC = 0;
+-					if (unk2DD == 0)
++					if (unk2DD == 0) {
+ 						TFlagManager::getInstance()->saveSuccess();
++#ifdef TARGET_PC
++						// extensions hear of the save (port_ext.h)
++						port_ext_game_saved(unk2EA);
++#endif
++					}
+ 				}
+ 
+ 				s8 r = drawMessageBM(PROGRESS_UNK17);
+--- a/src/GC2D/GCConsole2.cpp
++++ b/src/GC2D/GCConsole2.cpp
+@@ -41,6 +41,9 @@
+ #include <string.h>
+ #ifdef TARGET_PC
+ #include <sms_modhook.h>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ 
+ // A camera's isDemoCamera() with its isSimpleDemoCamera() call redirected to
+ // a mod's function t (Eclipse's spoofCameraDemoForUI).
+@@ -2527,6 +2530,11 @@
+ 			} else {
+ 				timerValue = unk514 - timerValue;
+ 			}
++#ifdef TARGET_PC
++			// extensions hear of a countdown running out (port_ext.h)
++			if (timerValue == 0 && unk4FC != 0)
++				port_ext_timer(PORT_TIMER_OUT, 0);
++#endif
+ 		}
+ 	} else {
+ 		timerValue = param_1;
+@@ -2773,6 +2781,10 @@
+ {
+ 	unk4A  = 1;
+ 	unk518 = param_1 * 100;
++#ifdef TARGET_PC
++	// extensions hear of it: a countdown's time, 0 counting up (port_ext.h)
++	port_ext_timer(PORT_TIMER_START, unk510 ? 0 : (int)unk514);
++#endif
+ }
+ 
+ void TGCConsole2::stopMoveTimer()
+@@ -2781,6 +2793,10 @@
+ 		return;
+ 
+ 	unk4A = 0;
++#ifdef TARGET_PC
++	// extensions hear of it, and the time it shows (port_ext.h)
++	port_ext_timer(PORT_TIMER_STOP, (int)unk4FC);
++#endif
+ }
+ 
+ int TGCConsole2::getFinishedTime() { return unk4FC; }
+--- a/src/GC2D/Talk2D2.cpp
++++ b/src/GC2D/Talk2D2.cpp
+@@ -43,6 +43,9 @@
+ #include <M3DUtil/InfectiousStrings.hpp>
+ #include <System/DummyStrings.hpp>
+ #include <sms_modhook.h>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ 
+ TTalk2D2* gpTalk2D;
+ 
+@@ -328,6 +331,14 @@
+ void TTalk2D2::setMessageID(u32 message_id, u32 flags)
+ {
+ 	TBaseNPC* npc = SMSGetMarDirector()->getTalkingNPC();
++#ifdef TARGET_PC
++	// extensions hear of the message, and may show another (port_ext.h)
++	{
++		unsigned sms_ext_id = message_id;
++		port_ext_talk(PORT_TALK_MESSAGE, npc, &sms_ext_id, flags);
++		message_id = sms_ext_id;
++	}
++#endif
+ 
+ 	bool actionFlag = npc->checkActionFlag(0x200);
+ 	if (actionFlag) {
+--- a/src/Map/MapEvent.cpp
++++ b/src/Map/MapEvent.cpp
+@@ -6,6 +6,9 @@
+ // rogue includes needed for matching sinit & bss
+ #include <MSound/MSSetSound.hpp>
+ #include <MSound/MSoundBGM.hpp>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ 
+ bool TMapEvent::isFinishedAll() const { return stateIs(0) ? true : false; }
+ 
+@@ -24,8 +27,13 @@
+ void TMapEvent::perform(u32 cue, JDrama::TGraphics* graphics)
+ {
+ 	if (!stateIs(0) && (cue & CUE_MOVE)) {
+-		if (stateIs(1) && watch())
++		if (stateIs(1) && watch()) {
++#ifdef TARGET_PC
++			// extensions hear of it (port_ext.h)
++			port_ext_map_event((JDrama::TNameRef*)this);
++#endif
+ 			startControl();
++		}
+ 
+ 		if (stateIs(2) && control())
+ 			finishControl();
+--- a/src/MoveBG/Item.cpp
++++ b/src/MoveBG/Item.cpp
+@@ -836,6 +836,10 @@
+ void TShine::appearWithTime(int param_1, int param_2, int param_3, int param_4)
+ {
+ 	TItem::appear();
++#ifdef TARGET_PC
++	// extensions hear of it (port_ext.h)
++	port_ext_shine((THitActor*)this, PORT_SHINE_APPEAR);
++#endif
+ 	TShineAppearSimpleGetFlagManager(this)->setBool(true, 0x50000);
+ 
+ 	if (param_2 >= 0)
+@@ -885,6 +889,10 @@
+ void TShine::appearSimple(int param_1)
+ {
+ 	TItem::appear();
++#ifdef TARGET_PC
++	// extensions hear of it (port_ext.h)
++	port_ext_shine((THitActor*)this, PORT_SHINE_APPEAR);
++#endif
+ 	TShineAppearSimpleGetFlagManager(this)->setBool(true, 0x50000);
+ 
+ #ifdef TARGET_PC
+--- a/src/MoveBG/MapObjManager.cpp
++++ b/src/MoveBG/MapObjManager.cpp
+@@ -32,6 +32,9 @@
+ #include <MSound/MSSetSound.hpp>
+ #include <MSound/MSoundBGM.hpp>
+ #include <M3DUtil/InfectiousStrings.hpp>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ 
+ static void dummy(Vec* v) { *v = (Vec) { 0.0f, 0.0f, 0.0f }; }
+ static void dummy2(Vec* v) { *v = (Vec) { 1.0f, 1.0f, 1.0f }; }
+@@ -273,6 +276,10 @@
+ 		if (canAppear(obj, param_4)) {
+ 			obj->mPosition.set(x, y2, z);
+ 			obj->appear();
++#ifdef TARGET_PC
++			// extensions hear of it (port_ext.h)
++			port_ext_actor_spawn((THitActor*)obj);
++#endif
+ 			return obj;
+ 		}
+ 	}
+@@ -287,6 +294,10 @@
+ 
+ 		if (canAppear(obj, param_1)) {
+ 			obj->appear();
++#ifdef TARGET_PC
++			// extensions hear of it (port_ext.h)
++			port_ext_actor_spawn((THitActor*)obj);
++#endif
+ 			return obj;
+ 		}
+ 	}
+@@ -301,6 +312,10 @@
+ 
+ 		if (canAppear(obj, param_1)) {
+ 			obj->makeObjAppeared();
++#ifdef TARGET_PC
++			// extensions hear of it (port_ext.h)
++			port_ext_actor_spawn((THitActor*)obj);
++#endif
+ 			return obj;
+ 		}
+ 	}
+--- a/src/MSound/MSoundBGM.cpp
++++ b/src/MSound/MSoundBGM.cpp
+@@ -5,6 +5,9 @@
+ #include <JSystem/JAudio/JAInterface/JAIParameters.hpp>
+ #ifdef TARGET_PC
+ #include <sms_modhook.h>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ #endif
+ 
+ MSBgm* MSBgm::smBgmInTrack[3];
+@@ -131,6 +134,15 @@
+ 
+ JAISound* MSBgm::startBGM(u32 param)
+ {
++#ifdef TARGET_PC
++	// extensions may play another piece, or none (port_ext.h)
++	{
++		unsigned sms_ext_id = param;
++		if (port_ext_music(&sms_ext_id, 1))
++			return 0;
++		param = sms_ext_id;
++	}
++#endif
+ 	MSBgm* iVar1 = JALListS<MSBgm, u32>::search(param & JAISoundID_IndexMask);
+ 	if (iVar1) {
+ #ifdef TARGET_PC
+@@ -198,6 +210,11 @@
+ 		if (bgm) {
+ 			JAISound* sound = bgm->unk14;
+ 			if (sound) {
++#ifdef TARGET_PC
++				// extensions hear of it (port_ext.h)
++				unsigned sms_ext_id = sound->getID();
++				port_ext_music(&sms_ext_id, 0);
++#endif
+ 				sound->stop(fade);
+ 				smBgmInTrack[track] = nullptr;
+ 			}
+--- a/src/MSound/MSoundSE.cpp
++++ b/src/MSound/MSoundSE.cpp
+@@ -14,6 +14,9 @@
+ #include <System/DummyMactorString.hpp>
+ #include <System/DummyStrings.hpp>
+ #include <sms_modhook.h>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ 
+ using namespace MSoundSESystem;
+ 
+@@ -739,6 +742,20 @@
+ 		id -= 8;
+ 	}
+ 
++#ifdef TARGET_PC
++	// extensions may change or leave out the sound (port_ext.h)
++	{
++		const bool sms_ext_system = actor == (JAIActor*)0xffffffff;
++		const float* sms_ext_pos  = !sms_ext_system && actor && actor->mTranslation
++		                                ? &actor->mTranslation->x
++		                                : nullptr;
++		unsigned sms_ext_id = id;
++		if (port_ext_sound(&sms_ext_id, sms_ext_pos, sms_ext_system))
++			return nullptr;
++		id = sms_ext_id;
++	}
++#endif
++
+ 	if (actor == (JAIActor*)0xffffffff) {
+ 		if (out_handle != nullptr) {
+ 			MSGBasic->startSoundDirectID(id, out_handle, nullptr, fade, 4);
+--- a/src/Player/MarioCheckCol.cpp
++++ b/src/Player/MarioCheckCol.cpp
+@@ -21,7 +21,11 @@
+ // and may stop one (port_ext.h: ext/multiplayer passes them to the other games)
+ static inline BOOL portHit(THitActor* to, THitActor* from, u32 message)
+ {
+-	return port_ext_object_hit(to, from, message) ? FALSE : to->receiveMessage(from, message);
++	if (port_ext_object_hit(to, from, message))
++		return FALSE;
++	const BOOL sms_ext_r = to->receiveMessage(from, message);
++	port_ext_object_hit_done(to, from, message, sms_ext_r);
++	return sms_ext_r;
+ }
+ #endif
+ 
+--- a/src/Player/MarioCollision.cpp
++++ b/src/Player/MarioCollision.cpp
+@@ -36,8 +36,16 @@
+ 	return sound;
+ }
+ 
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ void TMario::incHP(int hp)
+ {
++#ifdef TARGET_PC
++	// extensions may change or stop what he gains (port_ext.h)
++	if (port_ext_player_heal(this, &hp, isUnderWater() || checkFlag(MARIO_FLAG_HELMET_FLW_CAMERA)))
++		return;
++#endif
+ 	if (isUnderWater() || checkFlag(MARIO_FLAG_HELMET_FLW_CAMERA)) {
+ 		mAir += hp;
+ 		if (mAir > mMaxAir) {
+@@ -166,8 +174,20 @@
+ 	if (getStatus() == MARIO_STATUS_DIVE)
+ 		return false;
+ 
++#ifdef TARGET_PC
++	// extensions hear of the stomp and may stop it (port_ext.h)
++	if (port_ext_object_stomp(param_1, (THitActor*)this))
++		return false;
++	{
++		const BOOL sms_ext_r = param_1->receiveMessage(this, HIT_MESSAGE_TRAMPLE);
++		port_ext_object_hit_done(param_1, (THitActor*)this, HIT_MESSAGE_TRAMPLE, sms_ext_r);
++		if (sms_ext_r == FALSE)
++			return false;
++	}
++#else
+ 	if (param_1->receiveMessage(this, HIT_MESSAGE_TRAMPLE) == FALSE)
+ 		return false;
++#endif
+ 
+ 	if (getStatus() == MARIO_STATUS_BROAD_JUMP) {
+ 		changePlayerStatus(MARIO_STATUS_BACK_JUMP, 0, false);
+@@ -246,6 +266,25 @@
+ 	    && getStatus() != MARIO_STATUS_ELEC_DOWN
+ 	    && getStatus() != MARIO_STATUS_SWIM_P_DOWN
+ 	    && mStatus != MARIO_STATUS_DOWN_LOSER) {
++#ifdef TARGET_PC
++		// extensions hear of the death and its cause (port_ext.h): what its
++		// caller said, else what is plain from Mario as he dies
++		if (!checkFlag(MARIO_FLAG_GAME_OVER)) {
++			int cause = port_ext_death_cause;
++			if (cause == PORT_DEATH_OTHER) {
++				if (checkStatusType(MARIO_STATUS_FLAG_SWIMMING) && mAir < 1.0f)
++					cause = PORT_DEATH_DROWN;
++				else if (mStatus == MARIO_STATUS_ELECTRIC_DAMAGE)
++					cause = PORT_DEATH_ELECTRIC;
++				else if (checkStatusType(0x10000))
++					cause = PORT_DEATH_CRASH;
++				else if (mHealth <= 0)
++					cause = PORT_DEATH_HEALTH;
++			}
++			port_ext_player_death(this, cause);
++		}
++		port_ext_death_cause = PORT_DEATH_OTHER;
++#endif
+ 		onFlag(MARIO_FLAG_GAME_OVER);
+ 		mHealth = 0;
+ 
+@@ -439,7 +478,14 @@
+ 		}
+ 	}
+ 	mInvincibilityFrames = invincibilityFrames;
++#ifdef TARGET_PC
++	// what hurts him, for extensions hearing of the damage (port_ext.h)
++	port_ext_damage_source = hittingActor;
+ 	decHP(damage);
++	port_ext_damage_source = 0;
++#else
++	decHP(damage);
++#endif
+ 	if (checkFlag(MARIO_FLAG_HAS_FLUDD)) {
+ 		for (int i = 0; i < waterEmit; ++i) {
+ 			if (mWaterGun->damage()) {
+--- a/src/Player/MarioJump.cpp
++++ b/src/Player/MarioJump.cpp
+@@ -16,7 +16,11 @@
+ // it stands on (port_ext.h: ext/multiplayer passes them to the other games)
+ static inline BOOL portGroundHit(THitActor* to, THitActor* from, u32 message)
+ {
+-	return port_ext_object_hit(to, from, message) ? FALSE : to->receiveMessage(from, message);
++	if (port_ext_object_hit(to, from, message))
++		return FALSE;
++	const BOOL sms_ext_r = to->receiveMessage(from, message);
++	port_ext_object_hit_done(to, from, message, sms_ext_r);
++	return sms_ext_r;
+ }
+ 
+ // checkBackTrig as retail inlines it into jumpMain's handlers, stayWall and
+@@ -375,6 +379,9 @@
+ 	int spC;
+ 
+ 	if (({ typedef __typeof__(checkStickRotate(&spC)) sms_mod_r_; void* sms_mod_t_ = SMS_MOD_SITE(0x8024C3F8); sms_mod_t_ ? ((__typeof__(sms_mod_as_free(static_cast<sms_mod_r_ (TMario::*)(int*)>(&TMario::checkStickRotate))))sms_mod_t_)(this, &spC) : checkStickRotate(&spC); }) == 1) {
++#ifdef TARGET_PC
++		const u32 sms_ext_from = mStatus;
++#endif
+ 		switch (spC) {
+ 		case 2:
+ 			mStatus = MARIO_STATUS_RIGHT_ROTATE_JUMP;
+@@ -383,6 +390,11 @@
+ 			mStatus = MARIO_STATUS_LEFT_ROTATE_JUMP;
+ 			break;
+ 		}
++#ifdef TARGET_PC
++		// a spin jump starts in the air: extensions hear of it (port_ext.h)
++		if (mStatus != sms_ext_from)
++			port_ext_player_status_changed(this, sms_ext_from, mStatus, mStatusArg);
++#endif
+ 		return 1;
+ 	}
+ 	return 0;
+--- a/src/Player/MarioMove.cpp
++++ b/src/Player/MarioMove.cpp
+@@ -883,6 +883,10 @@
+ 	mStatusArg   = arg;
+ 	mStatusState = 0;
+ 	mStatusTimer = 0;
++#ifdef TARGET_PC
++	// extensions hear of the status taken (port_ext.h)
++	port_ext_player_status_changed(this, mPrevStatus, mStatus, arg);
++#endif
+ 	return 1;
+ }
+ 
+@@ -1421,6 +1425,9 @@
+ 			                                0, nullptr, 0, 4);
+ 
+ 			if (mSinkTimer > mGraffitoParams.mSinkTime.get()) {
++#ifdef TARGET_PC
++				port_ext_death_cause = PORT_DEATH_GOOP;
++#endif
+ 				loserExec();
+ 				changePlayerStatus(MARIO_STATUS_SINK_LOSER, 0, false);
+ 			}
+@@ -1439,6 +1446,9 @@
+ 			mForwardVel = 0.0f;
+ 			mSlideVelX  = 0.0f;
+ 			mSlideVelZ  = 0.0f;
++#ifdef TARGET_PC
++			port_ext_death_cause = PORT_DEATH_GOOP;
++#endif
+ 			loserExec();
+ 			changePlayerStatus(MARIO_STATUS_SINK_LOSER, 0, false);
+ 			return;
+@@ -2225,6 +2235,11 @@
+ 	            :
+ #endif
+ 	            dVar7 > mPosition.y)) {
++#ifdef TARGET_PC
++		// extensions hear of the death (port_ext.h)
++		if (!checkFlag(MARIO_FLAG_GAME_OVER))
++			port_ext_player_death(this, PORT_DEATH_PIT);
++#endif
+ 		onFlag(MARIO_FLAG_GAME_OVER);
+ 		mHealth = 0;
+ 		mAnmSound->stop();
+@@ -2424,6 +2439,10 @@
+ 	MTXCopy(mModel->getModel()->getAnmMtx(mJointIdHead), mHeadMtx);
+ 
+ 	if (nowInWater != wasInWater) {
++#ifdef TARGET_PC
++		// extensions hear of it (port_ext.h)
++		port_ext_player_water(this, nowInWater ? 1 : 0, mFloorPosition.z);
++#endif
+ 		inOutWaterEffect(mFloorPosition.z);
+ 		f32 depth = mFloorPosition.z - mFloorPosition.y;
+ 		if (wasInWater == true && nowInWater == false) {
+@@ -2549,6 +2568,10 @@
+ void TMario::getOffYoshi(bool fly)
+ {
+ 	mInput &= ~0x8000;
++#ifdef TARGET_PC
++	// extensions hear of it (port_ext.h)
++	port_ext_player_mount(this, PORT_MOUNT_YOSHI, 0, mYoshi);
++#endif
+ 
+ 	if (fly) {
+ 		changePlayerStatus(0x89C, 0, 0);
+--- a/src/Player/MarioReceiveMsg.cpp
++++ b/src/Player/MarioReceiveMsg.cpp
+@@ -18,6 +18,9 @@
+ 
+ #ifdef TARGET_PC
+ #include <sms_modhook.h>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ #endif
+ 
+ bool TMario::getNozzle(THitActor* sender, TWaterGun::TNozzleType type)
+@@ -98,6 +101,10 @@
+ 		}
+ 		mSurfGesso->setBck("surfgeso_run1");
+ 		mSurfGesso->getFrameCtrl(ANM_TYPE_BCK)->setRate(0.5f);
++#ifdef TARGET_PC
++		// extensions hear of it (port_ext.h)
++		port_ext_player_mount(this, PORT_MOUNT_BLOOPER, 1, param_1);
++#endif
+ 	}
+ }
+ 
+@@ -163,6 +170,11 @@
+ {
+ 	if (checkFlag(MARIO_FLAG_GAME_OVER))
+ 		return FALSE;
++#ifdef TARGET_PC
++	// extensions may have him ignore it (port_ext.h)
++	if (port_ext_player_message(this, sender, message))
++		return FALSE;
++#endif
+ 
+ 	// Generic "Mario hit by enemy" thump sound.
+ 	if (sender->checkActorType(0x20000000)) {
+@@ -270,7 +282,19 @@
+ 				else
+ 					cannotTake = false;
+ 				if (!cannotTake) {
++#ifdef TARGET_PC
++					{
++						// extensions may change or stop the health he gains (port_ext.h)
++						const int sms_ext_max = mDeParams.mHPMax.get();
++						int sms_ext_gain      = sms_ext_max - mHealth;
++						if (sms_ext_gain <= 0 || !port_ext_player_heal(this, &sms_ext_gain, 0)) {
++							const int h = mHealth + (sms_ext_gain > 0 ? sms_ext_gain : 0);
++							mHealth     = h > sms_ext_max ? sms_ext_max : h;
++						}
++					}
++#else
+ 					mHealth = mDeParams.mHPMax.get();
++#endif
+ 					if (checkFlag(MARIO_FLAG_HAS_FLUDD)) {
+ 						mWaterGun->addWater(mWaterGun->getMaxWater());
+ 					}
+@@ -322,7 +346,19 @@
+ 
+ 		case 0x2000003C: // shirt/cap pickup
+ 			mCap->setModelActive(TMarioCap::E_CAP_MODEL_HAT);
++#ifdef TARGET_PC
++			{
++				// extensions may change or stop the health he gains (port_ext.h)
++				const int sms_ext_max = mDeParams.mHPMax.get();
++				int sms_ext_gain      = sms_ext_max - mHealth;
++				if (sms_ext_gain <= 0 || !port_ext_player_heal(this, &sms_ext_gain, 0)) {
++					const int h = mHealth + (sms_ext_gain > 0 ? sms_ext_gain : 0);
++					mHealth     = h > sms_ext_max ? sms_ext_max : h;
++				}
++			}
++#else
+ 			mHealth = mDeParams.mHPMax.get();
++#endif
+ 			emitGetEffect();
+ 			return TRUE;
+ 		case 0x2000000E: // yellow coin
+@@ -344,7 +380,19 @@
+ 				    static_cast<TMapObjBase*>(sender)->mInitialRotation.y);
+ 				mModelFaceAngle = mFaceAngle.y;
+ 				setPlayerVelocity(0.0f);
++#ifdef TARGET_PC
++				{
++					// extensions may change or stop the health he gains (port_ext.h)
++					const int sms_ext_max = mDeParams.mHPMax.get();
++					int sms_ext_gain      = sms_ext_max - mHealth;
++					if (sms_ext_gain <= 0 || !port_ext_player_heal(this, &sms_ext_gain, 0)) {
++						const int h = mHealth + (sms_ext_gain > 0 ? sms_ext_gain : 0);
++						mHealth     = h > sms_ext_max ? sms_ext_max : h;
++					}
++				}
++#else
+ 				mHealth = mDeParams.mHPMax.get();
++#endif
+ 				mAir    = mMaxAir;
+ 				changePlayerStatus(MARIO_STATUS_WIN_DEMO, 0, true);
+ 				return TRUE;
+--- a/src/Player/ModelWaterManager.cpp
++++ b/src/Player/ModelWaterManager.cpp
+@@ -39,7 +39,11 @@
+ // and may stop one (port_ext.h: ext/multiplayer passes them to the other games)
+ static inline BOOL portHit(THitActor* to, THitActor* from, u32 message)
+ {
+-	return port_ext_object_hit(to, from, message) ? FALSE : to->receiveMessage(from, message);
++	if (port_ext_object_hit(to, from, message))
++		return FALSE;
++	const BOOL sms_ext_r = to->receiveMessage(from, message);
++	port_ext_object_hit_done(to, from, message, sms_ext_r);
++	return sms_ext_r;
+ }
+ 
+ // Port: the position the shine shadow sphere is drawn at is a constant in
+--- a/src/Player/Yoshi.cpp
++++ b/src/Player/Yoshi.cpp
+@@ -39,6 +39,11 @@
+ #ifdef TARGET_PC
+ #include <sms_modhook.h>
+ #include <sms_modhook.h>
++#ifdef TARGET_PC
++#include "port_ext.h"
++// TYoshi::appearFromEgg eats the egg's fruit: the hatch is told, not the meal
++static int s_sms_ext_hatching;
++#endif
+ #endif
+ 
+ #ifdef TARGET_PC
+@@ -470,10 +475,21 @@
+ 
+ 	fruit->receiveMessage(mMario->getFloorHitActor(), HIT_MESSAGE_UNKB);
+ 
++#ifdef TARGET_PC
++	const u32 sms_ext_fruit = fruit->getActorType();
++	s_sms_ext_hatching++;
++#endif
+ 	doEat(fruit->getActorType());
++#ifdef TARGET_PC
++	s_sms_ext_hatching--;
++#endif
+ 	unkC = unk8;
+ 	mEgg = egg;
+ 	unk2 = unk4;
++#ifdef TARGET_PC
++	// extensions hear of it (port_ext.h)
++	port_ext_yoshi(this, PORT_YOSHI_HATCH, sms_ext_fruit);
++#endif
+ 	return true;
+ }
+ 
+@@ -530,6 +546,10 @@
+ void TYoshi::ride()
+ {
+ 	mState = STATE_MOUNTED;
++#ifdef TARGET_PC
++	// extensions hear of it (port_ext.h)
++	port_ext_player_mount(mMario, PORT_MOUNT_YOSHI, 1, this);
++#endif
+ 
+ 	changeAnimation(0x16);
+ 
+@@ -888,6 +908,11 @@
+ 		gpMarioParticleManager->emitAndBindToPosPtr(0x3E, &unk108, 0, this);
+ 		SMSGetMSound()->startSoundActor(MSD_SE_YO_TONGUE_GOKKUN,
+ 		                                &mTongue->mTipPos);
++#ifdef TARGET_PC
++		// extensions hear of it (port_ext.h)
++		if (!s_sms_ext_hatching)
++			port_ext_yoshi(this, PORT_YOSHI_EAT, param_1);
++#endif
+ 	}
+ }
+ 
+--- a/src/Strategic/spcinterp.cpp
++++ b/src/Strategic/spcinterp.cpp
+@@ -1,6 +1,9 @@
+ #include <Strategic/spcinterp.hpp>
+ #include <macros.h>
+ #include <sms_modhook.h>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ 
+ static void spcYield(TSpcInterp* interp, u32 arg_count)
+ {
+@@ -557,6 +560,10 @@
+ 	}
+ 
+ 	mCurrentlyExecutingBuiltinName = mBinary->getSymbolName(sym);
++#ifdef TARGET_PC
++	// extensions hear of each function a script calls (port_ext.h)
++	port_ext_script_call(mCurrentlyExecutingBuiltinName, unk10, (int)arg_count);
++#endif
+ 	call(this, arg_count);
+ }
+ 
+--- a/src/System/FlagManager.cpp
++++ b/src/System/FlagManager.cpp
+@@ -224,6 +224,12 @@
+ void TFlagManager::setFlag(u32 flag, s32 value)
+ {
+ #ifdef TARGET_PC
++	// extensions may change or refuse the new value (port_ext.h)
++	{
++		const s32 sms_ext_old = getFlag(flag);
++		if (value != sms_ext_old && port_ext_flag_change(flag, sms_ext_old, &value))
++			return;
++	}
+ 	// As in getFlag, for setFlag's switch table (retail 0x803DEE38): Eclipse's
+ 	// type-2 handler (entry at 0x803DEE40), BetterSunshineEngine's type-6 one
+ 	// (entry at 0x803DEE50).
+@@ -380,6 +386,14 @@
+ 	// the coin counter is only written by coin pickups
+ 	if (flag == 0x40002)
+ 		amount *= port_cheat_coin_multiplier;
++	// extensions may change or refuse the new value (port_ext.h)
++	if (amount != 0) {
++		const s32 sms_ext_old = getFlag(flag);
++		s32 sms_ext_new       = sms_ext_old + amount;
++		if (port_ext_flag_change(flag, sms_ext_old, &sms_ext_new))
++			return;
++		amount = sms_ext_new - sms_ext_old;
++	}
+ #endif
+ 	u32 low = flag & 0xFFFF;
+ 	switch (flag >> 16) {
+--- a/src/System/MarDirectorDirect.cpp
++++ b/src/System/MarDirectorDirect.cpp
+@@ -868,6 +868,32 @@
+ 	if (!marioSetPosition || marioSetPosition->unkD0 == 0)
+ 		uVar10 = 0;
+ 
++#ifdef TARGET_PC
++	// extensions may put him elsewhere (port_ext.h): the start's place and
++	// turn, or where the scene file has him when there is none
++	JGeometry::TVec3<f32> sms_ext_pos = gpMarioOriginal->mPosition;
++	f32 sms_ext_yaw = (f32)gpMarioOriginal->mFaceAngle.y * (360.0f / 65536.0f);
++	int sms_ext_has = uVar10 != 0;
++	if (uVar10) {
++		sms_ext_pos = marioSetPosition->getUnk10(uVar10 - 1);
++		sms_ext_yaw = unkD1 == 0 ? 0.0f : marioSetPosition->getUnk70(uVar10 - 1).y;
++	}
++	const JGeometry::TVec3<f32> sms_ext_was = sms_ext_pos;
++	const f32 sms_ext_yaw_was               = sms_ext_yaw;
++	const int sms_ext_has_was               = sms_ext_has;
++	port_ext_player_spawn(&sms_ext_pos.x, &sms_ext_yaw, &sms_ext_has, unkD1);
++	const bool sms_ext_moved = sms_ext_has
++	                           && (!sms_ext_has_was || sms_ext_pos.x != sms_ext_was.x || sms_ext_pos.y != sms_ext_was.y
++	                               || sms_ext_pos.z != sms_ext_was.z || sms_ext_yaw != sms_ext_yaw_was);
++#define SMS_EXT_SPAWN()              \
++	if (sms_ext_moved) {             \
++		pos   = &sms_ext_pos;          \
++		fVar1 = sms_ext_yaw;           \
++	}
++#else
++#define SMS_EXT_SPAWN()
++#endif
++
+ 	switch (unkD1) {
+ 	case 1: {
+ 		fVar1 = 0.0f;
+@@ -878,6 +904,7 @@
+ 			fVar1 = marioSetPosition->getUnk70(uVar10 - 1).y;
+ 			pos   = &marioSetPosition->getUnk10(uVar10 - 1);
+ 		}
++		SMS_EXT_SPAWN()
+ 		gpMarioOriginal->rollingStart(pos, fVar1);
+ 	} break;
+ 
+@@ -901,6 +928,7 @@
+ 			fVar1 = marioSetPosition->getUnk70(uVar10 - 1).y;
+ 			pos   = &marioSetPosition->getUnk10(uVar10 - 1);
+ 		}
++		SMS_EXT_SPAWN()
+ 		gpMarioOriginal->returnStart(pos, fVar1, cVar4, iVar9);
+ 	} break;
+ 
+@@ -913,9 +941,12 @@
+ 		pos = nullptr;
+ 		if (uVar10)
+ 			pos = &marioSetPosition->getUnk10(uVar10 - 1);
+-		gpMarioOriginal->waitingStart(pos, 0.0f);
++		fVar1 = 0.0f;
++		SMS_EXT_SPAWN()
++		gpMarioOriginal->waitingStart(pos, fVar1);
+ 		break;
+ 	}
++#undef SMS_EXT_SPAWN
+ 
+ 	const TGameSequence& currArea = gpApplication.mCurrArea;
+ 
+@@ -1432,6 +1463,10 @@
+ 			u32 prev = unk24D++;
+ 			unk24D &= 0x7;
+ 			TDemoInfo* info = &unk12C[prev];
++#ifdef TARGET_PC
++			// extensions hear of the cutscene's end (port_ext.h)
++			port_ext_demo_camera_end(info->unk0, info->unk1C, uVar15 ? 1 : 0);
++#endif
+ 			if (unk24D != unk24C) {
+ 				gpCamera->endDemoCamera();
+ 				if (info->unk14 != nullptr)
+@@ -1463,6 +1498,10 @@
+ 		switch (unk124) {
+ 		case 2:
+ 			if (unk126 == 0) {
++#ifdef TARGET_PC
++				// extensions hear of the talk's end (port_ext.h)
++				port_ext_talk(PORT_TALK_END, unkA0, 0, 0);
++#endif
+ 				unkA0 = 0;
+ 				unkA4 = 0;
+ 				getGamePad()->offFlag(TMarioGamePad::PAD_FLAG_0x8);
+@@ -1486,6 +1525,10 @@
+ 			break;
+ 
+ 		case 1:
++#ifdef TARGET_PC
++			// extensions hear of the talk's start (port_ext.h)
++			port_ext_talk(PORT_TALK_START, getTalkingNPC(), 0, 0);
++#endif
+ 			getTalkingNPC()->onLiveFlag(LIVE_FLAG_UNK40000);
+ 			getTalkingNPC()->unkC.off(CUE_MOVE | CUE_CALC_ANIM);
+ 			getGamePad()->onFlag(TMarioGamePad::PAD_FLAG_0x8);
+--- a/src/System/MarDirectorEvent.cpp
++++ b/src/System/MarDirectorEvent.cpp
+@@ -171,6 +171,10 @@
+ 
+ void TMarDirector::fireGetStar(TShine* shine)
+ {
++#ifdef TARGET_PC
++	// extensions hear of the Shine taken (port_ext.h)
++	port_ext_shine((THitActor*)shine, PORT_SHINE_GET);
++#endif
+ 	unk25C = shine;
+ 	unk4C |= 1;
+ 	JGeometry::TVec3<f32>& v = shine->mInitialRotation;

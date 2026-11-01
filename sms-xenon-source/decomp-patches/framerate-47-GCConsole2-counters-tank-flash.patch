@@ -1,0 +1,57 @@
+Reason: port: with frame_rate = 60 or 120 the HUD's jet-balloon and coin counters rolled up two or four times as fast (they step on the HUD's calc-anim pass, once a frame, beside the balloon framerate-04 already steps at 30 fps), and the water tank's full-pressure flash, stepped as the tank is drawn, pulsed as fast; step both once per 1/30 s
+--- a/src/GC2D/GCConsole2.cpp
++++ b/src/GC2D/GCConsole2.cpp
+@@ -1912,6 +1912,16 @@
+ // TODO: frame 0x28 short, and the first colour ramp schedules its two
+ // int-to-float conversions differently. The `< 15` and `< 25` tests are signed
+ // (`cmpwi`) in the ROM after an unsigned `< 10`, hence the `(int)` casts.
++#ifdef TARGET_PC
++#include "port_framerate.h"
++// Port: one step per 1/30 s for what is stepped as the HUD is drawn (once a
++// frame): the director counts one unk5C per movement tick.
++static inline bool GCConsole2PortDrawStep()
++{
++	return port_native_frame_step(gpMarDirector->unk5C);
++}
++#endif
++
+ void TGCConsole2::drawWaterBack()
+ {
+ 	if (gpMarioOriginal->getHealth() == 0 || gpMarioOriginal->getAir() == 0)
+@@ -1995,6 +2005,11 @@
+ 
+ 			GXSetTevColor(GX_TEVREG0, JUtility::TColor(color + 0xc8));
+ 			GXSetTevColor(GX_TEVREG1, JUtility::TColor(color));
++#ifdef TARGET_PC
++			// Port: the full-pressure flash steps as the tank is drawn, once
++			// per frame; keep its 25 steps to 1/30 s each at 60 and 120.
++			if (GCConsole2PortDrawStep())
++#endif
+ 			++unk30C;
+ 		} else {
+ 			if (unk30C != 0)
+@@ -4433,6 +4448,14 @@
+ 	}
+ 	}
+ 
++#ifdef TARGET_PC
++	// Port: the jet-balloon and coin counters below step on this pass too:
++	// a digit, its 12-pass cross-fade or bounce, then the next digit, so they
++	// rolled up in half (60 fps) or a quarter (120) of their time, with a
++	// sparkle per coin. Step them once per 1/30 s as well.
++	if (!GCConsole2PortCalcStep())
++		goto portCountersDone;
++#endif
+ 	// The two rows are spelled out separately in the ROM rather than sharing
+ 	// a "blend" flag: the nozzle row cross-fades between the old and the new
+ 	// digit, the rocket row just swaps the texture.
+@@ -4589,6 +4612,9 @@
+ 			}
+ 		}
+ 	}
++#ifdef TARGET_PC
++portCountersDone:
++#endif
+ 
+ 	if (gpMarioOriginal->mYoshi->onYoshi()) {
+ 		if (console->unk29C->getPane()->isVisible()) {

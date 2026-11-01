@@ -1,0 +1,14 @@
+Xbox 360: the SMS_SHOTS field clock for the bench's field ranges (xenon/platform/xe_bench.cpp). Applied by xenon/tools/xstage to the staged copy only.
+--- a/platform/vi/vi.cpp	2026-10-28 00:37:07.313105934 +0500
++++ b/platform/vi/vi.cpp	2026-10-28 00:37:07.395984417 +0500
+@@ -265,6 +265,10 @@
+ extern "C" void VIConfigure(GXRenderModeObj* rm) {}
+ extern "C" void VIConfigurePan(u16, u16, u16, u16) {}
+ extern "C" void VIFlush(void) { shots_poll(game_field(), g_next_fb); }
++#ifdef _XBOX
++// The field clock of SMS_SHOTS, for the bench (xenon/platform/xe_bench.cpp)
++extern "C" u32 port_vi_game_field(void) { return game_field(); }
++#endif
+ extern "C" void VISetNextFrameBuffer(void* fb) { g_next_fb = fb; }
+ extern "C" void VISetNextRightFrameBuffer(void*) {}
+ extern "C" void VISetBlack(BOOL black) { g_black = black != 0; }

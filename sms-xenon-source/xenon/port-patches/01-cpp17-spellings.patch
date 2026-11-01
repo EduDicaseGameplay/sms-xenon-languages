@@ -1,0 +1,77 @@
+VS2010 (Xbox 360 build): C++17 structured bindings, multi-statement lambdas' deduced return types, and braced lists (of a std::pair, and as range-for ranges), spelled in what VS2010 compiles. Applied by xenon/tools/xstage to the staged copy only.
+--- a/platform/dvd/dvd.cpp
++++ b/platform/dvd/dvd.cpp
+@@ -383,7 +383,7 @@
+ 	u32 strings = 0x20 + be32(&a[0x34]);
+ 	if (nodes + nodeCount * 16 > a.size() || entries + entryCount * 20 > a.size() || strings >= a.size())
+ 		return false;
+-	auto name_at = [&](u32 off) {
++	auto name_at = [&](u32 off) -> std::string {
+ 		std::string n;
+ 		for (u32 i = strings + off; i < a.size() && a[i]; i++)
+ 			n += (char)tolower(a[i]);
+@@ -391,9 +391,10 @@
+ 	};
+ 	// every file's path below the root folder -> its entry
+ 	std::map<std::string, u32> paths;
+-	std::vector<std::pair<u32, std::string>> todo = { { 0u, std::string() } };
++	std::vector<std::pair<u32, std::string> > todo(1, std::make_pair(0u, std::string()));
+ 	while (!todo.empty()) {
+-		auto [node, path] = todo.back();
++		u32 node = todo.back().first;
++		std::string path = todo.back().second;
+ 		todo.pop_back();
+ 		if (node >= nodeCount)
+ 			return false;
+@@ -405,7 +406,7 @@
+ 			if (n == "." || n == "..")
+ 				continue;
+ 			if (e[4] & 0x02)
+-				todo.push_back({ be32(e + 8), path + "/" + n });
++				todo.push_back(std::make_pair(be32(e + 8), path + "/" + n));
+ 			else
+ 				paths[path + "/" + n] = k;
+ 		}
+@@ -654,7 +655,8 @@
+ 			continue;
+ 		std::string dir;
+ 		struct stat st;
+-		for (const std::string& c : { name + "/files", "mods/" + name + "/files", "../../mods/" + name + "/files" })
++		const std::string cands[] = { name + "/files", "mods/" + name + "/files", "../../mods/" + name + "/files" };
++		for (const std::string& c : cands)
+ 			if (stat(c.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+ 				dir = c;
+ 				break;
+@@ -733,7 +735,8 @@
+ 			         " its movies play as Eclipse has them\n", set);
+ 		return d;
+ 	}
+-	for (const char* rom : { "rom", "../../rom" }) {
++	static const char* const kRoms[] = { "rom", "../../rom" };
++	for (const char* rom : kRoms) {
+ 		DIR* dp = opendir(rom);
+ 		if (!dp)
+ 			continue;
+--- a/platform/misc/language.cpp
++++ b/platform/misc/language.cpp
+@@ -89,7 +89,8 @@
+ 	const Language* l = chosen();
+ 	if (!strcmp(l->code, "en"))
+ 		return nullptr;
+-	for (const char* base : { "mods/languages/", "../../mods/languages/" }) {
++	static const char* const kBases[] = { "mods/languages/", "../../mods/languages/" };
++	for (const char* base : kBases) {
+ 		std::string d = std::string(base) + l->code;
+ 		if (is_dir(d + "/files")) {
+ 			dir = d;
+--- a/platform/misc/port_settings.cpp
++++ b/platform/misc/port_settings.cpp
+@@ -281,7 +281,7 @@
+ 
+ bool replaceFile(const std::string& from, const std::string& to) {
+ #ifdef _WIN32
+-    const auto wide = [](const std::string& s) {
++    const auto wide = [](const std::string& s) -> std::wstring {
+         const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+         std::wstring out(size_t(n > 0 ? n : 1), L'\0');
+         if (n > 0) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &out[0], n);

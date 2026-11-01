@@ -1,0 +1,27 @@
+Reason: port: Infinite Air (F9 menu, port_cheat_infinite_air in platform/misc/port_cheats.cpp): thinkWaterSurface keeps the player's Mario's air meter full under water and in the diving helmet, so he can't drown. TEnemyMario is left alone through isMario()
+--- a/src/Player/MarioMove.cpp
++++ b/src/Player/MarioMove.cpp
+@@ -2274,6 +2274,10 @@
+ 		offFlag(MARIO_FLAG_NPC_TALKING);
+ }
+ 
++#ifdef TARGET_PC
++extern "C" int port_cheat_infinite_air;
++#endif
++
+ void TMario::thinkWaterSurface()
+ {
+ 	if (MarioMoveStatusType(this, MARIO_STATUS_FLAG_UNK10000))
+@@ -2428,6 +2432,12 @@
+ 
+ 	if (isUnderWater() || checkFlag(MARIO_FLAG_HELMET_FLW_CAMERA)) {
+ 		f32 prevAir = mAir;
++#ifdef TARGET_PC
++		// the meter stays full, without the rumble of one going down
++		if (port_cheat_infinite_air && isMario())
++			prevAir = mAir = mMaxAir;
++		else
++#endif
+ 		if (isWearingHelm()) {
+ 			if (mStatus != MARIO_STATUS_TAKEN) {
+ 				mAir -= mSwimParams.mAirDecDive.get();

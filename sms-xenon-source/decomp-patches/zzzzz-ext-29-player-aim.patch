@@ -1,0 +1,40 @@
+Reason: player->set_aim for mods (port_ext_player_aim): an extension may aim Mario's body and FLUDD a way of its own, whichever way he moves. After each tick's control, before FLUDD moves and his pose is made, his body turns that way (mModelFaceAngle); and FLUDD tilts up or down by it (TNozzleBase::calcGunAngle), as it does for the game's own L camera. A first-person camera keeps FLUDD spraying where it looks, walking sideways too. Without such an extension, nothing changes.
+
+--- a/src/Player/MarioMain.cpp
++++ b/src/Player/MarioMain.cpp
+@@ -153,6 +153,15 @@
+ 		if (mFreezeTimer <= 0) {
+ 			({ typedef __typeof__(playerControl(graphics)) sms_mod_r_; void* sms_mod_t_ = SMS_MOD_SITE(0x8024D3A0); if (sms_mod_t_) ((__typeof__(sms_mod_as_free(static_cast<sms_mod_r_ (TMario::*)(JDrama::TGraphics*)>(&TMario::playerControl))))sms_mod_t_)(this, graphics); else playerControl(graphics); });
+ 			setPositions();
++#ifdef TARGET_PC
++			{
++				// an extension may turn his body and FLUDD (port_ext.h):
++				// before FLUDD moves and his pose is made
++				s16 aim, tilt;
++				if (port_ext_player_aim(this, &aim, &tilt))
++					mModelFaceAngle = aim;
++			}
++#endif
+ 			if (mCap != nullptr)
+ 				mCap->perform(CUE_MOVE, graphics);
+ 			if (MarioMainGetFludd(this) != nullptr)
+--- a/src/Player/WaterGun.cpp
++++ b/src/Player/WaterGun.cpp
+@@ -293,6 +293,17 @@
+ void TNozzleBase::calcGunAngle(const TMarioControllerWork& work)
+ {
+ 	// volatile u32 unused1[17];
++#ifdef TARGET_PC
++	{
++		// an extension may tilt FLUDD (port_ext.h), as the first-person L
++		// camera below does: its aim, whatever the stance
++		s16 aim, tilt;
++		if (port_ext_player_aim(NozzleMario(this), &aim, &tilt)) {
++			unk36E = tilt;
++			return;
++		}
++	}
++#endif
+ 	if (NozzleMario(this) == gpMarioAddress
+ 	    && (gpCamera->isLButtonCamera() || gpCamera->isJetCoaster1stCamera())) {
+ 		unk36E = gpCamera->mCurrentTarget.mPitch;

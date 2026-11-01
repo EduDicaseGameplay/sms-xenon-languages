@@ -1,0 +1,30 @@
+Reason: port: split-screen co-op (ext/coop): a controller's meanings follow the camera of the player holding it (the close-up view Y opens), not always camera 1
+--- a/src/System/MarioGamePad.cpp
++++ b/src/System/MarioGamePad.cpp
+@@ -1,6 +1,12 @@
+ #include <System/MarioGamePad.hpp>
+ #include <System/Application.hpp>
+ #ifdef TARGET_PC
++#include <Camera/Camera.hpp>
++// ext/coop: the camera a controller's player sees through (gpCamera but for
++// split-screen co-op's second player)
++CPolarSubCamera* port_coop_pad_camera(const TMarioGamePad* pad);
++#endif
++#ifdef TARGET_PC
+ #include <sms_modhook.h>
+ #endif
+ 
+@@ -131,7 +137,13 @@
+ 	}
+ 
+ 	if (mDisabledFrames <= 0) {
++#ifdef TARGET_PC
++		// split-screen co-op (ext/coop): the camera of the player holding this
++		// controller, which is not always camera 1
++		bool isLButtonCameraSpecifyMode = port_coop_pad_camera(this)->isLButtonCamera();
++#else
+ 		bool isLButtonCameraSpecifyMode = gpCamera->isLButtonCamera();
++#endif
+ 		if (isLButtonCameraSpecifyMode) {
+ 			// This is for when in y camera
+ 			mCompSPos[1 * 2]     = (f32)mButton.mAnalogL;

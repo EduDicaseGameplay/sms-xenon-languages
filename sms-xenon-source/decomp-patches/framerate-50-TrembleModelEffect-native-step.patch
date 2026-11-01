@@ -1,0 +1,36 @@
+Reason: port: with frame_rate = 60 or 120 the vertex jiggle of Mario after a hard landing or a shock (and of Shadow Mario and the Bianco root plants) buzzed two or four times as fast and ended as much sooner; TTrembleModelEffect::movement is called once per displayed frame; step it once per 1/30 s
+--- a/src/MarioUtil/DrawUtil.cpp
++++ b/src/MarioUtil/DrawUtil.cpp
+@@ -22,6 +22,9 @@
+ #include <dolphin/mtx.h>
+ #include <dolphin/os/OSCache.h>
+ #include <stdlib.h>
++#ifdef TARGET_PC
++#include "port_framerate.h"
++#endif
+ 
+ TSilhouette* gpSilhouetteManager;
+ 
+@@ -381,6 +384,22 @@
+ 	if (!(unk8 & 1))
+ 		return;
+ 
++#ifdef TARGET_PC
++	// Port: every caller steps the spring once per displayed frame (Mario's
++	// and his cap's pre-entry pass, Shadow Mario's draw, the Bianco root
++	// plant's drawObject), so at 60 or 120 fps a landing or shock jiggle
++	// buzzed two or four times as fast and ended as much sooner. Step it once
++	// per 1/30 s (its 4-frame buzz cannot be split), and in between keep the
++	// model on the positions of the last step.
++	if (gpMarDirector != nullptr && !port_native_frame_step(gpMarDirector->unk5C)) {
++		void* last = (unk8 & 2) ? (void*)unk2C[1 - unk9] : (void*)unk18[1 - unk9];
++		unk0->getVertexBuffer()->setVtxPosArrayPointer(0, last);
++		for (int j = 0; j < unk0->getModelData()->getShapeNum(); ++j)
++			unk0->getShapePacket(0)->setVtxPos(last);
++		return;
++	}
++#endif
++
+ 	if ((unk8 & 4) != 4) {
+ 		unk10--;
+ 		if (unk10 <= 0) {

@@ -1,0 +1,39 @@
+# Super Mario Sunshine for the Xbox 360: options, one per line as NAME=value.
+# Remove the leading # to use a line. With no line, the default applies.
+
+# Where the game is: by default the files and sys folders sms_extract.py made, next to
+# default.xex, or a GMSE01.iso there.
+# SMS_DISC_ROOT=game:\files
+# SMS_DISC_IMAGE=game:\GMSE01.iso
+
+# Frame rate during gameplay: 30 (default, the GameCube's) or 60, which the console cannot hold.
+# SMS_FRAME_RATE=60
+
+# Widescreen: 16:9 (default), 0 for the GameCube's 4:3. The HUD stays centred unless
+# SMS_WIDESCREEN_HUD=edges moves its corner pieces to the screen's edges.
+# SMS_WIDESCREEN=0
+# SMS_WIDESCREEN_HUD=edges
+
+# Internal resolution, times the GameCube's: 1 to 1.75 (default 1.5, for 720p; 1 is the
+# GameCube's own 640x448).
+# SMS_XE_SCALE=1
+
+# Volume, 0 to 100.
+# SMS_VOLUME=100
+# SMS_MUSIC_VOLUME=100
+# SMS_SFX_VOLUME=100
+
+# Rumble: 0 turns it off; strength in percent.
+# SMS_RUMBLE=0
+# SMS_RUMBLE_STRENGTH=100
+
+# Camera: 1 inverts the right stick's axis.
+# SMS_CAMERA_INVERT_X=1
+# SMS_CAMERA_INVERT_Y=1
+
+# 1 starts at the title screen (no logos, no opening movie); 1 skips cutscenes.
+# SMS_SKIP_INTRO=1
+# SMS_SKIP_MOVIES=1
+
+# Saves and settings go in data\ next to default.xex; this moves them.
+# XDG_DATA_HOME=game:\data

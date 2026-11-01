@@ -1,0 +1,94 @@
+Reason: big-endian hosts (the Xbox 360) keep game data in disc order: the in-place byte swaps that patches 0013, endian-05, endian-06 and endian-11 added for little-endian hosts are skipped when PORT_HOST_BE (src/port_compat.h) is set.
+--- a/libs/JSystem/include/JSystem/JSupport/JSUInputStream.hpp
++++ b/libs/JSystem/include/JSystem/JSupport/JSUInputStream.hpp
+@@ -19,6 +19,8 @@
+ 	// replaces its leading bytes, as on the console.
+ 	static void swapBE(void* buf, s32 size)
+ 	{
++		if (PORT_HOST_BE)
++			return; // already host order
+ 		u8* b = (u8*)buf;
+ 		for (s32 i = 0; i < size / 2; i++) {
+ 			u8 t = b[i];
+--- a/src/System/FlagManager.cpp
++++ b/src/System/FlagManager.cpp
+@@ -12,6 +12,10 @@
+ // Memory-card data keeps retail's big-endian layout.
+ static void port_write_be(JSUMemoryOutputStream& out, const void* p, int size, int width)
+ {
++	if (PORT_HOST_BE) {
++		out.write(p, size);
++		return;
++	}
+ 	for (int o = 0; o < size; o += width) {
+ 		u8 tmp[8];
+ 		for (int i = 0; i < width; i++)
+@@ -21,6 +25,8 @@
+ }
+ static void port_swap_in_place(void* p, int size, int width)
+ {
++	if (PORT_HOST_BE)
++		return;
+ 	u8* b = (u8*)p;
+ 	for (int o = 0; o < size; o += width)
+ 		for (int i = 0; i < width / 2; i++) {
+--- a/src/System/CardManager.cpp
++++ b/src/System/CardManager.cpp
+@@ -92,7 +92,7 @@
+ void TCardSector::setCheckSum(u32 write_count)
+ {
+ #ifdef TARGET_PC
+-	mWriteCount = port_bswap32(write_count);
++	mWriteCount = port_host_to_be32(write_count);
+ 	u16* ptr    = (u16*)this;
+ 	u32 top, bottom;
+ 	top = bottom = 0;
+@@ -101,7 +101,7 @@
+ 		top += v;
+ 		bottom += ~v;
+ 	}
+-	mCheckSum = port_bswap32((top << 16) | bottom & 0xffff);
++	mCheckSum = port_host_to_be32((top << 16) | bottom & 0xffff);
+ #else
+ 	mWriteCount = write_count;
+ 	u16* ptr    = (u16*)this;
+--- a/src/System/ParamInst.cpp
++++ b/src/System/ParamInst.cpp
+@@ -9,7 +9,7 @@
+ 
+ 	stream.read(&discard[8], 4);
+ 	stream.read(&value, sizeof(T));
+-#ifdef TARGET_PC
++#if defined(TARGET_PC) && !PORT_HOST_BE
+ 	{
+ 		u8* v = (u8*)&value;
+ 		u32 w = sizeof(T) == 12 ? 4 : sizeof(T);
+--- a/include/Strategic/spcinterp.hpp
++++ b/include/Strategic/spcinterp.hpp
+@@ -428,7 +428,7 @@
+ 		f32 result;
+ 		u8* dst = (u8*)&result;
+ 		for (int i = 0; i < sizeof(f32); ++i)
+-#ifdef TARGET_PC
++#if defined(TARGET_PC) && !PORT_HOST_BE
+ 			dst[i] = src[sizeof(f32) - 1 - i]; // byte code immediates are big-endian
+ #else
+ 			dst[i] = src[i];
+@@ -442,7 +442,7 @@
+ 		s32 result;
+ 		u8* dst = (u8*)&result;
+ 		for (int i = 0; i < sizeof(s32); ++i)
+-#ifdef TARGET_PC
++#if defined(TARGET_PC) && !PORT_HOST_BE
+ 			dst[i] = src[sizeof(s32) - 1 - i]; // byte code immediates are big-endian
+ #else
+ 			dst[i] = src[i];
+@@ -457,7 +457,7 @@
+ 		u32 result;
+ 		u8* dst = (u8*)&result;
+ 		for (int i = 0; i < sizeof(u32); ++i)
+-#ifdef TARGET_PC
++#if defined(TARGET_PC) && !PORT_HOST_BE
+ 			dst[i] = src[sizeof(u32) - 1 - i]; // byte code immediates are big-endian
+ #else
+ 			dst[i] = src[i];

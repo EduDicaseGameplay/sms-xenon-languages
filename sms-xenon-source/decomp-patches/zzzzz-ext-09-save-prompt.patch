@@ -1,0 +1,26 @@
+Reason: extensions (ext/, port_ext.h) may save in place of the save prompt after a Shine, a blue coin, a nozzle box or Yoshi: auto save (ext/autosave)
+
+--- a/src/System/MarDirectorDirect.cpp
++++ b/src/System/MarDirectorDirect.cpp
+@@ -1310,6 +1310,21 @@
+ 
+ 			if (checkFlag(DIRECTOR_FLAG_CARD_SAVE_PENDING)) {
+ 				offFlag(DIRECTOR_FLAG_CARD_SAVE_PENDING);
++#ifdef TARGET_PC
++				// an extension may save without asking (port_ext.h): the
++				// stage goes on as after the prompt, with the nozzle's
++				// jingle the prompt opens with and the help balloon it
++				// shows when it closes
++				if (port_ext_save_prompt(unk261)) {
++					if (unk261 == 3 || unk261 == 4) {
++						SMSGetMSound()->startSoundSystemSE(
++						    MSD_SE_SY_COLLECT_DELIGHT, 0, nullptr, 0);
++						mConsole->startAppearBalloon(unk261 == 3 ? 0x4B : 0x4C,
++						                             true);
++					}
++					break;
++				}
++#endif
+ 				r29 = STATE_CARD_SAVE;
+ 				break;
+ 			}

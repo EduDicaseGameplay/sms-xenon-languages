@@ -1,0 +1,132 @@
+Xbox 360: the game's OS threads run as fibers of one host thread (xenon/platform/xe_fiber.cpp; SMS_OS_FIBERS=0 for host threads). Applied by xenon/tools/xstage after 09, to the staged copy only.
+--- a/platform/os/os_thread.cpp	2026-10-26 23:27:53.987779883 +0500
++++ b/platform/os/os_thread.cpp	2026-10-26 23:55:05.965910276 +0500
+@@ -42,6 +42,9 @@
+ 	u64 last_ran;
+ 	unsigned spin_misses; // switches in a row whose spin ran out before the turn came
+ 	unsigned spin_skips;  // switches that did not spin since the last that did
++#ifdef _XBOX
++	void* fiber; // with fibers (xenon/platform/xe_fiber.cpp): the thread's fiber
++#endif
+ };
+ 
+ pthread_mutex_t g_cpu = PTHREAD_MUTEX_INITIALIZER;
+@@ -60,6 +63,30 @@
+ std::deque<std::function<void()> > g_deferred;
+ std::vector<port_irq_poll_fn> g_sources;
+ 
++#ifdef _XBOX
++// Xbox 360: every OSThread a fiber of the boot thread (SMS_OS_FIBERS=0: host threads). Only one
++// ever runs, as here anyway, and a switch stays in user mode: host threads cost a kernel signal and
++// wait each, ~11 ms a Delfino Plaza frame on the console.
++extern "C" int xe_fibers_enabled(void);
++extern "C" void* xe_fiber_from_thread(void);
++extern "C" void* xe_fiber_create(unsigned stack, void (*fn)(void*), void* arg);
++extern "C" void xe_fiber_switch(void* f);
++extern "C" void xe_fiber_delete(void* f);
++extern "C" void* xe_fiber_current(void);
++bool g_fibers;
++void* g_dead_fiber; // an exited thread's fiber, deleted by the next one to run
++void reap_fiber()
++{
++	if (g_dead_fiber && g_dead_fiber != xe_fiber_current()) {
++		xe_fiber_delete(g_dead_fiber);
++		g_dead_fiber = NULL;
++	}
++}
++// a retired host's fiber (cancelled, or its thread object recreated): never switched to again
++void drop_fiber(struct Host* h);
++void fiber_entry(void* p); // an OSThread's first run
++#endif
++
+ Host* host_of(OSThread* t)
+ {
+ 	std::map<OSThread*, Host*>::iterator it = g_hosts.find(t);
+@@ -272,6 +299,26 @@
+ 	next->state = OS_THREAD_STATE_RUNNING;
+ 	hn->last_ran = ++g_switch_seq;
+ 	g_irq_enabled = hn->irq_enabled;
++#ifdef _XBOX
++	if (g_fibers) {
++		if (!hn->started) {
++			hn->started = true;
++			hn->fiber   = xe_fiber_create(1 << 20, fiber_entry, next);
++			if (!hn->fiber) {
++				port_log("[os] CreateFiber failed\n");
++				abort();
++			}
++		}
++		if (exiting && hs && self != &g_default_thread) {
++			g_dead_fiber = hs->fiber;
++			hs->fiber    = NULL; // the Host outlives it (drop_fiber when the thread is recreated)
++		}
++		xe_fiber_switch(hn->fiber);
++		reap_fiber();
++		g_irq_enabled = hs->irq_enabled; // switched back to: only the scheduler switches fibers
++		return;
++	}
++#endif
+ 	if (!hn->started) {
+ 		hn->started = true;
+ 		pthread_attr_t a;
+@@ -449,6 +496,26 @@
+ 	return NULL;
+ }
+ 
++#ifdef _XBOX
++void fiber_entry(void* p)
++{
++	reap_fiber();
++	OSThread* self = (OSThread*)p;
++	Host* h = host_of(self);
++	g_irq_enabled = true;
++	void* ret = h->func(h->arg);
++	OSExitThread((OSThread*)ret); // never returns: a fiber's function must not
++}
++
++void drop_fiber(Host* h)
++{
++	if (g_fibers && h->fiber && h->fiber != xe_fiber_current()) {
++		xe_fiber_delete(h->fiber);
++		h->fiber = NULL;
++	}
++}
++#endif
++
+ Host* new_host()
+ {
+ 	Host* h = new Host();
+@@ -560,6 +627,13 @@
+ 	Host* h     = new_host();
+ 	h->started  = true;
+ 	h->th       = pthread_self();
++#ifdef _XBOX
++	g_fibers = xe_fibers_enabled() != 0;
++	if (g_fibers) {
++		h->fiber = xe_fiber_from_thread();
++		port_log("[os] game threads run as fibers\n");
++	}
++#endif
+ 	g_hosts[t]  = h;
+ 	g_threads.push_back(t);
+ 	g_cur            = t;
+@@ -663,6 +737,9 @@
+ 		// Retire it and give the new incarnation a Host of its own.
+ 		h->cancelled = true;
+ 		pthread_cond_signal(&h->cv);
++#ifdef _XBOX
++		drop_fiber(h);
++#endif
+ 		h          = new_host();
+ 		g_hosts[t] = h;
+ 	}
+@@ -716,6 +793,9 @@
+ 		h->cancelled = true;
+ 		if (h->started)
+ 			pthread_cond_signal(&h->cv);
++#ifdef _XBOX
++		drop_fiber(h);
++#endif
+ 	}
+ 	OSWakeupThread(&t->queueJoin);
+ }

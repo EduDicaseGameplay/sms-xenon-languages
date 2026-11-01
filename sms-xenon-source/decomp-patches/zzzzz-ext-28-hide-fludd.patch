@@ -1,0 +1,30 @@
+Reason: SMS_EV_HIDE_PLAYER_MODEL (port_ext_hide_player_model) left FLUDD drawn when a BetterSunshineEngine mod answers isYoshiMaintainFluddModel (0x8024D68C, Super Mario Eclipse): the hook was only asked on the game's own branch of the test. It is now asked first, so FLUDD goes with the player's models in every build (a first-person camera, multiplayer's own character).
+
+--- a/src/Player/MarioMain.cpp
++++ b/src/Player/MarioMain.cpp
+@@ -213,19 +213,16 @@
+ 			// BetterSunshineEngine (isYoshiMaintainFluddModel, retail
+ 			// 0x8024D68C, with the word at 0x8024D690: cmpwi r3, 0): its
+ 			// result (it reads this from r31) replaces the FLUDD flag test.
+-			if (SMS_MOD_SITE(0x8024D68C)
++			// an extension may draw the player its own way (port_ext.h): FLUDD
++			// goes with him, whatever a mod's isYoshiMaintainFluddModel says
++			if (!port_ext_hide_player_model(this)
++			    && (SMS_MOD_SITE(0x8024D68C)
+ 			        ? (SMS_MOD_GPR(31, this),
+ 			           ((bool (*)())SMS_MOD_SITE(0x8024D68C))())
+-			        :
++			        : checkFlag(MARIO_FLAG_HAS_FLUDD)))
+ #else
+-			if (
++			if (checkFlag(MARIO_FLAG_HAS_FLUDD))
+ #endif
+-			    checkFlag(MARIO_FLAG_HAS_FLUDD)
+-#ifdef TARGET_PC
+-			    // an extension may draw the player its own way (port_ext.h)
+-			    && !port_ext_hide_player_model(this)
+-#endif
+-			    )
+ 				MarioMainGetFludd(this)->perform(CUE_ENTRY, graphics);
+ 
+ #ifdef TARGET_PC

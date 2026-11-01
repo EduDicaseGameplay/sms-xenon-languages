@@ -1,0 +1,41 @@
+Reason: port: with frame_rate = 60 or 120 continuous rumble cut out for its rest after 15 or 7.5 s instead of 30; RumbleMgr::update runs once per displayed frame and counts the motor's limit and hold in frames; count them in 30 fps frames
+--- a/src/MarioUtil/RumbleMgr.cpp
++++ b/src/MarioUtil/RumbleMgr.cpp
+@@ -2,6 +2,9 @@
+ #include <MarioUtil/RumbleMgr.hpp>
+ #include <Player/MarioAccess.hpp>
+ #include <System/Application.hpp>
++#ifdef TARGET_PC
++#include "port_framerate.h"
++#endif
+ 
+ int RumbleMgr::mMotorCountLimit  = 900;
+ u16 RumbleMgr::mMotorTimerPeriod = 80;
+@@ -285,7 +288,15 @@
+ 			unk12       = 0;
+ 			mMotorTimer = 0;
+ 		}
++#ifdef TARGET_PC
++	// Port: update runs once per displayed frame, so the motor's rest after
++	// 30 s of rumble (900 frames) and its 80-frame hold are counted in 30 fps
++	// frames at 60 and 120 (it cut out after 15 or 7.5 s).
++	} else if (mMotorCounter
++	           > RumbleMgr::mMotorCountLimit * port_native_frame_divisor()) {
++#else
+ 	} else if (mMotorCounter > RumbleMgr::mMotorCountLimit) {
++#endif
+ 		unk12 = 1;
+ 	} else if (mMotorTimer > 0) {
+ 		mMotorTimer--;
+@@ -315,7 +326,11 @@
+ 	}
+ 
+ 	if (mPower > RumbleMgr::mPowerThreshold) {
++#ifdef TARGET_PC
++		mMotorTimer = RumbleMgr::mMotorTimerPeriod * port_native_frame_divisor();
++#else
+ 		mMotorTimer = RumbleMgr::mMotorTimerPeriod;
++#endif
+ 	}
+ 
+ 	if (unk12) {

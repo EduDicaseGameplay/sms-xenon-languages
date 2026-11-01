@@ -1,0 +1,29 @@
+Reason: port: with frame_rate = 60 or 120 the music's distance cross-fade and pan ramped in two or four times as fast as a stage started; MSStage::stageLoop runs once per displayed frame and counts the ramp in calls; count it in displayed frames
+--- a/src/System/MSoundMainSide.cpp
++++ b/src/System/MSoundMainSide.cpp
+@@ -741,13 +741,25 @@
+ 	MSBgm::setDolby(1, dolby, 1, 0);
+ }
+ 
++#ifdef TARGET_PC
++#include "port_framerate.h"
++#endif
++
+ MSStageDistFade::MSStageDistFade(const Vec* param_1, f32 param_2, f32 param_3,
+                                  u32 param_4, bool param_5)
+     : unk4(0)
+     , unk8(param_2 == 0.0f ? 2000.0f : param_2)
+     , unkC(param_3 == 0.0f ? 500.0f : param_3)
+     , unk10(param_1)
++#ifdef TARGET_PC
++    // Port: proc counts unk4 up to this once per displayed frame (stageLoop
++    // runs on a frame's last movement tick), ramping the music's cross-fade
++    // and pan in as a stage starts; count it in displayed frames so the ramp
++    // keeps its 30 fps length at 60 and 120.
++    , unk14(param_4 * port_native_frame_divisor())
++#else
+     , unk14(param_4)
++#endif
+     , unk18(param_5)
+ {
+ 	// TODO: hack, remove this!!!!

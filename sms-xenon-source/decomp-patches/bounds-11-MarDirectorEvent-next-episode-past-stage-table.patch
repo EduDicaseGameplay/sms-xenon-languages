@@ -1,0 +1,54 @@
+Reason: port: a stage change (TMarDirector::setNextStage) to an episode past the end of its area's list in the stage table loads no scene: mountStageArchive returns nothing, TMarDirector::loadResource returns before it creates the guide's archive, and TGuide::load faults setting the font of a pane its empty screen does not have (SIGSEGV at 0x150, J2DTextBox::setFont). Retail never asks for such an episode. Super Mario Eclipse does when Mario leaves Lighthouse Island's interior (area 79, episode 1) at the top of the lighthouse: it returns to Lighthouse Island (area 62) in the episode of mPrevArea, which after the warp menu or a position-only save state load is the stage the warp left (Delfino Plaza's episode 8, say), and Lighthouse Island has episodes 0 to 7 (sms-launcher#312). Take the episode the player chose for the world (0x40003, which the episode select and the warps record) instead, or the first.
+--- a/src/System/MarDirectorEvent.cpp
++++ b/src/System/MarDirectorEvent.cpp
+@@ -197,6 +197,40 @@
+ 	}
+ }
+ 
++#ifdef TARGET_PC
++#include <System/ScenarioArchiveName.hpp>
++
++// port: the episode a stage change asks for, if `area` has it in the stage
++// table (stageArc.bin, TApplication::unk30); else the episode the player chose
++// for the world (0x40003, which the episode select and the port's warps
++// record), or the first. For an episode past the end of the area's list,
++// mountStageArchive finds no scene and TMarDirector::loadResource returns
++// before it creates the guide's archive, so the stage's TGuide::load faults
++// on the first pane of an empty screen. Retail never asks for one. Super
++// Mario Eclipse can: leaving Lighthouse Island's interior (area 79, episode 1)
++// it goes back to Lighthouse Island in the episode of mPrevArea, the stage
++// Mario came from. Reached through the lighthouse, that is Lighthouse Island
++// itself; after the warp menu or a save state from another build it is the
++// stage the warp left, such as Delfino Plaza's episode 8, and Lighthouse
++// Island has episodes 0 to 7.
++static u8 MarDirectorEventEpisode(u8 area, u8 episode)
++{
++	TNameRefPtrAryT<TNameRefAryT<TScenarioArchiveName> >* stages
++	    = SMSGetApplication()->unk30;
++	if (episode == 0xFF || !stages || area >= stages->getChildren().size())
++		return episode;
++	TNameRefAryT<TScenarioArchiveName>* episodes = stages->getChildren()[area];
++	if (!episodes || episodes->size() == 0 || episode < episodes->size())
++		return episode;
++	const s32 chosen = TFlagManager::getInstance()->getFlag(0x40003);
++	const u8 instead
++	    = chosen >= 0 && (u32)chosen < episodes->size() ? (u8)chosen : 0;
++	OSReport("[stage] area %d has no episode %d: episode %d instead\n", area,
++	         episode, instead);
++	return instead;
++}
++#endif
++
+ // Every application access goes through SMSGetApplication(): the two
+ // pointer temporaries it leaves (the current area and setMovie) fill
+ // retail's frame to 0x50.
+@@ -209,6 +243,9 @@
+ 	if (param_1 >= 0x100) {
+ 		next.unk0 = (param_1 >> 8) - 1;
+ 		next.unk1 = param_1 & 0xff;
++#ifdef TARGET_PC
++		next.unk1 = MarDirectorEventEpisode(next.unk0, next.unk1);
++#endif
+ 	} else {
+ 		next.unk0 = param_1;
+ 		next.unk1 = 0xFF;

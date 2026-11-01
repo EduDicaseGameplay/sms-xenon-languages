@@ -1,0 +1,114 @@
+Reason: port: split-screen co-op (ext/coop) - player 2 in the world as Mario: warp floors, streams and wind (TMapWarp::watchToWarp as player 2), Bianco's rolling balls heed them (TEnemyManager::performShared's moves reach the extensions), goop's enemies come up around either player, and their knocks rumble no one's controller
+--- a/src/Player/MarioCollision.cpp
++++ b/src/Player/MarioCollision.cpp
+@@ -20,9 +20,18 @@
+ #include <MSound/MSSetSound.hpp>
+ #include <MSound/MSoundBGM.hpp>
+ 
++#ifdef TARGET_PC
++// Split-screen co-op (ext/coop): player 2's code runs with player 2 as Mario.
++extern "C" int port_coop_in_p2;
++#endif
++
+ void TMario::rumbleStart(int channelDataIdx, int repeatCount)
+ {
++#ifdef TARGET_PC
++	if (this == gpMarioOriginal && !port_coop_in_p2) { // player 2's knocks rumble no one's controller
++#else
+ 	if (this == gpMarioOriginal) {
++#endif
+ 		SMSRumbleMgr->start(channelDataIdx, repeatCount, (f32*)nullptr);
+ 	}
+ }
+@@ -495,7 +504,11 @@
+ 		}
+ 	}
+ 
++#ifdef TARGET_PC
++	if (rumbleFrames > 0 && this == gpMarioOriginal && !port_coop_in_p2) {
++#else
+ 	if (rumbleFrames > 0 && this == gpMarioOriginal) {
++#endif
+ 		SMSRumbleMgr->start(0x15, rumbleFrames, (f32*)nullptr);
+ 	}
+ 
+--- a/src/Enemy/enemymanager.cpp
++++ b/src/Enemy/enemymanager.cpp
+@@ -1,3 +1,4 @@
++#include "port_ext.h"
+ #include <Enemy/EnemyManager.hpp>
+ #include <Enemy/Conductor.hpp>
+ #include <Enemy/Enemy.hpp>
+@@ -336,8 +337,17 @@
+ 		if (enemy->checkLiveFlag(LIVE_FLAG_DEAD))
+ 			continue;
+ 
+-		if (param_1 & CUE_MOVE)
++		if (param_1 & CUE_MOVE) {
++#ifdef TARGET_PC
++			// extensions hear of this move too, as of testPerform's (co-op: the
++			// player it plays with is Mario while it moves)
++			port_ext_object_move(enemy, 0);
++			enemy->moveObject();
++			port_ext_object_move(enemy, 1);
++#else
+ 			enemy->moveObject();
++#endif
++		}
+ 
+ 		if (param_1 & CUE_CALC_ANIM) {
+ 			enemy->updateSquareToMario();
+--- a/src/Enemy/conductor.cpp
++++ b/src/Enemy/conductor.cpp
+@@ -19,6 +19,12 @@
+ // rogue include
+ #include <M3DUtil/InfectiousStrings.hpp>
+ 
++#ifdef TARGET_PC
++// Split-screen co-op (ext/coop): where goop's enemies come up, Mario's place or
++// player 2's in turn while two play.
++extern "C" const JGeometry::TVec3<f32>* port_coop_spawn_center(const JGeometry::TVec3<f32>* mario);
++#endif
++
+ TConductor* gpConductor;
+ 
+ // TU-local binders: named return steps that close genEnemy / perform /
+@@ -337,7 +343,12 @@
+ 		return;
+ 
+ 	f32 minR;
++#ifdef TARGET_PC
++	// split-screen co-op: around either player, in turn
++	JGeometry::TVec3<f32> targetPos = *port_coop_spawn_center(&SMS_GetMarioPos());
++#else
+ 	JGeometry::TVec3<f32> targetPos = SMS_GetMarioPos();
++#endif
+ 	minR = conductorRadiusMin(this);
+ 	f32 maxR                        = conductorRadiusMax(this);
+ 	minR                            = MsRandF(minR, maxR);
+--- a/src/Map/MapWarp.cpp
++++ b/src/Map/MapWarp.cpp
+@@ -86,8 +86,23 @@
+ 	out = SMS_GetMarioPos() + info.getUnk8();
+ }
+ 
++#ifdef TARGET_PC
++// Split-screen co-op (ext/coop): player 2's globals in force (true) when they
++// play and are not already, until port_coop_leave_player2.
++extern "C" int port_coop_enter_player2(void);
++extern "C" void port_coop_leave_player2(void);
++#endif
++
+ void TMapWarp::watchToWarp()
+ {
++#ifdef TARGET_PC
++	// split-screen co-op: player 2's floor (a warp takes everyone) and the
++	// stream or wind they stand in, as Mario's: the same pass as player 2
++	if (port_coop_enter_player2()) {
++		watchToWarp();
++		port_coop_leave_player2();
++	}
++#endif
+ 	f32 fVar8;
+ 	const TBGCheckData* checkData;
+ 	Mtx mtx;

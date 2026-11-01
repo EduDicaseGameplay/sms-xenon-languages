@@ -1,0 +1,124 @@
+Reason: port: Mouse Aim in Mario Cam (SMS_CLOSE_CAMERA_MOUSE, on by default, platform/pad) also aims FLUDD with the mouse in the spray-in-place stance (R all the way down, or L to walk sideways): while the mouse is in use there it turns Mario and tilts FLUDD instead of turning the camera, which follows behind him, as the C-stick does with Aim with the C-stick (zzz-camera-07)
+--- a/src/Camera/CameraNormal.cpp
++++ b/src/Camera/CameraNormal.cpp
+@@ -33,6 +33,14 @@
+ // (TMario::squating, TNozzleBase::calcGunAngle) instead of moving the camera,
+ // which follows behind him, walking sideways (L) and with the free camera too.
+ extern "C" int port_close_camera_cstick;
++// Mouse aim in the stance (zzz-camera-08, Mouse Aim in Mario Cam,
++// SMS_CLOSE_CAMERA_MOUSE): while the mouse is in use there it turns Mario and
++// tilts FLUDD instead of moving the camera, which follows behind him as with
++// the C-stick's aim. platform/pad keeps the motion for TMario::squating and
++// TNozzleBase::calcGunAngle; split-screen's second player has no mouse.
++extern "C" int port_close_camera_mouse, port_camera_mouse_busy, port_coop_in_p2;
++extern "C" int port_stance_mouse_turn;
++extern "C" f32 port_stance_mouse_tilt, port_camera_speed_x;
+ #endif
+ 
+ static const char* dummyMactorStringValue1 = "\0\0\0\0\0\0\0\0\0\0\0";
+@@ -215,8 +223,18 @@
+ 	f32 fVar2 = unk120->mCompSPos[6];
+ 	f32 fVar3 = unk120->mCompSPos[7];
+ #ifdef TARGET_PC
+-	const bool portStanceAim = port_close_camera_cstick
+-	                           && SMS_GetMarioStatus() == MARIO_STATUS_SQUAT;
++	f32 portMouseX = 0.0f, portMouseY = 0.0f;
++	const bool portMouseMoved = port_camera_take_mouse(&portMouseX, &portMouseY);
++	const bool portSquat = SMS_GetMarioStatus() == MARIO_STATUS_SQUAT;
++	// the mouse moved within the last few frames (port_camera_take_mouse
++	// counts them), so a controller's player keeps the stance's own camera
++	const bool portMouseStance = portSquat && port_close_camera_mouse
++	                             && port_camera_mouse_busy > 0 && !port_coop_in_p2;
++	const bool portStanceAim = portSquat && (port_close_camera_cstick || portMouseStance);
++	if (!portMouseStance && !port_coop_in_p2) {
++		port_stance_mouse_turn = 0;
++		port_stance_mouse_tilt = 0.0f;
++	}
+ 	// how far Mario turned since the last frame, which the camera turns too
+ 	// following him, so that it keeps up (not after a frame out of the stance,
+ 	// and no more than he can turn in one)
+@@ -227,7 +245,7 @@
+ 		portMarioTurn = MsClamp<s16>(*gpMarioAngleY - portLastMarioYaw, -0x800, 0x800);
+ 	portLastMarioYaw = *gpMarioAngleY;
+ 	portWasStanceAim = portStanceAim;
+-	if (portStanceAim) {
++	if (portSquat && port_close_camera_cstick) {
+ 		fVar2 = 0.0f;
+ 		fVar3 = 0.0f;
+ 	}
+@@ -246,8 +264,16 @@
+ 				           mCurrentTarget.unk28);
+ 			fVar3 = 0.0f;
+ 		}
+-		f32 mouseX, mouseY;
+-		if (port_camera_take_mouse(&mouseX, &mouseY)) {
++		const f32 mouseX = portMouseX, mouseY = portMouseY;
++		if (portMouseStance) {
++			// as far as it would have turned the camera (rotateY_ByStickX_)
++			port_stance_mouse_turn += (s16)(mouseX * port_camera_speed_x
++			                                * CLBLinearInbetween(
++			                                    mCurrentParams->mYAngleManualSpeedXMin,
++			                                    mCurrentParams->mYAngleManualSpeedXMax,
++			                                    mCurrentTarget.unk28));
++			port_stance_mouse_tilt += mouseY;
++		} else if (portMouseMoved) {
+ 			fVar2 += mouseX;
+ 			if (!port_mouse_orbit)
+ 				fVar3 += mouseY;
+--- a/src/Player/MarioWait.cpp
++++ b/src/Player/MarioWait.cpp
+@@ -27,6 +27,11 @@
+ 		return 0.0f;
+ 	return -mario->mGamePad->mCompSPos[3 * 2];
+ }
++
++// Mouse aim in the stance (zzz-camera-08, Mouse Aim in Mario Cam): how far the
++// mouse turned him, which the normal camera passed on (platform/pad) and then
++// follows, as it follows the C-stick's turning.
++extern "C" int port_stance_mouse_turn, port_coop_in_p2;
+ #endif
+ 
+ BOOL TMario::startTalking()
+@@ -457,6 +462,14 @@
+ #endif
+ 		setAnimation(ANIM_SQWAT, 1.0f);
+ 	}
++#ifdef TARGET_PC
++	if (port_stance_mouse_turn != 0 && this == gpMarioAddress && !port_coop_in_p2) {
++		mFaceAngle.y += (s16)port_stance_mouse_turn;
++		port_stance_mouse_turn = 0;
++		if (!portSideways)
++			setAnimation(ANIM_SQWAT, 1.0f);
++	}
++#endif
+ 
+ 	waitProcess();
+ 	return 0;
+--- a/src/Player/WaterGun.cpp
++++ b/src/Player/WaterGun.cpp
+@@ -285,6 +285,13 @@
+ // tilts FLUDD in place too, the way it tilts the Y close-up camera (whose
+ // ctrlLButtonCamera_ takes the control stick's up as the C-stick's down).
+ extern "C" int port_close_camera_cstick;
++// Mouse aim in the stance (zzz-camera-08, Mouse Aim in Mario Cam): the mouse's
++// up and down since the last frame, which the normal camera passed on
++// (platform/pad), tilts FLUDD as the C-stick's does above. A fast move goes
++// up to twice as far, which keeps the s16 sum below within range (the angle
++// stays within mLAngleMin..mLAngleMax, +-0x2000, and mRButtonMult is 10000).
++extern "C" f32 port_stance_mouse_tilt;
++extern "C" int port_coop_in_p2;
+ #endif
+ 
+ void TNozzleBase::calcGunAngle(const TMarioControllerWork& work)
+@@ -306,6 +313,11 @@
+ 		if (port_close_camera_cstick && NozzleMario(this) == gpMarioAddress)
+ 			stickY = MsClamp(stickY - NozzleMario(this)->mGamePad->mCompSPos[3 * 2 + 1],
+ 			                 -1.0f, 1.0f);
++		if (port_stance_mouse_tilt != 0.0f && NozzleMario(this) == gpMarioAddress
++		    && !port_coop_in_p2) {
++			stickY = MsClamp(stickY - port_stance_mouse_tilt, -2.0f, 2.0f);
++			port_stance_mouse_tilt = 0.0f;
++		}
+ 		angle += (s16)(stickY * mEmitParams.mRButtonMult.get());
+ #else
+ 		angle += (s16)(NozzleMario(this)->mGamePad->mCompSPos[0 * 2 + 1]

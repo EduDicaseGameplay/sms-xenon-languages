@@ -1,0 +1,143 @@
+Reason: port: A skips the Nintendo and Dolby logos too, under the movies' "(A) Skip" prompt, and SMS_SKIP_INTRO starts at the title (no logos, no opening movie)
+--- a/src/System/GCLogoDir.cpp
++++ b/src/System/GCLogoDir.cpp
+@@ -18,6 +18,34 @@
+ #include <sms_modhook.h>
+ #endif
+ 
++#ifdef TARGET_PC
++// SMS_SKIP_INTRO (platform): no Nintendo and Dolby logos (direct).
++extern "C" int port_skip_intro;
++// MovieDirector.cpp (zz-movie-skip-02): "(A) Skip" in the bottom-right corner.
++void SMSDrawSkipPrompt(JDrama::TGraphics* graphics, int width, int height);
++
++// Set once the D-pad is pressed during the logos, after which A no longer
++// ends them: Super Mario Eclipse's debug-mode code is entered here (its hook
++// at the end of direct), Up Up Down Down Left Right Left Right B A START.
++static bool sGCLogoDPadPressed;
++
++// Port: the movies' "(A) Skip" prompt over the logos, which A ends (direct).
++class TGCLogoSkipPrompt : public JDrama::TViewObj {
++public:
++	TGCLogoSkipPrompt()
++	    : JDrama::TViewObj("GCLogoSkipPrompt")
++	{
++	}
++
++	virtual void perform(u32 cue, JDrama::TGraphics* graphics)
++	{
++		if (cue & CUE_DRAW)
++			SMSDrawSkipPrompt(graphics, SMSGetGCLogoRenderWidth(),
++			                  SMSGetGCLogoRenderHeight());
++	}
++};
++#endif
++
+ // rogue includes needed for matching sinit & bss
+ #include <MSound/MSSetSound.hpp>
+ #include <MSound/MSoundBGM.hpp>
+@@ -104,6 +132,10 @@
+ 	mProgSelect->mGamePad = getGamePad();
+ 	mProgSelect->unkC.on(0xffff);
+ 	group2d->getChildren().push_back(mProgSelect);
++#ifdef TARGET_PC
++	group2d->getChildren().push_back(new TGCLogoSkipPrompt);
++	sGCLogoDPadPressed = false;
++#endif
+ 
+ 	JDrama::TDStageDisp* stageDisp = new JDrama::TDStageDisp("<DStageDisp>", 0);
+ 	unk14->getChildren().push_back(stageDisp);
+@@ -140,6 +172,26 @@
+ {
+ 	int desiredAppState = TApplication::APP_STATE_DEFAULT;
+ 
++#ifdef TARGET_PC
++	// Port: A ends both logos at once, from black (retail waits out each
++	// one, about 1.6 seconds with its fades, unless the reset buttons are
++	// held), and SMS_SKIP_INTRO skips them: overall state 2, after the Dolby
++	// logo, which nothing below handles. The boot still waits for its
++	// archives to load (TApplication::gameLoop); then the opening movie,
++	// which A or SMS_SKIP_INTRO skips too (TMovieDirector::direct).
++	if (getGamePad()->getTrigger()
++	    & (JUTGamePad::DPAD_UP | JUTGamePad::DPAD_DOWN | JUTGamePad::DPAD_LEFT
++	       | JUTGamePad::DPAD_RIGHT))
++		sGCLogoDPadPressed = true;
++	if (port_skip_intro
++	    || (!sGCLogoDPadPressed && getGamePad()->checkFrameMeaning(0x20))) {
++		gpApplication.getFader()->setFadeStatus(
++		    TSMSFader::FADE_STATUS_FULLY_FADED_OUT);
++		mOverallState   = 2;
++		desiredAppState = TApplication::APP_STATE_DONE;
++	}
++	if (mOverallState != 2)
++#endif
+ 	JDrama::TDirector::direct();
+ 
+ 	int nextState = mOverallState;
+--- a/src/System/MovieDirector.cpp
++++ b/src/System/MovieDirector.cpp
+@@ -202,12 +202,16 @@
+ // when off. Movies fill that frame (rsetup); TTHPRender has sms_gx stretch
+ // them.
+ extern "C" float port_widescreen;
++// SMS_SKIP_INTRO (platform): the opening movie ends as it starts (direct).
++extern "C" int port_skip_intro;
+ #endif
+ 
+ #ifdef TARGET_PC
+ // Port: "(A) Skip" in the bottom-right corner while a movie plays; A ends it
+ // at once (direct). '@' is the A button in the system font
+ // (standard_fontEx.bfn), drawn green like the button.
++void SMSDrawSkipPrompt(JDrama::TGraphics* graphics, int width, int height);
++
+ class TMovieSkipPrompt : public JDrama::TViewObj {
+ public:
+ 	TMovieSkipPrompt(const TMovieDirector* director)
+@@ -230,7 +234,16 @@
+ 
+ void TMovieSkipPrompt::perform(u32 cue, JDrama::TGraphics* graphics)
+ {
+-	if (!(cue & CUE_DRAW) || !gpSystemFont || !shown(mDirector))
++	if ((cue & CUE_DRAW) && shown(mDirector))
++		SMSDrawSkipPrompt(graphics, SMSGetGameRenderWidth(),
++		                  SMSGetGameRenderHeight());
++}
++
++// The prompt in a width x height frame; the Nintendo and Dolby logos show it
++// too (TGCLogoDir).
++void SMSDrawSkipPrompt(JDrama::TGraphics* graphics, int width, int height)
++{
++	if (!gpSystemFont)
+ 		return;
+ 
+ 	J2DOrthoGraph graph(graphics->getViewport());
+@@ -250,11 +263,11 @@
+ 	// past both sides of the 4:3 one by half its extra width: the corner is
+ 	// that far out.
+ 	f32 wide  = port_widescreen > 1.0f ? port_widescreen : 1.0f;
+-	f32 right = SMSGetGameRenderWidth() * (1.0f + wide) * 0.5f - margin;
++	f32 right = width * (1.0f + wide) * 0.5f - margin;
+ 	f32 buttonW = buttonText.getWidth("@");
+ 	f32 labelW  = labelText.getWidth(" Skip");
+ 	int x = (int)(right - buttonW - labelW);
+-	int y = SMSGetGameRenderHeight() - margin - size;
++	int y = height - margin - size;
+ 
+ 	shadowText.print(x + 2, y + 2, "@ Skip");
+ 	buttonText.print(x, y, "@");
+@@ -619,9 +632,13 @@
+ 	// second, and only for a movie already seen. What follows is the same as
+ 	// after the fade, from black: decideNextMode through the fade-out's mod
+ 	// site (retail 0x802B606C), where a mod such as Eclipse picks the next
+-	// movie of its own chains and sets their flags.
++	// movie of its own chains and sets their flags. SMS_SKIP_INTRO skips the
++	// opening movie (9, Entrance.thp: the title's spray-painted M) the same
++	// way on its first frame.
+ 	bool skipped = false;
+-	if (TMovieSkipPrompt::shown(this) && getGamePad()->checkFrameMeaning(0x20)) {
++	if (TMovieSkipPrompt::shown(this)
++	    && (getGamePad()->checkFrameMeaning(0x20)
++	        || (port_skip_intro && gpApplication.getMovie() == 9))) {
+ 		skipped = true;
+ 		THPPlayerStop();
+ 		gpApplication.getFader()->setFadeStatus(

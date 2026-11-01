@@ -1,0 +1,19 @@
+Xbox 360: GD's own __GDCurrentDL and GDOverflowed (decomp/libs/dolphin/src/gd, built as upstream builds them) replace the weak fallbacks, which COFF cannot keep beside them. Applied by xenon/tools/xstage to the staged copy only.
+diff -ru a/platform/misc/sdk_data.cpp b/platform/misc/sdk_data.cpp
+--- a/platform/misc/sdk_data.cpp	2026-10-24 09:59:00.448077670 +0500
++++ b/platform/misc/sdk_data.cpp	2026-10-24 09:59:00.529509223 +0500
+@@ -6,12 +6,14 @@
+ #include <dolphin/dsp.h>
+ #include "port_os.h"
+ 
++#ifndef _XBOX // the 360 build compiles GD itself (xenon/units-gx.txt); COFF has no weak symbols
+ // GD display-list builder state (J3D/GD writers use it inline).
+ __attribute__((weak)) GDLObj* __GDCurrentDL;
+ extern "C" __attribute__((weak)) void GDOverflowed(void)
+ {
+ 	fprintf(stderr, "[gd] display list overflow\n");
+ }
++#endif
+ 
+ // Standard NTSC 640x480 interlaced render mode (values from the public SDK
+ // documentation of GXNtsc480Int).

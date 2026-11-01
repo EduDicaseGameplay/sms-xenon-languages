@@ -1,0 +1,13 @@
+// <ratio>, the part <chrono> needs (VS2010's XDK library has none).
+#ifndef XE_RATIO
+#define XE_RATIO
+namespace std {
+template <long long N, long long D = 1> struct ratio {
+	static const long long num = N;
+	static const long long den = D;
+};
+typedef ratio<1, 1000000000> nano;
+typedef ratio<1, 1000000> micro;
+typedef ratio<1, 1000> milli;
+} // namespace std
+#endif

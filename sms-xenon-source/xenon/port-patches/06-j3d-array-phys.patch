@@ -1,0 +1,13 @@
+Xbox 360: J3D loads vertex array bases as (u32)ptr & 0x7fffffff, the physical address only while MEM1 sits at 0x80000000 (port patch 04 moves it). OSCachedToPhysical says the same on the GameCube and on the PC.
+diff -ru a/game/libs/JSystem/src/J3D/J3DGraphBase/J3DTevs.cpp b/game/libs/JSystem/src/J3D/J3DGraphBase/J3DTevs.cpp
+--- a/game/libs/JSystem/src/J3D/J3DGraphBase/J3DTevs.cpp	2026-10-24 11:48:10.111482939 +0500
++++ b/game/libs/JSystem/src/J3D/J3DGraphBase/J3DTevs.cpp	2026-10-24 11:48:10.113524184 +0500
+@@ -56,7 +56,7 @@
+ 	u32 a = attr == GX_VA_NBT ? 1 : attr - 9;
+ 	GXCmd1u8(8);
+ 	GXCmd1u8(a + 0xA0);
+-	GXCmd1u32((u32)ptr & 0x7fffffff);
++	GXCmd1u32(OSCachedToPhysical(ptr)); // xenon: MEM1 is not at 0x80000000 here
+ }
+ 
+ void J3DSetVtxAttrFmtv(GXVtxFmt vtxfmt, GXVtxAttrFmtList* list, bool param_3)

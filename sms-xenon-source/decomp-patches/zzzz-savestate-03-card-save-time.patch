@@ -1,0 +1,89 @@
+Reason: port: after a save state loads, the game takes its file's save time from the card, so it can still save over a file saved after the state
+--- a/include/System/FlagManager.hpp
++++ b/include/System/FlagManager.hpp
+@@ -50,6 +50,14 @@
+ 	static TFlagManager* smInstance;
+ 
+ 	s64 getLastSaveTime() const { return mLastSaveTime; }
++#ifdef TARGET_PC
++	// Port: the file's save time as the card has it, taken after a save state
++	// loads (patch zzzz-savestate-03).
++	void setLastSaveTime(s64 time)
++	{
++		mLastSaveTime = mLastSaveTimeBackup = mSavedLastSaveTime = time;
++	}
++#endif
+ 
+ private:
+ 	TFlagManager();
+--- a/src/System/Application.cpp
++++ b/src/System/Application.cpp
+@@ -1164,7 +1164,45 @@
+ 	TFlagManager::getInstance()->setFlag(0x40003, sStateLoad.episode);
+ 	dir->setNextStage((u16)(((sStateLoad.area + 1) << 8) | sStateLoad.episode), nullptr);
+ }
++
++// The game remembers when its file was last saved (TFlagManager's save time)
++// and saves only over a file the card says was saved then, so a card swapped
++// for another is not saved over (TCardSave, ext/autosave). A state keeps the
++// time of its own moment: one from before the file's latest save, or from
++// another run, would then never save again ("unable to save", and an auto
++// save that falls back to that), and progress made after it is lost when the
++// game is reset. So once a state has loaded, the game takes the time the card
++// has for its file, as if it had just read the file, and saves over it as
++// ever. The card is read between frames, as the prompt reads it, when no save
++// is under way.
++static TCardBookmarkInfo sStateCardMarks[3];
++static bool sStateCardReading;
+ 
++static void ApplicationStateCardStart()
++{
++	if (!gpCardManager || gpCardManager->mIsMounted || gpCardManager->getLastStatus() == CARD_RESULT_BUSY)
++		return;
++	gpCardManager->getBookmarkInfos(sStateCardMarks);
++	sStateCardReading = true;
++}
++
++static void ApplicationStateCardFrame(TApplication* app)
++{
++	if (!sStateCardReading || gpCardManager->getLastStatus() == CARD_RESULT_BUSY)
++		return;
++	sStateCardReading = false;
++	const int slot    = app->mSaveFile;
++	if (gpCardManager->getLastStatus() == CARD_RESULT_READY && slot >= 0 && slot < 3) {
++		// a damaged file, or one never saved, the prompt asks about as ever
++		const TCardBookmarkInfo& mark = sStateCardMarks[slot];
++		if (mark.unk0 != 1 && mark.unk18 != 0 && TFlagManager::getInstance()->getLastSaveTime() != (s64)mark.unk8) {
++			OSReport("[savestate] file %c was saved after this state: its next save goes over that one\n", 'A' + slot);
++			TFlagManager::getInstance()->setLastSaveTime((s64)mark.unk8);
++		}
++	}
++	gpCardManager->unmount();
++}
++
+ // Loads `path`: exactly when this build can (the screen is black for it, and
+ // fades back in), else its portable part.
+ static void ApplicationStateLoad(TApplication* app, TMarDirector* dir, bool paused, const char* path)
+@@ -1181,12 +1219,14 @@
+ 			app->mFader->startFadeinT(kStateFadeSeconds);
+ 		}
+ 		port_savestate_notify("State loaded");
++		ApplicationStateCardStart();
+ 		return;
+ 	}
+ 	if (faded)
+ 		app->mFader->startFadeinT(kStateFadeSeconds);
+ 	if (!hasPortable)
+ 		return;
++	ApplicationStateCardStart();
+ 	if (paused) {
+ 		sStateLoadPhase  = STATE_LOAD_UNPAUSE;
+ 		sStateLoadFrames = 0;
+@@ -1203,6 +1243,7 @@
+ 	const bool playing = dir && gpMarioOriginal && dir->mState == TMarDirector::STATE_UNK4
+ 	                     && !dir->checkUnk4CFlag(TMarDirector::DIRECTOR_FLAG_STAGE_TRANSITION_PENDING);
+ 	const bool paused = dir && dir->mState == TMarDirector::STATE_PAUSE_MENU;
++	ApplicationStateCardFrame(app);
+ 	port_savestate_set_ready((playing || paused) && sStateLoadPhase == STATE_LOAD_IDLE);
+ 
+ 	if (sStateLoadPhase == STATE_LOAD_FADE_OUT) {

@@ -1,0 +1,343 @@
+Reason: extensions (ext/, port_ext.h) hear of save files loaded, started anew, copied and erased at file select (saveFile), may stop FLUDD's trigger from firing (nozzleFire), change a stage start's kind and leave Pinna Park's coaster start out (playerSpawn), give a Shine a model of theirs (shineModel), say whether Yoshi's egg is there (yoshiEgg), and change the Shine an episode stands for in the episode select and the pause menu (episodeShine): the native mod API's API 1.5 beta 6 (ext/modapi)
+--- a/src/GC2D/CardLoad.cpp
++++ b/src/GC2D/CardLoad.cpp
+@@ -2630,6 +2630,10 @@
+ 				if (bm->unk18 == 0) {
+ 					({ typedef __typeof__(TFlagManager::getInstance()->firstStart()) sms_mod_r_; void* sms_mod_t_ = SMS_MOD_SITE(0x801642E0); if (sms_mod_t_) ((__typeof__(sms_mod_as_free(static_cast<sms_mod_r_ (TFlagManager::*)()>(&TFlagManager::firstStart))))sms_mod_t_)(TFlagManager::getInstance()); else TFlagManager::getInstance()->firstStart(); });
+ 					unk1C = PROGRESS_UNK29;
++#ifdef TARGET_PC
++					// extensions hear of the new game in this file (port_ext.h)
++					port_ext_save_file(PORT_SAVE_FILE_NEW, unkB0, -1);
++#endif
+ 				} else {
+ 					gpCardManager->readBlock(unkB0);
+ 					unk1C = PROGRESS_UNK28;
+@@ -2681,6 +2685,10 @@
+ 			gpCardManager->probe();
+ 			if (choice == 0) {
+ 				clearBookmark(unkB0);
++#ifdef TARGET_PC
++				// extensions hear of the file erased (port_ext.h)
++				port_ext_save_file(PORT_SAVE_FILE_ERASED, unkB0, -1);
++#endif
+ 			} else if (choice == 1) {
+ 				gpCardManager->getBookmarkInfos(unk40);
+ 				unk1C = PROGRESS_UNK2;
+@@ -2731,6 +2739,10 @@
+ 			gpCardManager->probe();
+ 			if (choice == 0) {
+ 				clearBookmark(unkB0);
++#ifdef TARGET_PC
++				// extensions hear of the file erased (port_ext.h)
++				port_ext_save_file(PORT_SAVE_FILE_ERASED, unkB0, -1);
++#endif
+ 			} else if (choice == 1) {
+ 				gpCardManager->getBookmarkInfos(unk40);
+ 			}
+@@ -2767,6 +2779,10 @@
+ 				gpCardManager->probe();
+ 				if (unk10 == 2) {
+ 					gpCardManager->writeBlock(unkB2);
++#ifdef TARGET_PC
++					// extensions hear of the file copied over another (port_ext.h)
++					port_ext_save_file(PORT_SAVE_FILE_COPIED, unkB2, unkB1);
++#endif
+ 					unk1C     = PROGRESS_UNK25;
+ 					prevUnk1C = PROGRESS_UNK25;
+ 				}
+@@ -2845,6 +2861,10 @@
+ 		if (rc != CARD_RESULT_BUSY) {
+ 			if (rc == CARD_RESULT_READY) {
+ 				loadBookmark();
++#ifdef TARGET_PC
++				// extensions hear of the file loaded (port_ext.h)
++				port_ext_save_file(PORT_SAVE_FILE_LOADED, SMSGetApplication()->mSaveFile, -1);
++#endif
+ 				unk1C = PROGRESS_UNK29;
+ 			} else {
+ 				unk1C = changeMode(rc);
+--- a/src/GC2D/PauseMenu2.cpp
++++ b/src/GC2D/PauseMenu2.cpp
+@@ -1,6 +1,9 @@
+ #include <GC2D/CardSave.hpp>
+ #ifdef TARGET_PC
+ #include <sms_modhook.h>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ #endif
+ #include <GC2D/GCConsole2.hpp>
+ #include <GC2D/MessageUtil.hpp>
+@@ -522,6 +525,14 @@
+ 		                   GMSP01("/cmn2d/scenarioname.bmg"),
+ 		                   GMSE01("/common/2d/scenarioname.bmg")));
+ 		s16 shineID = SMS_getShineID(shineStage, flag, false);
++#ifdef TARGET_PC
++		{
++			// the Shine the episode stands for, as extensions may have it (port_ext.h)
++			int sms_ext_id = shineID;
++			port_ext_episode_shine((int)shineStage, (int)flag, &sms_ext_id);
++			shineID = (s16)sms_ext_id;
++		}
++#endif
+ 		const char* scenarioName;
+ #ifdef TARGET_PC
+ 		// BetterSunshineEngine: the word at 0x80156D5C (`b 0x80156E04`) goes
+--- a/src/GC2D/SelectMenu.cpp
++++ b/src/GC2D/SelectMenu.cpp
+@@ -33,6 +33,9 @@
+ #ifdef TARGET_PC
+ #include <new>
+ #include <sms_modhook.h>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ 
+ // BetterSunshineEngine's shine select (bse/src/area.cpp). Its
+ // doScenarioCountPatches (initData, retail 0x80174540) gives each area its
+@@ -65,11 +68,28 @@
+ // returns an s32 and every caller sign-extends the low half. Retail calls
+ // the copy from selectPrev, selectNext and initData's SMS_isGetShine loop;
+ // the call at the end of initData is inlined and keeps the original.
++// The Shine an episode stands for, as extensions may have it (port_ext.h).
++static inline s16 SelectMenuEpisodeShine(u32 stage, u32 scenario, s16 id)
++{
++#ifdef TARGET_PC
++	int sms_ext_id = id;
++	port_ext_episode_shine((int)stage, (int)scenario, &sms_ext_id);
++	return (s16)sms_ext_id;
++#else
++	return id;
++#endif
++}
++static inline s16 SelectMenuEpisodeShineID(u32 stage, u32 scenario, bool is_etc_shine)
++{
++	return SelectMenuEpisodeShine(stage, scenario, SMS_getShineID(stage, scenario, is_etc_shine));
++}
++
+ static inline s16 SelectMenuShineID(u32 stage, u32 scenario, bool is_etc_shine)
+ {
+ 	if (void* sms_mod_t_ = SMS_MOD_SITE(0x80175AF8))
+-		return (s16)((s32(*)(u32, u32, bool))sms_mod_t_)(stage, scenario, is_etc_shine);
+-	return SMS_getShineID(stage, scenario, is_etc_shine);
++		return SelectMenuEpisodeShine(stage, scenario,
++		                              (s16)((s32(*)(u32, u32, bool))sms_mod_t_)(stage, scenario, is_etc_shine));
++	return SelectMenuEpisodeShineID(stage, scenario, is_etc_shine);
+ }
+ 
+ // getScenarioNameForSelectScreen reads r31 = the menu and takes no
+@@ -627,7 +647,8 @@
+ 			if (SMS_MOD_SITE(0x80175AF8)
+ 			        ? ((sms_mod_id_ = SelectMenuShineID(stage, i, false)) != -1
+ 			           && TFlagManager::getInstance()->getShineFlag(sms_mod_id_))
+-			        : SMS_isGetShine(stage, i, false))
++			        : ((sms_mod_id_ = SelectMenuEpisodeShineID(stage, i, false)) != -1
++			           && TFlagManager::getInstance()->getShineFlag(sms_mod_id_)))
+ #else
+ 			if (SMS_isGetShine(stage, i, false))
+ #endif
+@@ -844,7 +865,7 @@
+ 		mScenarioText2->setFont((JUTFont*)gpSystemFont);
+ 
+ 		s16 shineID
+-		    = SMS_getShineID(SMS_getShineStage(mStage), mSelectedShine, false);
++		    = SelectMenuEpisodeShineID(SMS_getShineStage(mStage), mSelectedShine, false);
+ 
+ 		strncpy(mScenarioText1->getStringPtr(),
+ 		        ({ typedef __typeof__(SMSGetMessageData(mScenarioBmg2,
+@@ -1153,7 +1174,7 @@
+ #endif
+ 				        SMSGetMessageData(
+ 				            mScenarioBmg2,
+-				            (u16)SMS_getNormalStage(SMS_getShineID(
++				            (u16)SMS_getNormalStage(SelectMenuEpisodeShineID(
+ 				                SMS_getShineStage(mStage), mSelectedShine,
+ 				                false))),
+ 				        127);
+@@ -1186,7 +1207,7 @@
+ #endif
+ 				        SMSGetMessageData(
+ 				            mScenarioBmg2,
+-				            (u16)SMS_getNormalStage(SMS_getShineID(
++				            (u16)SMS_getNormalStage(SelectMenuEpisodeShineID(
+ 				                SMS_getShineStage(mStage), mSelectedShine,
+ 				                false))),
+ 				        127);
+@@ -1278,7 +1299,7 @@
+ 					scenarioName = SelectMenuScenarioName(this, sms_mod_n_);
+ 				} else {
+ #endif
+-				s16 shineID = SMS_getShineID(SMS_getShineStage(mStage),
++				s16 shineID = SelectMenuEpisodeShineID(SMS_getShineStage(mStage),
+ 				                             mSelectedShine, false);
+ #ifdef TARGET_PC
+ 				scenarioName = SMSGetMessageData(
+@@ -1316,7 +1337,7 @@
+ 				        sms_mod_n_ ? SelectMenuScenarioName(this, sms_mod_n_) :
+ #endif
+ 				        SMSGetMessageData(mScenarioBmg2,
+-				                          (u16)SMS_getNormalStage(SMS_getShineID(
++				                          (u16)SMS_getNormalStage(SelectMenuEpisodeShineID(
+ 				                              SMS_getShineStage(mStage),
+ 				                              mSelectedShine, false))),
+ 				        127);
+--- a/src/MoveBG/Item.cpp
++++ b/src/MoveBG/Item.cpp
+@@ -988,9 +988,20 @@
+ 	if (TFlagManager::smInstance->getShineFlag(mEventId)
+ 	    && strcmp("シャイン（マニ屋用）", ItemGetName(this)) != 0) {
+ #endif
++#ifdef TARGET_PC
++		// extensions may give it a model of theirs (port_ext.h): its name in the keeper
++		if (const char* sms_ext_model = port_ext_shine_model(this, mMActorKeeper, 1))
++			result = initMActor(sms_ext_model, nullptr, getSDLModelFlag());
++		else
++#endif
+ 		result = initMActor("shine_empty.bmd", nullptr, getSDLModelFlag());
+ 		unk1B4 = 1;
+ 	} else {
++#ifdef TARGET_PC
++		if (const char* sms_ext_model = port_ext_shine_model(this, mMActorKeeper, 0))
++			result = initMActor(sms_ext_model, nullptr, getSDLModelFlag());
++		else
++#endif
+ 		result = initMActor("shine.bmd", nullptr, getSDLModelFlag());
+ 	}
+ 	mMActor = result;
+@@ -1456,6 +1467,27 @@
+ {
+ 	TMapObjBase::load(stream);
+ 
++#ifdef TARGET_PC
++	// extensions may say whether the egg is there (port_ext.h)
++	if (strcmp(unkF4, "eggYoshiEvent") == 0) {
++		int present = EggYoshiLoadFlags()->getFlag(0x60003) == 1;
++		port_ext_yoshi_egg(PORT_EGG_EVENT_EGG, this, &present);
++		if (present) {
++			mState = 0xE;
++		} else {
++			makeObjDead();
++			return;
++		}
++	} else {
++		int present = gpMarDirector->mMap == 1 ? TFlagManager::getInstance()->getBool(0x1038F) != 0
++		                                       : TFlagManager::getInstance()->getShineFlag(0x21) != 0;
++		port_ext_yoshi_egg(PORT_EGG_STAGE, this, &present);
++		if (!present) {
++			makeObjDead();
++			return;
++		}
++	}
++#else
+ 	if (strcmp(unkF4, "eggYoshiEvent") == 0) {
+ 		if (EggYoshiLoadFlags()->getFlag(0x60003) == 1) {
+ 			mState = 0xE;
+@@ -1472,6 +1504,7 @@
+ 		makeObjDead();
+ 		return;
+ 	}
++#endif
+ 
+ 	unk148 = SMS_MakeMActorWithAnmData(
+ 	    "/scene/mapObj/eggYoshi_fukidashi.bmd", mManager->getMActorAnmData(), 3,
+--- a/src/Player/MarioAutodemo.cpp
++++ b/src/Player/MarioAutodemo.cpp
+@@ -14,6 +14,9 @@
+ #include <MSound/MSSetSound.hpp>
+ #include <MSound/MSoundBGM.hpp>
+ #include <sms_modhook.h>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ 
+ // Retail calls this from demoMain: the named `landed` result and the empty
+ // `default` arm are the two statements over the depth-1 budget (either alone
+@@ -275,7 +278,12 @@
+ 	// Pinna rollercoaster
+ 	if ((SMSGetMarDirector()->getCurrentMap() == 0x3A)
+ 	    && (SMSGetMarDirector()->getCurrentStage() == 0
+-	        || SMSGetMarDirectorBound()->getCurrentStage() == 1))
++	        || SMSGetMarDirectorBound()->getCurrentStage() == 1)
++#ifdef TARGET_PC
++	    // an extension changed the coaster start to another (port_ext.h playerSpawn)
++	    && !port_ext_no_coaster_start
++#endif
++	)
+ 		return toroccoStart();
+ 
+ 	if (SMS_isDivingMap()) {
+--- a/src/Player/WaterGun.cpp
++++ b/src/Player/WaterGun.cpp
+@@ -683,7 +683,12 @@
+ 	if ((unk384 == true
+ 	     && (controllerWork.mFrameInput & TMarioControllerWork::A) != 0
+ 	     && (controllerWork.mInput & TMarioControllerWork::R) != 0)
+-		    && unk385 == TNozzleTrigger::INACTIVE) {
++		    && unk385 == TNozzleTrigger::INACTIVE
++#ifdef TARGET_PC
++		    // extensions may stop the burst (port_ext.h): asked again at the next A
++		    && !port_ext_nozzle_fire(mFludd->getMario(), NozzleFludd(this)->mCurrentNozzle, PORT_FIRE_BURST)
++#endif
++	) {
+ 		unk385 = TNozzleTrigger::ACTIVE;
+ 		if (unk38C != 0xffffffff) {
+ 			u32 soundId = unk378 < 1.0f ? MSD_SE_PO_WATER_LOW_TRG
+@@ -749,6 +754,14 @@
+ #else
+ 		unk388 = mEmitParams.mInsidePressureMax.get();
+ #endif
++#ifdef TARGET_PC
++		// extensions may stop the launch (port_ext.h): spent, as after one, until R is let go
++		if (!unk384 && unk385 == TNozzleTrigger::INACTIVE
++		    && port_ext_nozzle_fire(mFludd->getMario(), NozzleFludd(this)->mCurrentNozzle, PORT_FIRE_PRESSURE)) {
++			unk385 = TNozzleTrigger::DEAD;
++			unk386 = 0;
++		}
++#endif
+ 		if (!unk384 && unk385 == TNozzleTrigger::INACTIVE) {
+ 			unk385      = TNozzleTrigger::ACTIVE;
+ 			unk386      = mEmitParams.mTriggerTime.get();
+--- a/src/System/MarDirectorDirect.cpp
++++ b/src/System/MarDirectorDirect.cpp
+@@ -881,7 +881,21 @@
+ 	const JGeometry::TVec3<f32> sms_ext_was = sms_ext_pos;
+ 	const f32 sms_ext_yaw_was               = sms_ext_yaw;
+ 	const int sms_ext_has_was               = sms_ext_has;
+-	port_ext_player_spawn(&sms_ext_pos.x, &sms_ext_yaw, &sms_ext_has, unkD1);
++	// the start's kind (PORT_START_*): Pinna Park's coaster where waitingStart
++	// and rollingStart would take it (TMario::isUnUsualStageStart); another a
++	// hook names is the start taken (from the coaster: a stage start like any)
++	port_ext_no_coaster_start = 0;
++	int sms_ext_kind          = unkD1;
++	if (unkD1 != 2 && SMSGetMarDirector()->getCurrentMap() == 0x3A
++	    && (SMSGetMarDirector()->getCurrentStage() == 0 || SMSGetMarDirector()->getCurrentStage() == 1))
++		sms_ext_kind = PORT_START_COASTER;
++	const int sms_ext_kind_was = sms_ext_kind;
++	port_ext_player_spawn(&sms_ext_pos.x, &sms_ext_yaw, &sms_ext_has, &sms_ext_kind);
++	if (sms_ext_kind != sms_ext_kind_was && sms_ext_kind >= 0 && sms_ext_kind <= 2) {
++		if (sms_ext_kind_was == PORT_START_COASTER)
++			port_ext_no_coaster_start = 1;
++		unkD1 = sms_ext_kind;
++	}
+ 	const bool sms_ext_moved = sms_ext_has
+ 	                           && (!sms_ext_has_was || sms_ext_pos.x != sms_ext_was.x || sms_ext_pos.y != sms_ext_was.y
+ 	                               || sms_ext_pos.z != sms_ext_was.z || sms_ext_yaw != sms_ext_yaw_was);
+--- a/src/System/MarDirectorSetupObjects.cpp
++++ b/src/System/MarDirectorSetupObjects.cpp
+@@ -238,8 +238,16 @@
+ 		case 8: {
+ 			int iVar6 = TFlagManager::getInstance()->getFlag(0x40000);
+ 			int lVar9 = 0;
++#ifdef TARGET_PC
++			// extensions may say whether the egg event is set up (port_ext.h)
++			int sms_ext_egg = !TFlagManager::getInstance()->getBool(0x1038F)
++			                  && TFlagManager::getInstance()->getShineFlag(33);
++			port_ext_yoshi_egg(PORT_EGG_PLAZA_EVENT, 0, &sms_ext_egg);
++			if (sms_ext_egg) {
++#else
+ 			if (!TFlagManager::getInstance()->getBool(0x1038F)
+ 			    && TFlagManager::getInstance()->getShineFlag(33)) {
++#endif
+ 				lVar9 = true;
+ 				unk4E |= 0x2;
+ 			}

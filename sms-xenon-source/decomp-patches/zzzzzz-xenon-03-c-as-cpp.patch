@@ -1,0 +1,106 @@
+Reason: the Xbox 360 build compiles the game's C files as C++ (VS2010's C compiler is C89). hx_wiper.c defined Hxs_Logo_ExtraDraw K&R-style and repeated two tentative definitions; that and THPDec.c's void* assignments need what C++ requires. The callers pass the same values; nothing changes on any target.
+--- a/src/GC2D/hx_wiper.c
++++ b/src/GC2D/hx_wiper.c
+@@ -126,7 +126,7 @@
+ static void Hxs_GameOver(u8 fade, f32 mag, f32 rot);
+ static void InitWipe(void);
+ static void Hx_GameOver(void);
+-static void Hxs_Logo_ExtraDraw();
++static void Hxs_Logo_ExtraDraw(u8 alpha_in, const void* timg);
+ static void Hxs_Logo_TexSetup(u8 alpha, u8 fade, const ResTIMG* timg);
+ static void Hxs_Logo_TexDraw(f32 x1, f32 y1, f32 x2, f32 y2, f32 wd, f32 ht);
+ static void Hxs_Logo_MagDraw(f32 mag, f32 wd, f32 ht);
+@@ -1059,7 +1059,7 @@
+ 
+ 	Hx_CameraInit();
+ 	gmover_tex_buffer = hx.resource;
+-	Hgx_init_tobj_resource(&obj, gmover_tex_buffer);
++	Hgx_init_tobj_resource(&obj, (const ResTIMG*)gmover_tex_buffer);
+ 	GXSetTexCoordGen2(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY,
+ 	                  GX_FALSE, GX_PTIDENTITY);
+ 	GXSetNumTexGens(1);
+@@ -1302,21 +1302,16 @@
+ 	{ 255.0f, 3.01f, 8 },    { 220.0f, 71.0f, 4 },  { -1.0f, -1.0f, -1 },
+ };
+ 
+-static int hxs_logo_resetflag;
+-static int hxs_logodraw_resetflag;
+-
+ /// Defined without a prototype. Hx_Logo passes `buffer` as the texture: retail
+ /// computes it into r4 at the top of Hx_Logo and keeps it there, so no call
+ /// site needs to load r4 before the `bl`.
+-static void Hxs_Logo_ExtraDraw(alpha_in, timg)
+-u8 alpha_in;
+-const ResTIMG* timg;
++static void Hxs_Logo_ExtraDraw(u8 alpha_in, const void* timg)
+ {
+ 	GXTexObj obj;
+ 
+ 	Hx_CameraInit();
+ 	Hx_GxInit(1, 1);
+-	Hgx_init_tobj_resource(&obj, timg);
++	Hgx_init_tobj_resource(&obj, (const ResTIMG*)timg);
+ 
+ 	{
+ 		GXColor color = { 0xFF, 0xFF, 0xFF, 0xFF };
+@@ -1356,7 +1351,7 @@
+ 
+ 	Hx_CameraInit();
+ 	Hx_GxInit(1, 1);
+-	Hgx_init_tobj_resource(&obj, timg);
++	Hgx_init_tobj_resource(&obj, (const ResTIMG*)timg);
+ 
+ 	{
+ 		GXColor color = { 0xFF, 0, 0, 0 };
+@@ -1565,7 +1560,7 @@
+ #endif
+ 
+ 	void* buffer;
+-	const ResTIMG* timg = hx.resource;
++	const ResTIMG* timg = (const ResTIMG*)hx.resource;
+ 
+ 	if (hx.hasResourceEx != 0)
+ 		buffer = hx.resourceEx;
+--- a/libs/dolphin/src/thp/THPDec.c
++++ b/libs/dolphin/src/thp/THPDec.c
+@@ -547,9 +547,9 @@
+ void __THPDecompressYUV(void* tileY, void* tileU, void* tileV)
+ {
+ 	u16 currentY, targetY;
+-	__THPInfo->dLC[0] = tileY;
+-	__THPInfo->dLC[1] = tileU;
+-	__THPInfo->dLC[2] = tileV;
++	__THPInfo->dLC[0] = (u8*)tileY;
++	__THPInfo->dLC[1] = (u8*)tileU;
++	__THPInfo->dLC[2] = (u8*)tileV;
+ 
+ 	currentY = __THPInfo->decompressedY;
+ 	targetY  = __THPInfo->yPixelSize;
+--- a/src/GC2D/hx_wiper.c
++++ b/src/GC2D/hx_wiper.c
+@@ -155,7 +155,10 @@
+  * puts back: hx, the file's other state, and each handler's own statics,
+  * which the handler registers (HX_PC_KEEP) the first time it runs, always on
+  * an advancing frame. */
+-extern int port_active_frame_rate;
++#ifdef __cplusplus
++extern "C"
++#endif
++extern int port_active_frame_rate; /* defined with C linkage (port_runtime.cpp), this file may build as C++ */
+ static struct {
+ 	void* p;
+ 	u32 n;
+--- a/src/GC2D/hx_wiper.c
++++ b/src/GC2D/hx_wiper.c
+@@ -42,7 +42,10 @@
+ 
+ // TODO: MarioUtil/ReinitGX.hpp is C++-only (it uses extern "C"), and this TU
+ // is built with -lang=c, so the prototype is repeated here.
+-void ReInitializeGX(void);
++#ifdef __cplusplus
++extern "C"
++#endif
++void ReInitializeGX(void); /* C linkage (gd-reinit-gx.cpp); this file may build as C++ */
+ 
+ typedef struct ResTIMG ResTIMG;
+ 

@@ -1,0 +1,13 @@
+Reason: extensions (ext/, port_ext.h) draw over the game's picture, its HUD and fades, under the port's own menus: achievements' banner (ext/achievements)
+
+--- a/src/System/Application.cpp
++++ b/src/System/Application.cpp
+@@ -1366,6 +1366,8 @@
+ 			mFader->draw(
+ 			    JDrama::TRect(0, 0, mode.fbWidth, mode.efbHeight));
+ #ifdef TARGET_PC
++			// extensions' 2D over the picture (port_ext.h's draw)
++			port_ext_draw((f32)mode.fbWidth, (f32)mode.efbHeight);
+ 			// the save state menu over everything (port_savestate_menu.h)
+ 			SaveStateMenuDraw(JDrama::TRect(0, 0, mode.fbWidth, mode.efbHeight));
+ 			// and the settings menu (port_settings_menu.h)

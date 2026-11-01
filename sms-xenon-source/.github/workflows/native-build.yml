@@ -1,0 +1,202 @@
+name: Native build
+# Builds the game with the public toolchains BUILD.md describes (apt, MSYS2,
+# Homebrew's LLVM), in a folder whose path has spaces, and starts each build far
+# enough to see its disc check and whether Super Mario Eclipse's mods are linked
+# in. No disc image is used. The launcher's toolsets build every platform in
+# launcher-build.yml; this covers what those builds do not:
+#   - Linux: Sunshine and Eclipse, with Eclipse's SHI flag check;
+#   - Windows: Eclipse, kept as an artifact for testing a change on a Windows
+#     machine before it is released;
+#   - Apple Silicon: Sunshine and Eclipse natively (docs/MACOS-ARM64.md): the
+#     gameptr pass plugin's test, the Vulkan backend with MoltenVK, and the
+#     executable's signature.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  # One run per pull request, and one for main: a newer push (or a merge, which
+  # pushes to main) cancels the older run still in progress or queued. Manual
+  # runs get a group of their own. cancel-superseded.yml stops a pull
+  # request's runs once it is merged or closed.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || (github.event_name == 'push' && github.ref) || github.run_id }}
+  cancel-in-progress: true
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            shell: bash
+            arch: '64'
+            build: linux-64
+            exe: sms
+            sunshine: true
+            cache-size: 1G
+          - os: windows-2025
+            shell: msys2 {0}
+            arch: '64'
+            build: windows-64
+            exe: sms.exe
+            sunshine: false
+            cache-size: 500M
+          - os: macos-15
+            shell: bash
+            arch: arm64
+            build: macos-arm64
+            exe: sms
+            sunshine: true
+            cache-size: 1G
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+        working-directory: Native CI with spaces/port
+    name: ${{ matrix.os }} ${{ matrix.arch }}
+    env:
+      SMS_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          path: Native CI with spaces/port
+      - name: Install Linux tools
+        if: runner.os == 'Linux'
+        timeout-minutes: 25
+        run: |
+          # Some runners can't reach the Azure Ubuntu mirror, and apt's fallback
+          # to archive.ubuntu.com can stall a download without closing it, which
+          # apt's own timeout doesn't catch. Kill it and switch mirrors instead.
+          apt_update() {
+            sudo timeout 120 apt-get update && return
+            for mirror in http://mirrors.edge.kernel.org/ubuntu/ http://mirror.math.princeton.edu/pub/ubuntu/; do
+              echo "apt-get update failed; switching to $mirror"
+              echo "$mirror" | sudo tee /etc/apt/apt-mirrors.txt
+              sudo timeout 120 apt-get update && return
+            done
+            return 1
+          }
+          apt_install() { for n in 1 2 3; do sudo timeout 300 apt-get -o Acquire::Retries=3 install -y --no-install-recommends "$@" && return; echo "apt-get install attempt $n failed"; done; return 1; }
+          apt_update
+          apt_install cmake make python3 patch binutils g++ clang llvm libsdl2-dev libegl-dev libgl-dev
+      - name: Install Mac tools
+        if: runner.os == 'macOS'
+        run: |
+          brew install llvm
+          echo "SMS_LLVM_BIN=$(brew --prefix llvm)/bin" >> "$GITHUB_ENV"
+          "$(brew --prefix llvm)/bin/clang" --version
+          sudo softwareupdate --install-rosetta --agree-to-license
+      - uses: msys2/setup-msys2@v2
+        if: runner.os == 'Windows'
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git patch mingw-w64-x86_64-gcc mingw-w64-x86_64-clang mingw-w64-x86_64-llvm-tools
+            mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja mingw-w64-x86_64-make
+            mingw-w64-x86_64-python mingw-w64-x86_64-SDL2
+      - name: Install compiler cache
+        uses: Mozilla-Actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: v0.18.0
+      - name: Enable compiler cache
+        shell: pwsh
+        working-directory: .
+        run: |
+          "SMS_COMPILER_CACHE=$((Get-Command sccache).Source.Replace('\', '/'))" >> $env:GITHUB_ENV
+          # A local cache, kept between runs as one archive per job: sccache's
+          # Actions cache backend stores each object file as a cache entry of
+          # its own, which filled the repository's 10 GB and made writes fail.
+          "SCCACHE_DIR=${{ runner.temp }}/sccache" >> $env:GITHUB_ENV
+          "SCCACHE_CACHE_SIZE=${{ matrix.cache-size }}" >> $env:GITHUB_ENV
+      - name: Restore compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/sccache
+          key: sccache-native-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: sccache-native-${{ matrix.os }}-${{ matrix.arch }}-
+      - name: Test the tools' Python helpers
+        run: |
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            python tools/tests/test_msys_cross_compile.py
+            python tools/mods/tests/test_object_response.py
+          else
+            python3 tools/mods/tests/test_object_response.py
+          fi
+      # The crash reports' probe (tools/test_crash_logging.py), including a stuck
+      # addr2line, which must not outlive a crashed game or get its open files.
+      - name: Build the Windows crash probe
+        if: runner.os == 'Windows'
+        run: |
+          g++ -std=c++11 -O1 -g -Isrc platform/os/tests/crash_probe.cpp platform/os/windows_crash.cpp \
+            platform/os/crash_info.cpp platform/os/windows_stack.cpp -static -o crash-probe.exe
+      - name: Check Windows crash reports
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: python tools/test_crash_logging.py crash-probe.exe --arch 64
+      - name: Check the gameptr pass plugin
+        if: runner.os == 'macOS'
+        run: tools/gameptr/test.sh
+      - name: Build Sunshine
+        if: matrix.sunshine
+        run: ./build.sh
+      - name: Check Sunshine starts without the mods
+        if: matrix.sunshine
+        run: tools/tests/check_start.sh "build/${{ matrix.build }}/${{ matrix.exe }}" 0
+      - name: Check the arm64 executable
+        if: runner.os == 'macOS'
+        run: |
+          exe=build/macos-arm64/sms
+          file "$exe"
+          lipo -archs "$exe" | grep -qx arm64
+          codesign --verify --strict "$exe"
+          # the Vulkan backend's library, beside it
+          test -f build/macos-arm64/libMoltenVK.dylib
+          lipo -archs build/macos-arm64/libMoltenVK.dylib | grep -qw arm64
+          # and the backend itself (configure leaves it out when a dependency
+          # cannot be fetched, which would pass silently otherwise). Not
+          # grep -q: it stops reading at the match, and nm fails on the broken pipe.
+          nm "$exe" | grep '__ZN4glvk7getProcEPKc' > /dev/null
+      - name: Build Eclipse
+        env:
+          SMS_ECLIPSE: '1'
+        run: ./build.sh
+      - name: Check SHI flag masks
+        if: runner.os == 'Linux'
+        run: python3 tools/mods/test_shi_flags.py build/linux-64-eclipse/eclipse-src/shi --compiler clang++ --arch 64
+      - name: Check Eclipse starts with its mods linked in
+        run: tools/tests/check_start.sh "build/${{ matrix.build }}-eclipse/${{ matrix.exe }}" 1
+      - name: Collect the Windows executable and its DLLs
+        if: runner.os == 'Windows'
+        run: |
+          mkdir -p windows-game
+          cp build/windows-64-eclipse/sms.exe windows-game/
+          ldd build/windows-64-eclipse/sms.exe | awk '$3 ~ /^\/mingw64\// { print $3 }' | xargs -r -I{} cp {} windows-game/
+          ls -l windows-game
+      # For testing a change on a Windows machine before it is released.
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: windows-64-eclipse
+          path: Native CI with spaces/port/windows-game
+          retention-days: 7
+      # Only main saves: a pull request starts from main's cache, so the
+      # repository keeps one archive per job (the Actions cache holds 10 GB).
+      - name: Save compiler cache
+        if: (success() || failure()) && github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/sccache
+          key: sccache-native-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Show the Windows executable's sections
+        if: failure() && runner.os == 'Windows'
+        run: |
+          exe=build/windows-64-eclipse/sms.exe
+          ls -l "$exe"
+          objdump -p "$exe" | sed -n '1,60p'
+          objdump -h "$exe"

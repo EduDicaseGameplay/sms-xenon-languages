@@ -1,0 +1,145 @@
+Reason: port: Aim with the C-stick (SMS_CLOSE_CAMERA_CSTICK, platform/pad) also aims FLUDD with the C-stick in the spray-in-place stance (R all the way down, or L to walk sideways): it turns Mario and tilts FLUDD the way it turns and tilts the Y close-up camera, and the camera follows behind him instead of turning
+--- a/src/Player/WaterGun.cpp
++++ b/src/Player/WaterGun.cpp
+@@ -281,6 +281,10 @@
+ // which flips the C-stick) flips the control stick's up and down here, as
+ // aiming FLUDD in place (R held all the way down) reads it, not the C-stick.
+ extern "C" int port_fludd_aim_invert_y;
++// SMS_CLOSE_CAMERA_CSTICK ("Aim with the C-stick", platform/pad): the C-stick
++// tilts FLUDD in place too, the way it tilts the Y close-up camera (whose
++// ctrlLButtonCamera_ takes the control stick's up as the C-stick's down).
++extern "C" int port_close_camera_cstick;
+ #endif
+ 
+ void TNozzleBase::calcGunAngle(const TMarioControllerWork& work)
+@@ -299,6 +303,9 @@
+ 		f32 stickY = NozzleMario(this)->mGamePad->mCompSPos[0 * 2 + 1];
+ 		if (port_fludd_aim_invert_y)
+ 			stickY = -stickY;
++		if (port_close_camera_cstick && NozzleMario(this) == gpMarioAddress)
++			stickY = MsClamp(stickY - NozzleMario(this)->mGamePad->mCompSPos[3 * 2 + 1],
++			                 -1.0f, 1.0f);
+ 		angle += (s16)(stickY * mEmitParams.mRButtonMult.get());
+ #else
+ 		angle += (s16)(NozzleMario(this)->mGamePad->mCompSPos[0 * 2 + 1]
+--- a/src/Player/MarioWait.cpp
++++ b/src/Player/MarioWait.cpp
+@@ -12,6 +12,21 @@
+ #include <MSound/MSoundBGM.hpp>
+ #ifdef TARGET_PC
+ #include <sms_modhook.h>
++
++// SMS_CLOSE_CAMERA_CSTICK ("Aim with the C-stick", platform/pad): in the
++// spray-in-place stance (R all the way down, or L to walk sideways) the
++// C-stick turns Mario, which the camera then follows instead of turning
++// (ctrlNormalOrTowerCamera_), and tilts FLUDD (TNozzleBase::calcGunAngle), as
++// it does in the Y close-up camera: its right turns him left, as it turns the
++// camera there.
++extern "C" int port_close_camera_cstick;
++
++static f32 portStanceCStickX(const TMario* mario)
++{
++	if (!port_close_camera_cstick || mario != gpMarioAddress)
++		return 0.0f;
++	return -mario->mGamePad->mCompSPos[3 * 2];
++}
+ #endif
+ 
+ BOOL TMario::startTalking()
+@@ -402,11 +417,29 @@
+ 
+ 		mPosition.x += v2 * JMASCos(mFaceAngle.y);
+ 		mPosition.z -= v2 * JMASSin(mFaceAngle.y);
++#ifdef TARGET_PC
++	}
++	// Walking sideways the control stick moves him, so only the C-stick turns
++	// him; R alone, either stick does (as R's turning below, which it reuses).
++	f32 portTurnX = portStanceCStickX(this);
++	bool portSideways
++	    = getGamePad()->checkMeaning(TMarioGamePad::MEANING_0x2000);
++	if (!portSideways)
++		portTurnX = MsClamp(portTurnX + getGamePad()->mCompSPos[0], -1.0f, 1.0f);
++	if ((portSideways && portTurnX != 0.0f)
++	    || (!portSideways
++	        && getGamePad()->checkMeaning(TMarioGamePad::MEANING_0x400))) {
++		f32 absH      = fabsf(portTurnX);
++		bool positive = true;
++		if (portTurnX < 0.0f)
++			positive = false;
++#else
+ 	} else if (getGamePad()->checkMeaning(TMarioGamePad::MEANING_0x400)) {
+ 		f32 absH      = fabsf(getGamePad()->mCompSPos[0]);
+ 		bool positive = true;
+ 		if (getGamePad()->mCompSPos[0] < 0.0f)
+ 			positive = false;
++#endif
+ 
+ 		f32 mid    = mControllerParams.mSquatRotMidAnalog.get();
+ 		f32 midVal = mControllerParams.mSquatRotMidValue.get();
+@@ -419,6 +452,9 @@
+ 		if (!positive)
+ 			rotAmt = -rotAmt;
+ 		mFaceAngle.y += (s16)(rotAmt * (f32)(-mDeParams.mWaitingRotSp.get()));
++#ifdef TARGET_PC
++		if (!portSideways)
++#endif
+ 		setAnimation(ANIM_SQWAT, 1.0f);
+ 	}
+ 
+--- a/src/Camera/CameraNormal.cpp
++++ b/src/Camera/CameraNormal.cpp
+@@ -28,6 +28,11 @@
+ // C-stick orbit (zzz-camera-06): the C-stick's up/down tilts the camera the
+ // same way, unless CAMERA_ZOOM is held (platform/pad, SMS_CSTICK_ORBIT).
+ extern "C" int port_cstick_orbit;
++// "Aim with the C-stick" (zzz-camera-07, SMS_CLOSE_CAMERA_CSTICK): in the
++// spray-in-place stance the C-stick turns Mario and tilts FLUDD
++// (TMario::squating, TNozzleBase::calcGunAngle) instead of moving the camera,
++// which follows behind him, walking sideways (L) and with the free camera too.
++extern "C" int port_close_camera_cstick;
+ #endif
+ 
+ static const char* dummyMactorStringValue1 = "\0\0\0\0\0\0\0\0\0\0\0";
+@@ -210,6 +215,22 @@
+ 	f32 fVar2 = unk120->mCompSPos[6];
+ 	f32 fVar3 = unk120->mCompSPos[7];
+ #ifdef TARGET_PC
++	const bool portStanceAim = port_close_camera_cstick
++	                           && SMS_GetMarioStatus() == MARIO_STATUS_SQUAT;
++	// how far Mario turned since the last frame, which the camera turns too
++	// following him, so that it keeps up (not after a frame out of the stance,
++	// and no more than he can turn in one)
++	static s16 portLastMarioYaw;
++	static bool portWasStanceAim;
++	s16 portMarioTurn = 0;
++	if (portStanceAim && portWasStanceAim)
++		portMarioTurn = MsClamp<s16>(*gpMarioAngleY - portLastMarioYaw, -0x800, 0x800);
++	portLastMarioYaw = *gpMarioAngleY;
++	portWasStanceAim = portStanceAim;
++	if (portStanceAim) {
++		fVar2 = 0.0f;
++		fVar3 = 0.0f;
++	}
+ 	{
+ 		// The C-stick's up/down tilts the camera around Mario at the same
+ 		// distance, as fast as it turns (rotateY_ByStickX_), instead of moving
+@@ -292,7 +313,18 @@
+ 				        ->getHostPos());
+ 		} else
+ #ifdef TARGET_PC
+-		if (!port_free_camera)
++		if (portStanceAim) {
++			// turns as he does, and closes the rest as when R aims (below)
++			if (unk288 != 0.0f) {
++				mCurrentTarget.mYaw += portMarioTurn;
++				f32 ease = CLBEaseInInbetween(0.0f, 1.0f, mCurrentTarget.unk28);
++				s16 ratio = CLBEaseInInbetween(
++				    mSaveEx->mSLAimAngleYChaseMin.get(),
++				    mSaveEx->mSLAimAngleYChaseMax.get(), ease);
++				CLBChaseAngleDecrease(&mCurrentTarget.mYaw,
++				                      *gpMarioAngleY - 0x8000, ratio);
++			}
++		} else if (!port_free_camera)
+ #endif
+ 		{
+ 			if (!SMS_IsMarioTouchGround4cm()) {

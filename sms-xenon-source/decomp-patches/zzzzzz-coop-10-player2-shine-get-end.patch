@@ -1,0 +1,28 @@
+Reason: port: split-screen co-op (ext/coop) - a Shine Get that keeps the players in the stage (BetterSunshineEngine's checkBootOut, Super Mario Eclipse's no-boot Shines) ends for the player who took the Shine: while the mod's check runs, player 2 who took it is "the player" (port_coop_shine_get_player)
+--- a/src/System/MarDirectorDirect.cpp
++++ b/src/System/MarDirectorDirect.cpp
+@@ -57,6 +57,12 @@
+ 			moveStage();                                                                           \
+ 	} while (0)
+ #endif
++#ifdef TARGET_PC
++// Split-screen co-op (ext/coop): what ends a Shine Get that keeps the players
++// in the stage (BetterSunshineEngine's checkBootOut) is about whoever took
++// the Shine, player 2 too.
++extern "C" void port_coop_shine_get_player(void* director, int after);
++#endif
+ 
+ extern OSThread gSetupThread;
+ 
+@@ -760,7 +766,11 @@
+ 	bool sms_mod_change_;
+ 	if (void* sms_mod_t_ = SMS_MOD_SITE(0x802995A8)) {
++		// (with the player who took the Shine as "the player": the mod puts
++		// gpMarioAddress back in play when the Shine Get is over)
++		port_coop_shine_get_player(this, 0);
+ 		SMS_MOD_GPR(28, nextState);
+ 		sms_mod_change_ = ((bool (*)())sms_mod_t_)();
++		port_coop_shine_get_player(this, 1);
+ 	} else {
+ 		sms_mod_change_ = nextState != mState;
+ 	}

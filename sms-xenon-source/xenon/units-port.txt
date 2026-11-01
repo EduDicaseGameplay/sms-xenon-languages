@@ -1,0 +1,42 @@
+# The port's own units the Xbox 360 build compiles (paths as in compile_commands.json).
+# Left out: code mods (platform/mods, ext/modapi), multiplayer, Discord presence, the
+# GameCube USB adapter, save states, the lockstep trace, HD movie packs, the MinGW crash
+# handler and stack walker, window icon/title (no window), and platform/audio/ai.cpp's
+# SDL output (an XAudio2 one replaces it). platform/gx comes separately with the backend.
+ext/achievements/host/ach_icon.cpp
+ext/achievements/host/ach_store.cpp
+platform/ar/ar.cpp
+platform/audio/dsp_hle.cpp
+platform/audio/dsp_mixer.cpp
+platform/audio/dtk.cpp
+platform/card/card.cpp
+platform/disc/gcdisc.cpp
+platform/dvd/dvd.cpp
+platform/endian/endian_dispatch.cpp
+platform/endian/endian_game.cpp
+platform/endian/endian_j3d.cpp
+platform/endian/endian_jaudio.cpp
+platform/endian/endian_jpa.cpp
+platform/endian/endian_seq.cpp
+platform/misc/endian.cpp
+platform/misc/language.cpp
+platform/misc/msl_math.c
+platform/misc/msl_rand.c
+platform/misc/port_cheats.cpp
+platform/misc/port_hud_settings.cpp
+platform/misc/port_settings.cpp
+platform/misc/port_warp.cpp
+platform/misc/sdk_data.cpp
+platform/mtx/mtx.cpp
+platform/os/os_core.cpp
+platform/os/os_thread.cpp
+platform/pad/pad.cpp
+platform/port_host.cpp
+platform/port_runtime.cpp
+platform/sdk_stubs.cpp
+platform/thp/hd_movies.cpp
+platform/vi/vi.cpp
+src/port_main.cpp
+platform/audio/ai.cpp
+platform/audio/noaudio.cpp
+platform/thp/thp_decode.cpp

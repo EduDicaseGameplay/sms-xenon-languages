@@ -1,0 +1,87 @@
+// <condition_variable> for the Xbox 360 build: waiters count themselves and
+// sleep on a semaphore; the XDK has no condition variables. Only what the port uses.
+#ifndef XE_CONDITION_VARIABLE
+#define XE_CONDITION_VARIABLE
+#include <mutex>
+#include <chrono>
+#include "xe_win.h"
+
+namespace std {
+
+enum cv_status { no_timeout, timeout };
+
+class condition_variable {
+public:
+	condition_variable() : waiters_(0) { sem_ = CreateSemaphore(NULL, 0, 0x7FFFFFFF, NULL); }
+	~condition_variable() { CloseHandle(sem_); }
+	void notify_one()
+	{
+		if (InterlockedCompareExchange(&waiters_, 0, 0) > 0) {
+			InterlockedDecrement(&waiters_);
+			ReleaseSemaphore(sem_, 1, NULL);
+		}
+	}
+	void notify_all()
+	{
+		LONG n = InterlockedExchange(&waiters_, 0);
+		if (n > 0)
+			ReleaseSemaphore(sem_, n, NULL);
+	}
+	void wait(unique_lock<mutex>& lk) { wait_ms(lk, INFINITE); }
+	template <class Pred> void wait(unique_lock<mutex>& lk, Pred p)
+	{
+		while (!p())
+			wait(lk);
+	}
+	template <class R, class P> cv_status wait_for(unique_lock<mutex>& lk, const chrono::duration<R, P>& d)
+	{
+		long long ms = chrono::duration_cast<chrono::milliseconds>(d).count();
+		return wait_ms(lk, ms < 0 ? 0 : (DWORD)ms) ? no_timeout : timeout;
+	}
+	template <class R, class P, class Pred> bool wait_for(unique_lock<mutex>& lk, const chrono::duration<R, P>& d, Pred p)
+	{
+		chrono::steady_clock::time_point end = chrono::steady_clock::now() + chrono::duration_cast<chrono::nanoseconds>(d);
+		while (!p()) {
+			chrono::nanoseconds left = end - chrono::steady_clock::now();
+			if (left.count() <= 0 || wait_for(lk, left) == timeout)
+				return p();
+		}
+		return true;
+	}
+	template <class C, class D, class Pred> bool wait_until(unique_lock<mutex>& lk, const chrono::time_point<C, D>& t, Pred p)
+	{
+		return wait_for(lk, chrono::duration_cast<chrono::nanoseconds>(t - C::now()), p);
+	}
+	template <class C, class D> cv_status wait_until(unique_lock<mutex>& lk, const chrono::time_point<C, D>& t)
+	{
+		return wait_for(lk, chrono::duration_cast<chrono::nanoseconds>(t - C::now()));
+	}
+private:
+	condition_variable(const condition_variable&);
+	condition_variable& operator=(const condition_variable&);
+	bool wait_ms(unique_lock<mutex>& lk, DWORD ms)
+	{
+		InterlockedIncrement(&waiters_);
+		lk.unlock();
+		bool got = WaitForSingleObject(sem_, ms) == WAIT_OBJECT_0;
+		if (!got) {
+			// timed out: withdraw, unless a notify already counted this waiter
+			LONG w;
+			do {
+				w = waiters_;
+				if (w <= 0) {
+					WaitForSingleObject(sem_, INFINITE); // its release is on the way
+					got = true;
+					break;
+				}
+			} while (InterlockedCompareExchange(&waiters_, w - 1, w) != w);
+		}
+		lk.lock();
+		return got;
+	}
+	HANDLE sem_;
+	volatile LONG waiters_;
+};
+
+} // namespace std
+#endif

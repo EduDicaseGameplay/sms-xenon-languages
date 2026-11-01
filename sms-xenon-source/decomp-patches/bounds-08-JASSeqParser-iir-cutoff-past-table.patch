@@ -1,0 +1,78 @@
+Reason: The IIR cutoff command (TSeqParser::cmdIIRCutOff) indexes the 128-row Player::CUTOFF_TO_IIR_TABLE with the u8 the sequence gives it. Sound effects pick their row from MSSeCallBack::setParameterSeqSync, and when the under-water filter ramps back out (MSSeCallBack::smWaterFilter from 0x78 to 0) the sound effect sequence's last step is row 128, one past the table: a probe of the command's argument saw 0xff1c, 0xff30, ... 0xff80 (rows 28 to 128) on every track playing as the camera left the water. The console then reads the next object in JASPlayer_impl.o's .data, s_key_table (0x803E3488, right after the table at 0x803E3088), as big-endian s16 pairs: 0x3F80, 0x0000, 0x3F80, 0x1DD2 for row 128 (read from the DOL), a mild resonant low-pass that stays on those sounds until they end. The 64-bit host read 0x0460, 0x0000, 0x0230, 0x0000 there, a filter about 29 dB down, so with the voice filters applied (platform/audio, PROTOCOL.md, Voice filters) the effects playing when Mario surfaced went nearly silent. Rows 128 to 159 now come from s_key_table's bits, as on the console; rows from 160 on, which no sequence is known to reach (the console reads the envelope tables and pointers there), pass the sound through as row 127 does.
+--- a/libs/JSystem/src/JAudio/JASystem/JASPlayer_impl.cpp
++++ b/libs/JSystem/src/JAudio/JASystem/JASPlayer_impl.cpp
+@@ -1,6 +1,9 @@
+ #include <JSystem/JAudio/JASystem/JASPlayer_impl.hpp>
+ #include <JSystem/JAudio/JASystem/JASDriverTables.hpp>
+ #include <dolphin/types.h>
++#ifdef TARGET_PC
++#include <string.h>
++#endif
+ 
+ namespace JASystem {
+ 
+@@ -144,6 +147,33 @@
+ 		return result;
+ 	}
+ 
++#ifdef TARGET_PC
++	// bounds-08: the IIR cutoff command reads CUTOFF_TO_IIR_TABLE with a u8,
++	// and a sound effect's under-water filter ramp ends on row 128, one past
++	// the table. The console reads the next .data, s_key_table, as big-endian
++	// s16 pairs; a host reads whatever its own layout puts there.
++	void portCutoffToIIR(u8 row, s16* out)
++	{
++		if (row < 128) {
++			for (int i = 0; i < 4; ++i)
++				out[i] = CUTOFF_TO_IIR_TABLE[row][i];
++		} else if (row < 160) {
++			for (int i = 0; i < 2; ++i) {
++				u32 bits;
++				memcpy(&bits, &s_key_table[(row - 128) * 2 + i], sizeof bits);
++				out[i * 2]     = (s16)(bits >> 16);
++				out[i * 2 + 1] = (s16)(bits & 0xFFFF);
++			}
++		} else {
++			// Past s_key_table the console reads the envelope tables and
++			// their pointers; no sequence is known to get here. Pass the
++			// sound through (row 127), rather than host memory.
++			for (int i = 0; i < 4; ++i)
++				out[i] = CUTOFF_TO_IIR_TABLE[127][i];
++		}
++	}
++#endif
++
+ } // namespace Player
+ 
+ } // namespace JASystem
+--- a/libs/JSystem/src/JAudio/JASystem/JASSeqParser.cpp
++++ b/libs/JSystem/src/JAudio/JASystem/JASSeqParser.cpp
+@@ -7,6 +7,12 @@
+ 
+ namespace JASystem {
+ 
++#ifdef TARGET_PC
++namespace Player {
++	void portCutoffToIIR(u8 row, s16* out); // JASPlayer_impl.cpp (bounds-08)
++}
++#endif
++
+ TSeqParser::CmdFunc TSeqParser::sCmdPList[] = {
+ 	nullptr,
+ 	&TSeqParser::cmdOpenTrack,
+@@ -567,8 +573,15 @@
+ int TSeqParser::cmdIIRCutOff(TTrack* track, u32* args)
+ {
+ 	u8 iirTableIdx = args[0];
++#ifdef TARGET_PC
++	// Rows past the table's 128 get the console's bytes (bounds-08).
++	s16 table[4];
++	JASystem::Player::portCutoffToIIR(iirTableIdx, table);
++#endif
+ 	for (u8 i = 0; i < 4; i++) {
++#ifndef TARGET_PC
+ 		s16* table  = JASystem::Player::CUTOFF_TO_IIR_TABLE[iirTableIdx];
++#endif
+ 		u8 iirIndex = TTrack::TIMED_IIR_Unk0 + i;
+ 		TTrack::MoveParam_* iir = &track->mTimedParam.mMoveParams[iirIndex];
+ 		iir->mTargetValue       = table[i] / (32768.0f - 1.0f);

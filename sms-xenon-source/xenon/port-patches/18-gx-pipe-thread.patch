@@ -1,0 +1,100 @@
+Xbox 360: with the GX core on a render thread (SMS_XE_GX_THREAD=1, xenon/gx/xe_gx_queue.cpp), the write-gather pipe's buffer belongs to the game thread, which collects its bytes for the queue, and the core keeps a buffer of its own; the game's GXPC_ memory and byte-order entry points move to xe_gx_queue.cpp. Applied by xenon/tools/xstage to the staged copy only.
+diff -ru a/platform/gx/src/gx_fifo.cpp b/platform/gx/src/gx_fifo.cpp
+--- a/platform/gx/src/gx_fifo.cpp	2026-10-28 20:44:08.350967457 +0500
++++ b/platform/gx/src/gx_fifo.cpp	2026-10-28 20:44:08.434118772 +0500
+@@ -1440,17 +1440,44 @@
+ uint8_t* GXPC_PipeBuf = nullptr;
+ uint32_t GXPC_PipeLen = 0, GXPC_PipeFast = 0;
+ }
++#ifdef _XBOX
++// With the GX core on the render thread (xenon/gx/xe_gx_queue.cpp sets g_xePipeOwn), GXPC_Pipe*
++// belong to the game thread, which collects pipe bytes there for the queue, and the core keeps
++// its own buffer, which pipeWrite fills.
++namespace gx {
++bool g_xePipeOwn = false;
++void xeGamePipePut(const uint8_t* bytes, uint32_t n);
++void xeGamePipeRedirect(bool on);
++void xeApiMemoryWritten(const void* p, size_t n);
++}
++static uint8_t* s_corePipeBuf = nullptr;
++static uint32_t s_corePipeLen = 0;
++#define s_pipeBuf (*(gx::g_xePipeOwn ? &s_corePipeBuf : &GXPC_PipeBuf))
++#define s_pipeLen (*(gx::g_xePipeOwn ? &s_corePipeLen : &GXPC_PipeLen))
++#else
+ #define s_pipeBuf GXPC_PipeBuf
+ #define s_pipeLen GXPC_PipeLen
++#endif
+ namespace gx {
+-static void pipeFastUpdate() { GXPC_PipeFast = s_redirect ? 0 : std::min(s_pipeCap, s_pipeNeed - 1); }
++static void pipeFastUpdate() {
++#ifdef _XBOX
++    if (g_xePipeOwn) return;
++#endif
++    GXPC_PipeFast = s_redirect ? 0 : std::min(s_pipeCap, s_pipeNeed - 1);
++}
+ 
+ // Writes through a redirected pipe go to memory directly (uncached on the
+ // GameCube, so the game flushes nothing): stamp them when the redirect ends.
+ static uint8_t* s_redirectStart = nullptr;
+ void setPipeRedirect(uint8_t* dest) {
++#ifdef _XBOX
++    if (s_redirectStart && s_redirect > s_redirectStart) xeApiMemoryWritten(s_redirectStart, size_t(s_redirect - s_redirectStart));
++    s_redirect = s_redirectStart = dest;
++    if (g_xePipeOwn) xeGamePipeRedirect(dest != nullptr);
++#else
+     if (s_redirectStart && s_redirect > s_redirectStart) memoryWritten(s_redirectStart, size_t(s_redirect - s_redirectStart));
+     s_redirect = s_redirectStart = dest;
++#endif
+     pipeFastUpdate();
+ }
+ uint8_t* getPipeRedirect() { return s_redirect; }
+@@ -1482,25 +1509,44 @@
+     pipeFastUpdate();
+ }
+ 
++static inline void pipeAppend(const uint8_t* bytes, uint32_t n) {
++    if (s_pipeLen + n > s_pipeCap) pipeGrow(s_pipeLen + n);
++    memcpy(s_pipeBuf + s_pipeLen, bytes, n);
++    s_pipeLen += n;
++    if (s_pipeLen >= s_pipeNeed) pipeRun();
++}
++
+ static inline void pipePut(const uint8_t* bytes, uint32_t n) {
+     if (s_redirect) {
+         memcpy(s_redirect, bytes, n);
+         s_redirect += n;
+         return;
+     }
+-    if (s_pipeLen + n > s_pipeCap) pipeGrow(s_pipeLen + n);
+-    memcpy(s_pipeBuf + s_pipeLen, bytes, n);
+-    s_pipeLen += n;
+-    if (s_pipeLen >= s_pipeNeed) pipeRun();
++#ifdef _XBOX
++    if (g_xePipeOwn) {
++        xeGamePipePut(bytes, n);
++        return;
++    }
++#endif
++    pipeAppend(bytes, n);
+ }
+ 
+-void pipeWrite(const uint8_t* bytes, uint32_t n) { pipePut(bytes, n); }
++void pipeWrite(const uint8_t* bytes, uint32_t n) { pipeAppend(bytes, n); }  // the core's side
+ 
+ }  // namespace gx
+ 
+ // ------------------------------------------------------------------ C entry points
+ using namespace gx;
+ 
++#ifdef _XBOX
++// the game's entry points are xenon/gx/xe_gx_queue.cpp's, which reach these where the core runs
++#define GXPC_MemoryWritten xeCoreMemoryWritten
++#define GXPC_AddBigEndianRange xeCoreAddBigEndianRange
++#define GXPC_RemoveBigEndianRange xeCoreRemoveBigEndianRange
++#define GXPC_SetArrayBigEndian xeCoreSetArrayBigEndian
++#define GXPC_SetDefaultArrayBigEndian xeCoreSetDefaultArrayBigEndian
++#endif
++
+ extern "C" {
+ 
+ void GXPC_SetMemoryWindow(void* base, uint32_t size) {

@@ -1,0 +1,26 @@
+MSVC (Xbox 360 build): keep __declspec for the XDK headers and give AT_ADDRESS MSVC's selectany; the game's MWCC __declspec(section/weak) are removed by xenon/tools/xrewrite.py instead. Applied by xenon/tools/xstage to the staged copy only.
+--- a/src/port_compat.h
++++ b/src/port_compat.h
+@@ -65,7 +65,9 @@
+ #define srand sms_msl_srand
+ 
+ /* MWCC-only syntax. */
++#ifndef _MSC_VER /* MSVC: xrewrite.py drops the game's MWCC __declspec(section/weak) instead */
+ #define __declspec(x)
++#endif
+ /* Whole-function `asm` definitions keep their Gekko bodies inside
+  * #ifdef __MWERKS__, so dropping the keyword leaves a (C-less) body. The host
+  * headers above use __asm__, never bare asm. */
+--- a/src/port_include/dolphin/types.h
++++ b/src/port_include/dolphin/types.h
+@@ -49,7 +49,9 @@
+  * are *defined* in SDK headers. On the host they become ordinary weak
+  * globals, so the per-TU definitions merge at link time; the platform layer
+  * initialises the ones that matter (bus clock, memory size, TV mode). */
+-#ifdef _WIN32
++#ifdef _MSC_VER
++#define AT_ADDRESS(addr) /* xenon/tools/xrewrite.py puts __declspec(selectany) in front */
++#elif defined(_WIN32)
+ /* COFF has no ELF-style weak data. selectany puts header definitions in
+  * COMDAT sections so the linker keeps one copy shared by all game units. */
+ #define AT_ADDRESS(addr) __attribute__((selectany))

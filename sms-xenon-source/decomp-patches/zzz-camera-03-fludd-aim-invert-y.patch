@@ -1,0 +1,33 @@
+Reason: port: Invert FLUDD aim Y (SMS_FLUDD_AIM_INVERT_Y, platform/pad; unset, it follows Invert camera Y) flips FLUDD's up and down aim while Mario sprays in place with R held all the way down, which reads the control stick rather than the C-stick
+--- a/src/Player/WaterGun.cpp
++++ b/src/Player/WaterGun.cpp
+@@ -276,6 +276,13 @@
+ 	return mario;
+ }
+ 
++#ifdef TARGET_PC
++// SMS_FLUDD_AIM_INVERT_Y (platform/pad/pad.cpp, unset: as SMS_CAMERA_INVERT_Y,
++// which flips the C-stick) flips the control stick's up and down here, as
++// aiming FLUDD in place (R held all the way down) reads it, not the C-stick.
++extern "C" int port_fludd_aim_invert_y;
++#endif
++
+ void TNozzleBase::calcGunAngle(const TMarioControllerWork& work)
+ {
+ 	// volatile u32 unused1[17];
+@@ -288,8 +295,15 @@
+ 	s16 angle;
+ 	if (NozzleMario(this)->mStatus == MARIO_STATUS_SQUAT) {
+ 			angle = unk36E;
++#ifdef TARGET_PC
++		f32 stickY = NozzleMario(this)->mGamePad->mCompSPos[0 * 2 + 1];
++		if (port_fludd_aim_invert_y)
++			stickY = -stickY;
++		angle += (s16)(stickY * mEmitParams.mRButtonMult.get());
++#else
+ 		angle += (s16)(NozzleMario(this)->mGamePad->mCompSPos[0 * 2 + 1]
+ 		               * mEmitParams.mRButtonMult.get());
++#endif
+ 	} else {
+ 		angle = -mEmitParams.mLAngleBase.get();
+ 	}

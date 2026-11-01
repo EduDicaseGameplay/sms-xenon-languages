@@ -1,0 +1,80 @@
+Reason: port: split-screen co-op (ext/coop) - actors are clipped in the stage's update against both players' cameras, and each player has their own area and fast cubes, a place in either player's in play, so the world around player 2 moves and draws as it would around Mario
+--- a/src/MarioUtil/DrawUtil.cpp
++++ b/src/MarioUtil/DrawUtil.cpp
+@@ -747,6 +747,7 @@
+ // passes and moves as it would on screen.
+ extern "C" {
+ extern Mtx* port_coop_other_view;
++extern Mtx* port_coop_views[2]; // both players' cameras while player 2 plays
+ }
+ #endif
+ 
+@@ -759,13 +760,22 @@
+ 		if (-radius > sViewPlane[i].sdf(&local_18))
+ #ifdef TARGET_PC
+ 		{
+-			if (!port_coop_other_view)
+-				return false;
+-			MTXMultVec(*port_coop_other_view, position, &local_18);
+-			for (int k = 0; k < 6; ++k)
+-				if (-radius > sViewPlane[k].sdf(&local_18))
+-					return false;
+-			return true;
++			// in view if in any of the other views: the other player's while
++			// a view is drawn, and both players' cameras' through the stage's
++			// update (where actors are clipped: an actor only player 2 sees was
++			// clipped out, so it neither moved nor drew in their view)
++			Mtx* views[3] = { port_coop_other_view, port_coop_views[0], port_coop_views[1] };
++			for (int v = 0; v < 3; ++v) {
++				if (!views[v])
++					continue;
++				MTXMultVec(*views[v], position, &local_18);
++				int k = 0;
++				while (k < 6 && !(-radius > sViewPlane[k].sdf(&local_18)))
++					++k;
++				if (k == 6)
++					return true;
++			}
++			return false;
+ 		}
+ #else
+ 			return false;
+--- a/src/Camera/CubeManagerBase.cpp
++++ b/src/Camera/CubeManagerBase.cpp
+@@ -116,6 +116,14 @@
+ 	                        info->getUnk24(), param_3, param_4, param_5);
+ }
+ 
++#ifdef TARGET_PC
++// Split-screen co-op (ext/coop): the cube the other player is in (-1: none,
++// or no second player). Each player has their own area and fast cubes, and a
++// place in either player's is in play, as it is for each player's own game in
++// multiplayer.
++extern "C" int port_coop_other_cube(const void* manager);
++#endif
++
+ bool TCubeManagerArea::isInAreaCube(const Vec& pos) const
+ {
+ 	bool result = false;
+@@ -123,6 +131,10 @@
+ 
+ 	if (unk1C == found)
+ 		result = true;
++#ifdef TARGET_PC
++	else if (found != -1 && found == port_coop_other_cube(this))
++		result = true;
++#endif
+ 	// Presumably hotel delphino floor transitions?
+ 	else if (gpMarDirector->getCurrentMap() == 7 && getInCubeNoSave() != -1
+ 	         && found != -1) {
+@@ -147,6 +159,10 @@
+ 	int in      = getInCubeNo(pos);
+ 	if (unk1C != -1 && in != -1 && unk1C != in)
+ 		result = true;
++#ifdef TARGET_PC
++	if (result && in == port_coop_other_cube(this))
++		result = false;
++#endif
+ 
+ 	return result;
+ }

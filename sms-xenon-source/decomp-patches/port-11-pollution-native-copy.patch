@@ -1,0 +1,20 @@
+Reason: Each frame the game draws a goop layer's I8 texture into the EFB and copies it back into the same texture. Above 1x Picture sharpness the port's copy took the scaled EFB's size, so every texel of the layer became a hard block of pixels and the goop's edges a staircase, where the GameCube's bilinear filtering of the small texture rounds them. Ask the renderer to keep these copies at the texture's own size.
+--- a/src/Map/PollutionLayer.cpp
++++ b/src/Map/PollutionLayer.cpp
+@@ -407,12 +407,16 @@
+ 	DCStoreRange(mPollutionMap, mPos.getWidth() * mPos.getHeight());
+ }
+ 
++extern "C" void GXPC_SetNativeCopy(const void* dest, int w, int h);
++
+ void TPollutionLayer::initTex(const char* name)
+ {
+ 	mPollutionImage               = getTexResource(name);
+ 	mPollutionImage->alphaEnabled = 2;
+ 
+ 	mPollutionMap = (u8*)mPollutionImage + mPollutionImage->imageDataOffset;
++	GXPC_SetNativeCopy(mPollutionMap, mPollutionImage->width,
++	                   mPollutionImage->height);
+ }
+ 
+ void TPollutionLayer::initLayerInfo(const TPollutionLayerInfo* param_1)

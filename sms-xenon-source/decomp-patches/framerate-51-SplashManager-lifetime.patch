@@ -1,0 +1,45 @@
+Reason: port: with frame_rate = 60 or 120 FLUDD's water splash sprites shot higher and vanished in half or a quarter of their time; they move once per displayed frame with a 16-frame lifetime and a per-frame launch speed (only their fall was scaled); scale both
+--- a/src/Player/SplashManager.cpp
++++ b/src/Player/SplashManager.cpp
+@@ -12,6 +12,17 @@
+ 
+ TSplashManager* gpSplashManager;
+ 
++#ifdef TARGET_PC
++#include "port_framerate.h"
++
++// Port: the splashes move on the calc-anim pass, once per displayed frame.
++// Their fall already scales by the frame rate (unk638), but their lifetime
++// (which also sizes and fades them) is 16 frames and their launch speed a
++// per-frame step, so at 60 or 120 fps a splash shot higher and was gone in
++// half or a quarter of its time. Count the lifetime in displayed frames and
++// scale the speed (both unchanged at 30).
++#endif
++
+ void TSplashManager::load(JSUMemoryInputStream& stream)
+ {
+ 	JDrama::TViewObj::load(stream);
+@@ -37,7 +48,11 @@
+ 	unk640 = new TDLColorTexQuad;
+ 	unk640->createBuffer(64);
+ 	unk644 = 3000.0f;
++#ifdef TARGET_PC
++	unk648 = 16 * port_native_frame_divisor();
++#else
+ 	unk648 = 16;
++#endif
+ 
+ 	gpSplashManager = this;
+ }
+@@ -52,7 +67,11 @@
+ 		TWaterSplash* splash = link->getObject();
+ 
+ 		splash->unk0  = param_1;
++#ifdef TARGET_PC
++		splash->unkC  = param_2 * port_frame_scale();
++#else
+ 		splash->unkC  = param_2;
++#endif
+ 		splash->unk10 = unk648;
+ 	}
+ }

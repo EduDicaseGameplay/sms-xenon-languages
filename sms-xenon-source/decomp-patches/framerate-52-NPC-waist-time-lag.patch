@@ -1,0 +1,81 @@
+Reason: port: with frame_rate = 60 or 120 the Piantas' and Peach's waist lag (TMtxTimeLag on koshi_null) sprang two or four times as fast and looked stiff; it is calculated with the NPC's model once per displayed frame, while Mario's effects of the same class run per movement tick; NPCs flag theirs to step once per 1/30 s
+--- a/src/MarioUtil/MtxUtil.cpp
++++ b/src/MarioUtil/MtxUtil.cpp
+@@ -10,6 +10,16 @@
+ #include <Camera/Camera.hpp>
+ #include <Map/Map.hpp>
+ #include <Map/MapData.hpp>
++#ifdef TARGET_PC
++#include <System/MarDirector.hpp>
++#include "port_framerate.h"
++
++// Port: an effect with this flag is calculated once per displayed frame (an
++// NPC's model calc on the calc-anim pass) rather than per movement tick
++// (Mario's), so its spring is stepped once per 1/30 s to keep its 30 fps
++// motion; in between, the last state is still applied to the joint.
++static const u16 cPortFrameRateEffect = 0x8000;
++#endif
+ 
+ // The leading 12-byte zero object is @1490, dummyMactorStringValue1's string
+ // from System/DummyMactorString.hpp; it is dead here, referenced only as the
+@@ -98,9 +108,16 @@
+ 		trans.y = mtx[1][3];
+ 		trans.z = mtx[2][3];
+ 
++#ifdef TARGET_PC
++		const bool portStep = !(mFlags & cPortFrameRateEffect)
++		                      || port_native_frame_step(gpMarDirector->unk5C);
++#endif
+ 		f32 posAccel = mParams.mPosAccel.get();
+ 		f32 posBrake = mParams.mPosBrake.get();
+ 
++#ifdef TARGET_PC
++		if (portStep) {
++#endif
+ 		unk08.x += posAccel * (trans.x - unk14.x);
+ 		unk08.y += posAccel * (trans.y - unk14.y);
+ 		unk08.z += posAccel * (trans.z - unk14.z);
+@@ -112,6 +129,9 @@
+ 		unk14.x += unk08.x;
+ 		unk14.y += unk08.y;
+ 		unk14.z += unk08.z;
++#ifdef TARGET_PC
++		}
++#endif
+ 
+ 		f32 posLimit = mParams.mPosLimit.get();
+ 		if (unk14.x < trans.x - posLimit)
+@@ -170,6 +190,9 @@
+ 			newQuat.w = -newQuat.w;
+ 		}
+ 
++#ifdef TARGET_PC
++		if (portStep) {
++#endif
+ 		f32 quatAccel = mParams.mQuatAccel.get();
+ 		unk20.x += quatAccel * (newQuat.x - unk30.x);
+ 		unk20.y += quatAccel * (newQuat.y - unk30.y);
+@@ -186,6 +209,9 @@
+ 		unk30.y += unk20.y;
+ 		unk30.z += unk20.z;
+ 		unk30.w += unk20.w;
++#ifdef TARGET_PC
++		}
++#endif
+ 
+ 		if (mFlags & 1)
+ 			MTXQuat(mtx, &unk30);
+--- a/src/NPC/NpcInitPrg.cpp
++++ b/src/NPC/NpcInitPrg.cpp
+@@ -147,6 +147,11 @@
+ 	J3DModel* model = getModel();
+ 	mMultiMtxEffect->setup(model, pInfo->unk8);
+ 	mMultiMtxEffect->flagOn(0x1);
++#ifdef TARGET_PC
++	// Port: the waist lag is calculated with the NPC's model, once per
++	// displayed frame; step it at 30 fps (MtxUtil.cpp).
++	mMultiMtxEffect->flagOn(0x8000);
++#endif
+ }
+ 
+ // NOTE: same as above

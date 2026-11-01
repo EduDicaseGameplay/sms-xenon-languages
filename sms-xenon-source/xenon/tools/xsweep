@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Shader coverage: every area and episode in Xenia, started there directly (SMS_WARP_DIRECT), with a
+# movie that turns the camera around and runs, jumps and sprays, so the programs the area draws get
+# into the run tree's data\shaders\programs.bin. Then `xshaders <that file>` puts them in the package.
+# Usage: xsweep [area,episode ...]   (default: areas 0-63; episodes 0-7 in the worlds 1-9, else 0-1)
+# Per run: /tmp/xsweep/<area>-<episode>.log; summary: /tmp/xsweep/summary.txt
+set -uo pipefail
+here=$(dirname "$(readlink -f "$0")")
+top=$(readlink -f "$here/../../..")/build-xenon
+run=~/src/xbox-dev/run/sms
+out=/tmp/xsweep
+mkdir -p "$out" "$run/data/shaders"
+runs=("$@")
+if [ ${#runs[@]} -eq 0 ]; then
+  for a in $(seq 0 63); do
+    [ "$a" -eq 15 ] && continue  # the title
+    if [ "$a" -ge 1 ] && [ "$a" -le 9 ]; then eps=$(seq 0 7); else eps="0 1"; fi
+    for e in $eps; do runs+=("$a,$e"); done
+  done
+fi
+# the camera all the way round, then a run each way with jumps and spray, every 600 fields
+script=""
+for f in $(seq 400 600 5800); do
+  script+="cstick_right@$f+240,stick_up@$((f + 250))+150,a@$((f + 300)),r@$((f + 330))+90,stick_left@$((f + 420))+120,b@$((f + 480)),stick_down@$((f + 500))+90,"
+done
+python3 "$here/make_dtm.py" "$run/sweep.dtm" 6000 "$script"
+cp "$run/sms_env.txt" "$out/env.bak"
+trap 'cp "$out/env.bak" "$run/sms_env.txt"' EXIT
+# start from the shipped cache: what it has loads, the rest is compiled and added
+[ -f "$run/data/shaders/programs.bin" ] || cp "$top/shaders/pack.bin" "$top/shaders/programs.bin" "$run/data/shaders/"
+for w in "${runs[@]}"; do
+  printf 'SMS_DISC_IMAGE=game:\\GMSE01.iso\nSMS_VI_DETERMINISTIC=1\nSMS_TEXTURE_PACKS=0\nSMS_XE_SCALE=1.5\nSMS_WIDESCREEN=16:9\n' > "$run/sms_env.txt"
+  printf 'SMS_WARP=%s\nSMS_WARP_DIRECT=1\nSMS_MOVIE=game:\\sweep.dtm\n' "$w" >> "$run/sms_env.txt"
+  rm -rf "$run/data/sms-port"
+  XRUN_CONFIG=${XSWEEP_CONFIG:-Master} "$here/xrun" "${XSWEEP_SECS:-120}" > /dev/null 2>&1
+  cp "$run/sms.log" "$out/${w/,/-}.log"
+  n=$(grep -o 'shaders: [0-9]* compiled' "$run/sms.log" | tail -1 | grep -o '[0-9]*')
+  printf '%s: %s new programs, %s keys%s\n' "$w" "${n:-?}" \
+    "$(python3 -c "import os;print((os.path.getsize('$run/data/shaders/programs.bin')-8)//0x1cc)")" \
+    "$(grep -q 'left the title' "$run/sms.log" && echo '' || echo ' (no stage)')" | tee -a "$out/summary.txt"
+done

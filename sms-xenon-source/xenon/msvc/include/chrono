@@ -1,0 +1,108 @@
+// <chrono> for the Xbox 360 build: durations, steady/high-resolution clocks on
+// QueryPerformanceCounter, system_clock on time(). Only what the port uses.
+#ifndef XE_CHRONO
+#define XE_CHRONO
+#include <ratio>
+#include <time.h>
+#include "xe_win.h"
+
+namespace std {
+namespace chrono {
+
+template <class Rep, class Period = ratio<1> > class duration {
+public:
+	typedef Rep rep;
+	typedef Period period;
+	duration() : r_(0) {}
+	explicit duration(Rep r) : r_(r) {}
+	template <class R2, class P2> duration(const duration<R2, P2>& d)
+	    : r_((Rep)((double)d.count() * P2::num / P2::den * Period::den / Period::num)) {}
+	Rep count() const { return r_; }
+	duration& operator+=(const duration& o) { r_ += o.r_; return *this; }
+	duration& operator-=(const duration& o) { r_ -= o.r_; return *this; }
+	duration operator-() const { return duration(-r_); }
+	static duration zero() { return duration(0); }
+private:
+	Rep r_;
+};
+template <class R, class P> duration<R, P> operator+(duration<R, P> a, duration<R, P> b) { return duration<R, P>(a.count() + b.count()); }
+template <class R, class P> duration<R, P> operator-(duration<R, P> a, duration<R, P> b) { return duration<R, P>(a.count() - b.count()); }
+template <class R, class P> bool operator<(duration<R, P> a, duration<R, P> b) { return a.count() < b.count(); }
+template <class R, class P> bool operator>(duration<R, P> a, duration<R, P> b) { return a.count() > b.count(); }
+template <class R, class P> bool operator<=(duration<R, P> a, duration<R, P> b) { return a.count() <= b.count(); }
+template <class R, class P> bool operator>=(duration<R, P> a, duration<R, P> b) { return a.count() >= b.count(); }
+template <class R, class P> bool operator==(duration<R, P> a, duration<R, P> b) { return a.count() == b.count(); }
+
+typedef duration<long long, nano> nanoseconds;
+typedef duration<long long, micro> microseconds;
+typedef duration<long long, milli> milliseconds;
+typedef duration<long long> seconds;
+typedef duration<long long, ratio<60> > minutes;
+
+template <class To, class R, class P> To duration_cast(const duration<R, P>& d)
+{
+	// exact for the integer ratios used here: multiply first, then divide
+	long long n = (long long)d.count() * P::num * To::period::den;
+	long long q = P::den * To::period::num;
+	return To((typename To::rep)(n / q));
+}
+
+template <class Clock, class Dur = typename Clock::duration> class time_point {
+public:
+	typedef Dur duration;
+	time_point() : d_() {}
+	explicit time_point(const Dur& d) : d_(d) {}
+	Dur time_since_epoch() const { return d_; }
+	time_point& operator+=(const Dur& d) { d_ += d; return *this; }
+private:
+	Dur d_;
+};
+template <class C, class D> D operator-(time_point<C, D> a, time_point<C, D> b) { return a.time_since_epoch() - b.time_since_epoch(); }
+template <class C, class D, class R2, class P2> time_point<C, D> operator+(time_point<C, D> a, duration<R2, P2> d)
+{
+	return time_point<C, D>(a.time_since_epoch() + duration_cast<D>(d));
+}
+template <class C, class D> time_point<C, D> operator-(time_point<C, D> a, D d) { return time_point<C, D>(a.time_since_epoch() - d); }
+template <class C, class D> bool operator<(time_point<C, D> a, time_point<C, D> b) { return a.time_since_epoch() < b.time_since_epoch(); }
+template <class C, class D> bool operator>(time_point<C, D> a, time_point<C, D> b) { return a.time_since_epoch() > b.time_since_epoch(); }
+template <class C, class D> bool operator<=(time_point<C, D> a, time_point<C, D> b) { return a.time_since_epoch() <= b.time_since_epoch(); }
+template <class C, class D> bool operator>=(time_point<C, D> a, time_point<C, D> b) { return a.time_since_epoch() >= b.time_since_epoch(); }
+
+struct steady_clock {
+	typedef nanoseconds duration;
+	typedef duration::rep rep;
+	typedef duration::period period;
+	typedef chrono::time_point<steady_clock> time_point;
+	static const bool is_steady = true;
+	static time_point now()
+	{
+		static LARGE_INTEGER f;
+		if (!f.QuadPart)
+			QueryPerformanceFrequency(&f);
+		LARGE_INTEGER c;
+		QueryPerformanceCounter(&c);
+		long long s = c.QuadPart / f.QuadPart, r = c.QuadPart % f.QuadPart;
+		return time_point(nanoseconds(s * 1000000000LL + r * 1000000000LL / f.QuadPart));
+	}
+};
+typedef steady_clock high_resolution_clock;
+
+struct system_clock {
+	typedef microseconds duration;
+	typedef duration::rep rep;
+	typedef duration::period period;
+	typedef chrono::time_point<system_clock> time_point;
+	static const bool is_steady = false;
+	static time_point now()
+	{
+		FILETIME ft; // 100 ns since 1601
+		GetSystemTimeAsFileTime(&ft);
+		long long t = ((long long)ft.dwHighDateTime << 32 | ft.dwLowDateTime) / 10 - 11644473600000000LL;
+		return time_point(microseconds(t));
+	}
+	static time_t to_time_t(const time_point& t) { return (time_t)(t.time_since_epoch().count() / 1000000); }
+};
+
+} // namespace chrono
+} // namespace std
+#endif

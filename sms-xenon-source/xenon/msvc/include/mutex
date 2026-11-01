@@ -1,0 +1,82 @@
+// <mutex> for the Xbox 360 build on CRITICAL_SECTION (recursive, so it serves
+// both kinds). Only what the port uses.
+#ifndef XE_MUTEX
+#define XE_MUTEX
+#include "xe_win.h"
+
+namespace std {
+
+class mutex {
+public:
+	mutex() { InitializeCriticalSection(&cs_); }
+	~mutex() { DeleteCriticalSection(&cs_); }
+	void lock() { EnterCriticalSection(&cs_); }
+	bool try_lock() { return TryEnterCriticalSection(&cs_) != 0; }
+	void unlock() { LeaveCriticalSection(&cs_); }
+private:
+	mutex(const mutex&);
+	mutex& operator=(const mutex&);
+	CRITICAL_SECTION cs_;
+};
+typedef mutex recursive_mutex;
+
+struct defer_lock_t {};
+struct adopt_lock_t {};
+struct try_to_lock_t {};
+
+template <class M> class lock_guard {
+public:
+	explicit lock_guard(M& m) : m_(m) { m_.lock(); }
+	lock_guard(M& m, adopt_lock_t) : m_(m) {}
+	~lock_guard() { m_.unlock(); }
+private:
+	lock_guard(const lock_guard&);
+	lock_guard& operator=(const lock_guard&);
+	M& m_;
+};
+
+template <class M> class unique_lock {
+public:
+	typedef M mutex_type;
+	unique_lock() : m_(0), owns_(false) {}
+	explicit unique_lock(M& m) : m_(&m), owns_(true) { m.lock(); }
+	unique_lock(M& m, defer_lock_t) : m_(&m), owns_(false) {}
+	unique_lock(M& m, adopt_lock_t) : m_(&m), owns_(true) {}
+	unique_lock(M& m, try_to_lock_t) : m_(&m), owns_(m.try_lock()) {}
+	~unique_lock() { if (owns_) m_->unlock(); }
+	void lock() { m_->lock(); owns_ = true; }
+	bool try_lock() { return owns_ = m_->try_lock(); }
+	void unlock() { m_->unlock(); owns_ = false; }
+	bool owns_lock() const { return owns_; }
+	operator bool() const { return owns_; }
+	M* mutex() const { return m_; }
+private:
+	unique_lock(const unique_lock&);
+	unique_lock& operator=(const unique_lock&);
+	M* m_;
+	bool owns_;
+};
+
+struct once_flag {
+	once_flag() : state(0) {}
+	volatile LONG state; // 0 not run, 1 running, 2 done
+};
+template <class F> void call_once(once_flag& f, F fn)
+{
+	if (f.state == 2) {
+		__lwsync();
+		return;
+	}
+	if (InterlockedCompareExchange(&f.state, 1, 0) == 0) {
+		fn();
+		__lwsync();
+		f.state = 2;
+		return;
+	}
+	while (f.state != 2)
+		SwitchToThread();
+	__lwsync();
+}
+
+} // namespace std
+#endif

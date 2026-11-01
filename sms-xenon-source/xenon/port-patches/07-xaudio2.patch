@@ -1,0 +1,20 @@
+Xbox 360: the output is XAudio2 (xenon/platform/xe_audio.cpp), which pulls the FIFO through the SDL callback. Applied by xenon/tools/xstage to the staged copy only.
+--- a/platform/audio/ai.cpp	2026-10-24 15:05:12.201201009 +0500
++++ b/platform/audio/ai.cpp	2026-10-24 15:05:12.282740045 +0500
+@@ -427,8 +427,16 @@
+ #endif
+ }
+ 
++#ifdef _XBOX
++// xenon/platform/xe_audio.cpp: XAudio2 pulls the FIFO through sdl_callback
++extern "C" int xe_audio_open(void (*fill)(void*, uint8_t*, int), int rate);
++#endif
++
+ bool open_sdl()
+ {
++#ifdef _XBOX
++	return xe_audio_open(sdl_callback, kRate) != 0;
++#endif
+ 	if (!load_sdl())
+ 		return false;
+ 	// SDL turns SIGINT/SIGTERM into an SDL_QUIT event; nothing pumps events in

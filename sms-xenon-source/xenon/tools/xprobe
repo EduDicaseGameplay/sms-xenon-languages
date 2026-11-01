@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Syntax-check units with the XDK compiler (cl /Zs) on win10vm; prints error counts by kind and the commonest.
+# Usage: xprobe game|port|all [N]   (N: a deterministic sample of N units; default all of the group)
+# Units come from the Linux build's compile_commands.json; run xstage first. Log: /tmp/xprobe.log
+set -euo pipefail
+repo=$(readlink -f "$(dirname "$(readlink -f "$0")")/../..")
+group=${1:-game}; n=${2:-0}
+python3 - "$repo" "$group" "$n" > /tmp/xprobe.list <<'PY'
+import json, os, random, sys
+repo, group, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
+cc = json.load(open(os.path.join(repo, 'build/linux-32/compile_commands.json')))
+out = []
+for e in cc:
+    f = os.path.relpath(e['file'], repo); c = e['command']
+    game = '-DVERSION_GMSE01' in c and ('-std=gnu++03' in c or '-std=gnu99' in c)
+    port = '-DVERSION_GMSE01' in c and not game
+    port360 = set(l.strip() for n in ('units-port.txt', 'units-gx.txt') for l in open(os.path.join(repo, 'xenon', n)) if l.strip() and not l.startswith('#'))
+    if (group == 'game' and game) or (group == 'port' and f in port360) or group == 'all':
+        if '_vkdeps' in f or '/vk/' in f or f.startswith('ext/multiplayer/'): continue
+        for a, b in (('build/linux-32/patched/', 'game/'), ('decomp/', 'game/')):
+            if f.startswith(a): f = b + f[len(a):]; break
+        out.append(('pch ' if 'SMS.pch' in c else 'nopch ') + '/Tp' + f.replace('/', '\\'))
+if group in ('port', 'all'):  # our own platform code
+    for f in sorted(os.listdir(os.path.join(repo, 'xenon/platform'))):
+        if f.endswith(('.cpp', '.c')): out.append('nopch /Tpxenon\\platform\\' + f)
+out = sorted(set(out))
+if n: random.seed(1); out = sorted(random.sample(out, min(n, len(out))))
+print('\n'.join(out))
+PY
+echo "$(wc -l < /tmp/xprobe.list) units"
+libs="dolphin JSystem THPPlayer PowerPC_EABI_Support TRK_MINNOW_DOLPHIN OdemuExi2"
+inc='xenon\msvc\include;platform\gx\port_include;platform\gx\include;src\port_include;src;platform;game\include'
+for l in $libs; do inc+=";game\\libs\\$l\\include"; done
+inc+=';sdk\include;ext;platform\mods\include;ext-generated'
+if [ "$group" = game ]; then
+  extra='/DGEKKO /DVERSION_GMSE01 /FIC:\work\sms-xenon\stage\src\port_compat.h'
+else  # the port's own code: no forced port_compat.h (as in CMakeLists.txt)
+  extra='/DGEKKO /DVERSION_GMSE01 /DSMS_AUDIO_DSP_HLE=1 /DSMS_HAVE_GAME_BUILD_H=1'
+fi
+{
+  echo '@echo off'
+  echo 'cd /d C:\work\sms-xenon\stage'
+  echo 'set PATH=C:\Program Files (x86)\Microsoft Visual Studio 10.0\Common7\IDE;%PATH%'
+  echo "set INCLUDE=$inc;%XEDK%\\include\\xbox"
+  cl='"%XEDK%\bin\win32\cl.exe" /nologo /Zs /MP /EHsc /D_XBOX /DTARGET_PC /DTARGET_X360 /DBUILD_VERSION=2 /DNDEBUG=1 /FIC:\work\sms-xenon\stage\xenon\msvc\xe_prelude.h '"$extra"
+  echo "if exist C:\work\sms-xenon\xprobe-nopch.rsp $cl @C:\work\sms-xenon\xprobe-nopch.rsp"
+  echo "if exist C:\work\sms-xenon\xprobe-pch.rsp $cl /FIC:\work\sms-xenon\stage\game\include\SMS.pch @C:\work\sms-xenon\xprobe-pch.rsp"
+} | sed 's/$/\r/' > /tmp/xprobe.bat
+{ grep '^nopch ' /tmp/xprobe.list || true; } | cut -d' ' -f2- | sed 's/$/\r/' > /tmp/xprobe-nopch.rsp
+{ grep '^pch ' /tmp/xprobe.list || true; } | cut -d' ' -f2- | sed 's/$/\r/' > /tmp/xprobe-pch.rsp
+ssh -o BatchMode=yes win10vm 'del /q C:\work\sms-xenon\xprobe-*.rsp 2>nul & rem' 2>&1 | grep -v '^\*\*' || true
+for r in nopch pch; do [ -s /tmp/xprobe-$r.rsp ] && rsync -t /tmp/xprobe-$r.rsp win10vm:/c/work/sms-xenon/ 2>&1 | grep -v '^\*\*'; done || true
+rsync -t /tmp/xprobe.bat win10vm:/c/work/sms-xenon/ 2>&1 | grep -v '^\*\*' || true
+ssh -o BatchMode=yes win10vm 'C:\work\sms-xenon\xprobe.bat > C:\work\sms-xenon\xprobe.log 2>&1 & rem' 2>&1 | grep -v '^\*\*' || true
+ssh -o BatchMode=yes win10vm 'type C:\work\sms-xenon\xprobe.log & rem' 2>/dev/null | iconv -f cp866 -t utf-8 | tr -d '\r' > /tmp/xprobe.log
+set +o pipefail
+echo "files with errors: $(grep -E ' error C' /tmp/xprobe.log | sed 's/(.*//' | sort -u | wc -l)"
+grep -oE '(fatal )?error C[0-9]+' /tmp/xprobe.log | sort | uniq -c | sort -rn | head -15
+echo "--- commonest messages"
+grep -E ' error C' /tmp/xprobe.log | sed -E 's/^.*: (fatal )?error /error /' | sort | uniq -c | sort -rn | head -${XPROBE_TOP:-25}

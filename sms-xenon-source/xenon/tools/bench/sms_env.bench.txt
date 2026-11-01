@@ -1,0 +1,9 @@
+# Phase 0 bench: every run of bench.txt in one launch, results in bench_results.txt
+SMS_DISC_IMAGE=game:\GMSE01.iso
+SMS_VI_DETERMINISTIC=1
+SMS_TRACE_SYNC=+0
+SMS_TEXTURE_PACKS=0
+SMS_XE_SCALE=1
+SMS_WIDESCREEN=0
+SMS_FRAME_RATE=30
+SMS_XE_BENCH=game:\bench.txt

@@ -1,0 +1,90 @@
+Reason: extensions (ext/, port_ext.h) may move the game camera's view for a tick, change or refuse the player's status changes and damage, and hear of each new Shine: the native mod API (ext/modapi) passes them to mods
+
+--- a/src/Camera/cameragc.cpp
++++ b/src/Camera/cameragc.cpp
+@@ -19,6 +19,7 @@
+ #include <stdio.h>
+ #ifdef TARGET_PC
+ #include <sms_modhook.h>
++#include "port_ext.h"
+ #endif
+ 
+ #include <System/StageUtil.hpp>
+@@ -1225,8 +1226,19 @@
+ 		}
+ 
+ 		if (getCamMode() != CAMERA_MODE_REPRODUCE_DEMO) {
++#ifdef TARGET_PC
++			// extensions may move this tick's view (port_ext.h): the matrices
++			// are made from copies of the eye and the point looked at
++			f32 sms_ext_fovy = mFovy;
++			JGeometry::TVec3<f32> sms_ext_eye = unk124;
++			JGeometry::TVec3<f32> sms_ext_at  = unk148;
++			port_ext_camera(this, &sms_ext_eye.x, &sms_ext_at.x, &sms_ext_fovy);
++			C_MTXPerspective(unk16C, sms_ext_fovy, mAspect, mNear, mFar);
++			C_MTXLookAt(unk1EC, &sms_ext_eye, &mUp, &sms_ext_at);
++#else
+ 			C_MTXPerspective(unk16C, mFovy, mAspect, mNear, mFar);
+ 			C_MTXLookAt(unk1EC, &unk124, &mUp, &unk148);
++#endif
+ 		}
+ 
+ 		bool flag2 = (graphics->unk0 & 2) ? true : false;
+--- a/src/Player/MarioMove.cpp
++++ b/src/Player/MarioMove.cpp
+@@ -843,8 +843,16 @@
+ 	mVel.y          = tmp.y * param_2;
+ }
+ 
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ int TMario::changePlayerStatus(u32 status, u32 arg, bool force)
+ {
++#ifdef TARGET_PC
++	// extensions may change or refuse the player's new status (port_ext.h)
++	if (port_ext_player_status(this, &status, &arg, force))
++		return 0;
++#endif
+ 	if (!force) {
+ 		if (status == mStatus)
+ 			return 0;
+--- a/src/Player/MarioCollision.cpp
++++ b/src/Player/MarioCollision.cpp
+@@ -58,9 +58,15 @@
+ 	}
+ }
+ 
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ void TMario::decHP(int hp)
+ {
+ #ifdef TARGET_PC
++	// extensions may change or stop the player's damage (port_ext.h)
++	if (port_ext_player_damage(this, &hp))
++		return;
+ 	// TEnemyMario shares this function: only the player's Mario is protected.
+ 	if (port_cheat_god_mode && isMario())
+ 		return;
+--- a/src/System/FlagManager.cpp
++++ b/src/System/FlagManager.cpp
+@@ -5,6 +5,7 @@
+ #ifdef TARGET_PC
+ #include <sms_modhook.h>
+ #include <sms_modhook.h>
++#include "port_ext.h"
+ #endif
+ 
+ #ifdef TARGET_PC
+@@ -477,6 +478,10 @@
+ 	if (getFlag(flag) == 0) {
+ 		incFlag(0x40000, 1);
+ 		setFlag(flag, 1);
++#ifdef TARGET_PC
++		// extensions hear of each new Shine (port_ext.h)
++		port_ext_shine_collected((int)(flag - 0x10000), getFlag(0x40000));
++#endif
+ 	}
+ }
+ 

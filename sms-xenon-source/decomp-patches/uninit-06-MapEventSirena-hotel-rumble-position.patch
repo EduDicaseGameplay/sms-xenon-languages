@@ -1,0 +1,19 @@
+Reason: TMapEventSirenaSink::watch starts the hotel's rise, and TMapEventSink::control then plays the rumble (MSD_SE_OBJ_QUAKE) at unk50[0] on every frame of it. TMapEventSink::initWithBuildingNum allocates unk50 with new[] and nothing in Sirena writes it (TMapEventSinkBianco::startControl is the only writer, for its slope), so the position is whatever the heap held. A fresh heap holds (0, 0, 0), and the rumble is heard. A stale one, after other stages, can hold a point far from the rise's demo camera; JAI then drops the sound as out of range and the hotel rises in silence (a probe that put the stale position at (30000, 0, 30000) reproduced the silent rise, and the low band stayed at the music's level). Set it to unk68, the point the demo camera (ホテル上げカメラ) looks at and the Shine appears at, as TDolpicEventRiccoMammaGate does with its unk48. Every build then plays the rumble.
+--- a/src/Map/MapEventSirena.cpp
++++ b/src/Map/MapEventSirena.cpp
+@@ -34,6 +34,15 @@
+ 	if (unk64) {
+ 		SMSGetPollutionLayer(0)->startDecay();
+ 		mRaisingBuildingIdx = 0;
++#ifdef TARGET_PC
++		// TMapEventSink::control plays the rise's rumble (MSD_SE_OBJ_QUAKE)
++		// at unk50[mRaisingBuildingIdx], which nothing in Sirena sets: it is
++		// whatever the heap held. When that is far from the camera, JAI
++		// drops the rumble as out of range and the hotel rises in silence.
++		// Play it where the rise's camera looks, as Delfino's gates do with
++		// theirs (see the patch).
++		unk50[mRaisingBuildingIdx].set(unk68.x, unk68.y, unk68.z);
++#endif
+ 		SMSGetMarDirector()->fireStartDemoCamera(
+ 		    "ホテル上げカメラ", &unk68, -1, 0.0f, true, nullptr, 0, nullptr,
+ 		    JDrama::TFlagT<u16>(0));

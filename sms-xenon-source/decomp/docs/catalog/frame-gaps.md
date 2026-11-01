@@ -1,0 +1,3329 @@
+# Stack-frame gaps
+
+A function whose instructions all match but whose `stwu r1` frame size differs.
+This is the single largest class of near-exact game code.
+The compiler-level model (which objects get dead slots and in what order) is in [frame-model.md](frame-model.md); where it disagrees with the notes below, it wins.
+
+## What causes a gap (current understanding)
+
+Read these in order; each one was checked before moving to the next.
+
+1. **Raw `TParamRT` reads.**
+   A `TParamRT<T>` is 0x14 bytes with its value at **+0x10**.
+   If m2c shows a bare field read at an offset where `offset - 0x10` is a 0x14-aligned param slot, the original called `mSomething.get()`, and that accessor's temporary is the missing stack.
+   In `tobiPuku`, reads at 0x33C/0x350/0x364 were params at 0x32C/0x340/0x354.
+   Declaring them and calling `.get()` made `TNerveTobiPukuPitiPiti::execute` exact and cut `Bound`'s gap from 32 to 8 bytes.
+   `TParamRT` members cannot be default-constructed: they need `PARAM_INIT` in the params class constructor, so declare the class properly instead of padding up to the offset.
+   Generated `u8 unkNNN[...]` padding blocks hide params.
+2. **Uninitialised locals the original declared.**
+   A function that is N bytes short has N bytes of *uninitialised* locals in the original that the optimiser never touches.
+   MWCC reserves their slots and emits no code for them.
+   On `THitActor::calcEntryRadius` (a leaf with 40 unreferenced bytes of stack), adding an uninitialised `Mtx` grew the frame with no new instructions, and 40 bytes made it exact.
+   Initialisation is what matters: `TVec3<f32> v(mPosition);` emits stores and ruins the match, while `TVec3<f32> v;` does not.
+   Common sizes: `Mtx` 48, `TVec3<f32>` 12, `TQuat4<f32>` 16.
+   Declare what the function plausibly needed (a scratch matrix for an unused branch, a vector computed only under a condition) **with a meaningful name**.
+   That recovers source; `char pad[40]` is the prohibited trick.
+   Adding N bytes of *any* local fixes an N-byte gap, so the byte count confirms the size, not the declaration.
+   `egggen` and `CameraTalk` were closed this way because the recovered locals were ones the code plainly wanted (a scratch position next to a distance test; a previous target/yaw pair in a camera).
+   If the byte count is the only evidence, leave the gap and say so.
+3. **Missing inlined helpers.**
+   MWCC reserves an inlined function's local slots even when its values live in registers, so a caller missing an inline can be instruction-identical with a short frame.
+   Also see `AGENT_MATCHING_TIPS.md`: "Each inline level in a call chain leaves one dead 4-byte temporary" and "`T x = f();` costs one more stack object".
+4. **Inlined accessor reads.** Each member read that goes through an inlined accessor leaves one dead 4-byte temporary (measured on `TMapCollisionMove::init`: one use 0x28, two 0x30, four 0x38 = target).
+   Reading members through their accessors is therefore a first-class fix for small gaps, and the accessor can also fix load order (`allocCheckData(getUnkC())` loads the count before `gpMapCollisionData`; the raw field swaps them).
+   Scalar naming saturates: on `MSBgm::init`, naming the `new` result, the loop and the table owner reaches 0x40 and a fourth scalar reuses a slot, so the last 8 bytes of a 32-byte gap need an aggregate (see [The last 8 bytes](#the-last-8-bytes)).
+5. **Named locals and statics.** Cases where the fix was a source-level declaration:
+   - `rocket`: `unk18[i]` -> `getObj(i)` alone closed `TRocketManager::initSetEnemies`; `getManager()` over `mManager` and `getSaveParams()` over `mSaveParams` each bought 8 elsewhere, but `getSaveParams()` in `getGravityY` broke a match, `getObjNum()` in a loop bound moved the wrong local, and naming a `TMsRange::rand()` result shrank the frame by 8. Measure per site.
+   - `fruitsboat`: accessor temporaries stop accumulating after two or three uses (`init` stayed at 0xf0), and `setGroundCollision` needed **two** named locals (`J3DModel* model` and `MtxPtr mtx`): `mtx` alone put the fetch after the null test.
+   - Ruled out: `MsAngleDiff(const f32&, f32)` helps `fruitsboat::moveObject` (+0.3) but regresses nine functions in six units (`getRotationFlyToDir` 100 -> 95.5, `turnToCurPathNode`, `calcRideMomentum`, ...); spelling it out as `rot.x - MsWrap(...)` is worse. The pitch block's reload of `rot.x` after `MsWrap` is unexplained. `std::min`/`max` landed (see `codegen-tells.md`).
+   - `TUtil<f32>::one()` is a +4 lever: an inlined call returning a constant binds a 4-byte temporary a literal does not (`mQuat.set(0, 0, 0, TUtil<f32>::one())` took `TKazekun::reset` to exact; +8 on two `set()` fallbacks with no instruction change).
+   - `GCConsole2::countShine` (0x228 vs 0x2A8): the ROM's frame has an 80-byte hole between a dead `JUTRect` and the five inlined `changeNum` locals, exactly one extra 16-byte rect per expansion, plus 48 below; that register pressure is why the ROM recomputes `value % 10` at two sites instead of parking it. It also confirms the dead-initialised-local pattern (`JUTRect rect(0, 0, 0, 0)` nothing reads, `bl JUTRect::set` with four zeros).
+   - Measured correlation, not yet a cause: each `theNerve()` expansion beyond the first leaves 16 bytes we do not reproduce (`attackToMario` 2 -> -16, `bind` 3 -> -32, `TNervePopoPossessedNozzle::execute` 2 -> -16).
+   - `bombhei`: the accessor step is **8** and a named call result is **16**. `p->mSLFoo.get()` instead of the params class's `getSLFoo()` wrapper is one inline level shallower (-8); a named `f32` holding the fetch is +16. Since frames are 8-aligned, a -8 with a +16 is often the only way to land (`TBombHei::getGravityY`, `TNerveBombHeiExplosion::execute`). Named **pointer** locals (`MActor*`, `MtxPtr`, `MSound*`, `getHolder()`) are worth zero; only a local whose initialiser carries a conversion takes a slot, and `getHitPoints()` over `mHitPoints` or `SMSGetMarDirector()` over `gpMarDirector` are real +8 levers.
+   - `yunbo`: naming a param fetch used in a comparison (`s32 recoverTimer = ...->getSLRecoverTimer(); if (recoverTimer < spine->getTime())`) added the missing 8 bytes of `TNerveYumboFreeze::execute`; declaring a scalar *before* the vector it is compared against fixed `TNerveYumboAttack::execute`, because an inlined helper's locals lay out in reverse, so the inline site and the UNUSED out-of-line copy want opposite orders (declare for the inline site; the size check still passes).
+   - **Aggregate locals cost a slot per inline expansion; scalars mostly do not.** Measured on `JGeometry::TQuat4<f32>::rotate`: its two `TQuat4` temporaries cost 32 bytes per expansion, `vx/vy/vz` 4, `w/z/y/x` none. When a frame is over by a multiple of a class size, look for an aggregate temporary in an inlined callee. Rewriting `rotate` with seven `f32` locals makes `TYumbo::shotSeeds`' frame exact (95.7 -> 96.7) but renumbers float registers at six other sites (1 improvement, 6 regressions), so it stays as is; the trial table is in the header's TODO. `shotSeeds`' residual is a `v.z` load retail parks in `f31` across `matan`/`sinf`/`cosf`, pointing at `MsGetRotFromZaxisY`'s `const&` parameter, not the quaternion.
+   - Before rewriting a header inline, check for a retail out-of-line copy: `rotate` is weak in `Kumokun.o` (0x80117d08, 0x98, a zero-frame leaf) and our body reproduces its 38 instructions. Grep the map with the full mangled stem (`rotate__Q29JGeometry9TQuat4<f>`); the shorter `TQuat4` stem finds nothing and reads as "never emitted".
+   - `NpcAnm::sunflowerReviving`: `int kind = unkD0->getCurrentAnmKind()` named inside the flag guard fixed 0x20 vs 0x28.
+   - `TMarDirector::loadParticleMario` touches only globals; declaring it `static` removed the implicit `this` slot and fixed 0x20 vs 0x18.
+     An unused `this` alone does not prove a method is static; check callers and member-pointer use.
+   - Named `SMSGetMarDirector()->getConsole()` result (HelpActor, EventWatcher) and a named `TFlagManager::getInstance()` result (SleepBossHanachan `startFall`) restored frames.
+   - `MapCollisionPlane`: computing into a named `int` and returning it gave frame 0x88; returning the float helper directly gave 0x80, naming its int result gave 0x90.
+
+Hypothesis 2 superseded an earlier conclusion (batch 61) that gaps were opaque compiler artifacts to be treated as blocked.
+It also explains why adding *initialised* copies to `TEggGenerator::control` (frame 0x38, 55.1%) looked like evidence against the locals theory.
+
+## Two regions, and which levers feed which
+
+Measured on the Player sweep. The gap splits into the **low region** (outgoing-argument and inline-temporary slots, growing up from 0xc) and the **named-local region** (growing down from the top). Every referenced slot's distance from the frame top tells you which region is short: if all slots share the frame delta, the whole residue is low and accessor levers work (`soundMovement` 0x100 -> 0x1b0, `MarioCap::perform` 0x140 -> 0x178, `MarioMain::perform`); if slots in the middle are missing (`receiveMessage`: 68 bytes between `diff` and the first `tmp`, 48 more below the `tmp` pair, while the low region is only 44 short), accessors push the low region *over* while the middle stays empty. Measure both before applying any lever; the full table is in `MarioReceiveMsg.cpp`'s TODO.
+
+Scalar accessor levers saturate: `getStatus()`, `getIntendedMag()`, `getHeldObject()`, `getHolder()`, `getGroundPlane()`, `getColNum()` are +8 each, any pair +16, a third nothing (exhaustive on `waiting`). Indexed accessors do not saturate: `getCollision(i)` over `mCollisions[i]` is +56 in `checkCollision` (one `hitHipDrop(mCollisions[i])` must stay raw or the base lands in `r3`); `&mYoshi->getTranslation()` over `&mYoshi->mTranslation` is +112 in `soundMovement` across ~30 sites with no instruction change.
+
+Anti-levers (measured): an accessor for a raw `unk114 &` test materialises a bool retail lacks; `getHealth()` as `startMarioVoice`'s argument hoists the `lha` above the vtable load; a named `s16` for `IConverge`'s result adds a sign extension; naming a call result is worth zero once scalars saturate.
+
+## The last 8 bytes
+
+Once every accessor and naming lever has saturated, a residual **8**-byte gap is
+one 8-byte stack object at the very **bottom** of the local area, below every
+referenced local.
+Positional signature: each `r1` displacement in retail is exactly 8 higher than
+ours, the LR slot included.
+Confirmed on `TModelWaterManager::drawWaterVolume` (0xa8 vs 0xa0: retail
+44/48/51/.../88/144/172, ours 36/40/43/.../80/136/164).
+`MActor::MActor` is *not* this shape - its low group moves one way and its top
+group does not move at all, so that gap is two objects, not one.
+
+Three spellings put exactly that object there with **zero** instruction change.
+All measured in a scratch TU with the game flags, against a referenced `f32
+marker[3]` used to read off the insertion point.
+
+| variant | frame | insns | where the 8 bytes land |
+| --- | --- | --- | --- |
+| baseline | 0x20 | 37 | - |
+| `u32 tail[2];` / 2-word struct declared **last** in the body | 0x28 | 37 | below `marker` |
+| 8-byte class with a user ctor/dtor, local of an **inlined callee** | 0x28 | 37 | below `marker` |
+| same 8-byte local declared **first** in the body | 0x28 | 37 | *above* `marker` (wrong shape) |
+| `f64 tail;` declared last | 0x30 | 37 | +16, not +8 |
+| 2-word struct **by value** to an inlined callee | 0x30 | 37 | +16 (copy + source) |
+| 2-word struct **returned** by an inlined callee | 0x30 | 37 | +16 |
+| `T x = <inlined call returning 2 words>` | 0x38 | 37 | +32 |
+
+So: to add 8 and nothing else, declare a two-word **aggregate** (array or
+struct) as the **last** local of the body, or give an inlined callee an 8-byte
+**non-trivial** local.
+Do not measure with `f64`: it is 8-aligned, so it is worth 8 only when the
+bottom of the local area already happens to be aligned and 16 otherwise.
+
+### What is worth nothing (do not retry)
+
+- **Any scalar or trivial POD local of an inlined callee.** `u32`, `f32`,
+  `f64`, `u64`, `u32[2]` and 4/8/12-byte structs with no user ctor or dtor are
+  all +0 there; MWCC drops them. Triviality is the whole switch: the same
+  struct with an empty `~T() {}` is +8. (In the *caller's* own body the
+  opposite holds - triviality is irrelevant and only the size counts.)
+- **A 4-byte local anywhere.** The base frame already carries 8 bytes of slack
+  at the bottom, so the first 4 bytes of locals are free.
+- **A dead int-to-float conversion.** `f32 x = (f32)someU32;` inside an inlined
+  callee whose result is unused is +0. A *live* `u32`/`s32` to `f32` or `f32`
+  to `s32` conversion is +8, but its `0x43300000` pair sits at the **top** of
+  the local area and it costs instructions, so it can never be the silent
+  residue. Hypothesis refuted.
+- **`sqrtf`, `sqrt` and `f32 * 1.0`**: +0. Only the double `fabs()` of a float
+  adds 8 at the bottom, and it costs an instruction.
+- **An extra inline level once the ladder has saturated.** A TU-static
+  `getMapNo()`/`getDirector()` forwarder above `SMSGetMarDirector()` buys
+  nothing and emits a stray symbol.
+
+### The two closure cases, measured exhaustively
+
+Neither has any evidence for an 8-byte object, and retail references no stack
+slot in either, so there is no positional evidence to name one. Both stay
+nonmatching; the trial tables live in the source TODOs.
+
+- `TMapObjWave::perform` (0x38 vs 0x40). Each
+  `SMSGetMarDirector()->getCurrentMap()` use is +8 and saturates at three uses;
+  `gpMarDirector->getCurrentMap()` and `->mMap` are +0. Two uses is 0x38, three
+  is 0x40 but 36 instructions instead of 34. A `switch` on the map is 38
+  instructions. 35 combinations of five guard spellings by seven map spellings
+  give no 0x40 at 34 instructions. The gap is `perform`'s own: an uninitialised
+  scalar in `movement()` is +0 there (it is an inlined callee), +8 in `perform`.
+- `MSBgm::init` (0x28 vs 0x48). +8 each for naming the `JAIData*`, taking a
+  `JAISoundTable&`/`*`, naming the `new` result, and writing the three track
+  clears as a `u32`/`int` loop (a `u8` index is 39 instructions, not 34). All 72
+  combinations of 6 table x 3 new x 4 clear spellings cap at **0x40**.
+
+## Diagnosing
+
+- Validate first with a temporary `volatile char trash[N]`.
+  If the function reaches 100% with no instruction differences, the body is correct and only the frame is wrong.
+  Never commit the padding.
+  `TNerveSealWait::execute` validated this way.
+- A diff whose only differences are the `stwu` and save/restore offsets is not an instruction problem: do not rewrite the body.
+- Leaf frame arithmetic: locals start at `0xc(r1)` (back chain, LR slot, a dead word at 0x8) and `frame = align8(0xc + locals + 1)`, so 36 bytes of locals give 0x38 and 40 give 0x40.
+- Two local regions grow in opposite directions: inline-expansion temporaries grow **up from 0xc** in expansion order, named body locals grow **down from the top** in declaration order. So once the temporaries' offsets are exact, the last 4-8 bytes can only come from a named local, typically `T x = <inlined call>;` (`THitActor::calcEntryRadius`: `f32 diag = HitActorFastSqrt(rad2)` took 0x38 to 0x40 without moving anything else).
+- To locate *where* the missing locals were declared, put the temporary `volatile char trash[N]` at the **end** of the function (last-declared locals get the lowest offsets), so the named locals land on the target's offsets, then compare the two sets of `r1` displacements; each divergence is a local the original declared there. Inline-expansion locals are prepended, so they sit below everything the body declared: a slot lower than later-declared locals belongs to an inlined helper (`FeetInvCalc`'s cross-product vector).
+- Frame gaps are a source property, not the build: `-prefix`, `nostrength`, `,p`, `-inline` variants, `noschedule`, `-sym on` and `-O3,p` all left `calcEntryRadius` at 0x18 (target 0x40); only `-O0` changed it, and changed every instruction too.
+- Gap sizes do not correlate with call-site count, nerve pushes or `startSoundActor` within a file (seal: `perform` -8, `SealSleep` -8, `receiveMessage` -8, `SealWait` -16, `SealDie` -32, `init` +8).
+- Scripting: `-d` with a symbol that is not present prints `Symbol not found`, which a marker count reads as a perfect match; confirm the header shows a real percentage.
+  In Python, `''[:1] in "|<>"` is `True`; use `l and l[0] in "|<>"`.
+
+## Worklist
+
+`docs/progress/GMSE01-frame-gaps.md` lists 138 game functions (182,932 bytes) that are instruction-identical and differ only in frame size.
+Regenerate it by scanning the 99-100% band, discarding anything with a `|`, `<` or `>` marker, and comparing the two `stwu r1` operands.
+
+Units one function short of source linking (last checked 2026-09-16; `egggen` and `CameraTalk` have since linked):
+
+| Unit | Blocking function | Notes |
+| --- | --- | --- |
+| `Player/MarioAccess` | `SMS_IsMarioOnWire` | Not a frame gap. The original loads `mHolder` twice (r0 to test, r3 to dereference); MWCC CSEs it. `&&` (93.8%), separate null check (90.0%), assigning the comparison (54.7%) and casting the holder (93.8%) all fail. |
+| `Strategic/HitActor` | `THitActor::calcEntryRadius` | 40-byte gap plus register numbering. The `frsqrte`/`frsp`/`stfs`/`lfs` sequence has no Newton step, so it is **not** `JGeometry::TUtil<f32>::sqrt`. |
+| `MSound/MSoundBGM` | `MSBgm::init` | Body exact (padding of 25-32 bytes gives 100%). Scalar naming ceiling 0x40 vs target 0x48 over all 72 spelling combinations; needs one 8-byte aggregate with no evidence for one. All trials are in the source TODO. |
+
+Also validated: `JGeometry::TQuat4<f32>::slerp` is exact modulo one 16-byte aggregate with no evidence (`= *this` + `normalize()` and the constructor form both give 35%).
+
+Closed since: `Map/MapCollisionEntry` (accessor reads, linked), `Enemy/egggen`, `Camera/CameraTalk` (uninitialised locals, linked).
+
+## Ruled out
+
+Do not retry these.
+
+- `TSolidStack::push` taking `T` instead of `const T&`: frame unchanged, **65 regressions** against 1 improvement. Always `ninja baseline` before touching a shared header like `SolidStack.hpp`.
+- Holding the nerve in a local before `pushAfterCurrent`: frame unchanged, 99.9% -> 98.0%.
+- Pushing a nerve correlates with a gap but does not set its size.
+- Expanding `SMS_LoadParticle` calls directly (loadParticleMario): no frame change. Do not mass-rewrite its 29 callers on this evidence.
+
+## Pre-existing padding
+
+These inherited functions reach their score with fabricated padding, so their scores are not evidence of a reconstruction:
+`GC2D/SelectMenu.cpp` (`volatile s32 const unkArr[]`), `System/MarioGamePad.cpp:16` (`u32 stackAlloc[83]`), `Enemy/bgtentacle.cpp:204`, `MarioUtil/MathUtil.cpp:236,297,323`, `Player/MarioDraw.cpp:472`, `Enemy/graph.cpp:55`, `Map/MapData.cpp:11`.
+`TMarioGamePad::updateMeaning` also has a genuine r4/r5 swap (old button bits vs loop counter) that is fixable on its own.
+
+## Accessor ladders measured on zero-delta functions (batch 56)
+
+- `TMario::barClimb` (instructions exact, 0x60 vs 0x80): null test plus two `getActorType()` receivers via `getHolder()` = +8; `SMSGetMarDirector()` over `gpMarDirector` = +8; the `.x`/`.z` copies plus `mPosition.y - holder.y` together = +8 (saturating); the five `mPosition.y + mHolderHeightDiff` sites the remaining 0x18. Routing everything through `getHolder()` lands 0x80 exactly but flips the `fadds` FPR pairs. `mHolder->getPosition().y` is +16 per site.
+- "+4 low / -4 named" family (frame total right, one local 4 bytes too high): `TWaterGun::setBaseTRMtx` (scratch `Mtx` 0x20 vs 0x1c) and `TMario::doRoofMovingProcess` (`newPos` 0x38 vs 0x3c). Model-fetch ladder in `setBaseTRMtx`: `mFluddModel->mModel` 8, `getModel()` 12, `mFluddModel->getModel()` 20, forwarding `getModel()` 24; retail wants 16. Retail's 4-byte hole is alignment padding under the double-conversion temporaries, not a local.
+
+## The "one 8-byte object" family (closure batch 60)
+
+When every accessor and scalar lever saturates and the frame is still 8 bytes short with all instructions intact, the last 8 bytes come only from an 8-byte aggregate or `f64` (`MSBgm::init` 0x40 -> 0x48 with `u32 arr[2]`/`char buf[8]`/`f64`; `TMapObjWave::perform` 0x38 -> 0x40 with `f64 unused`). Scalars saturate at three in `init` and the whole accessor chain saturates at 0x38 in `perform`. Candidate sources still to be probed: the 8-byte magic temporary of an integer-to-float conversion inside an inlined body whose result folds away, a 64-bit intermediate, a two-word struct passed by value. `MSBgm::init` has no string pool and its closure lists only `JALList<MSBgm>::JALList`, so the object is not a name buffer.
+
+## Closure batch 63: six units closed by slot-map triage
+
+Read the offsets of every named local before choosing a lever: a delta shared by every slot is low-region (accessor levels apply); a hole between two named locals is a missing named scalar. Measured steps: `getModel()` +8 (worth 0 in MarioBlend: per site); an indexed accessor on an array-of-structs member +16 per use (`M3UModelCommon::getMtxCalcBasicAnm`, `M3UModelCommonMario::getMtxCalcSIAnmBQ`; two of three sites was exact, all three overshot); `const TVec3&`-returning `getRotation()` +12; a global-pointer accessor stacked on a member accessor +16 where the member accessor alone is +8/+12; a named intermediate for a cast (`TCubeGeneralInfo* general = &(*list)[i]; TCubeCameraInfo* info = (TCubeCameraInfo*)general;`) +4 low with identical instructions; named `f32` locals +4 each in the named region. Levers saturate per region: a fourth same-class lever adds nothing once three are in place, but a level on a different class or a second level on the same chain keeps accumulating (`controlByCameraCode_`: five levels for 40 bytes). `M3UModel::updateInMotion`: `getFrameCtrl()` for the reference is +8 but turns retail's `mr r3, r25` into `addi r3, r25, 0` (a receiver copy spelled `mr` came from a plain variable, `addi` from an accessor's returned address).
+
+## Closure batch 61: named-slot and low-region rules
+
+- **Naming a discarded `new` result reserves a named slot**: `TObjHitCheck* objHitCheck = new TObjHitCheck();` (self-registering ctor, variable unused) closed `TStrategy::load`. A hoisted declaration that is later assigned reserves nothing; only an unused/uninitialised one does (measured twice).
+- Named locals are allocated above inline-expansion temporaries, so a short low region can never be paid for with a recovered local (`TAirportEventSink::watch`).
+- Inline-expansion temp cost is per parameter, not per call: `this` or one parameter +8, two parameters +16, return value free (`TNpcInbetween::execPosInbetween`, a pure FPR permutation whose fix costs 8 bytes a leaf frame cannot hold; open).
+- Ladder for `gpPollution->getLayer(i)->startDecay()`: `startDecay()` +4, `getLayer(i)` +4, `getJointModel(i)` +12 (an indexed one-parameter accessor is worth three slots where a 0-parameter one is worth one; two stacked 0-parameter levels regress). A TU-local `SMSGetPollution()` over `gpPollution` is +4 and saturates; `SMSGetMSound()` +4; `SMSGetMarDirector()` 0; a named `TFlagManager::getInstance()` result +4.
+- `JDrama::TFlagT<u16>` is passed by invisible reference: the `stw rX, 8(r1)` at a `fireStartDemoCamera` call is the address of a 2-byte temporary; the unnamed `TFlagT<u16>(0)` form puts it at the top of the temporary region, a named local adds 8 and puts the copy 8 lower. `MapObjAirport`/`MapEventSirena` `watch()` are 12 bytes short (24 in `TMapEventSinkInPollution`/`Bianco`), all inside the pollution-layer chain; the `getJointModel` level that completes them breaks the linked `Map/MapEvent` when applied globally.
+- `TSnapTimeObj::perform`: the `startTimer(u32)` overload needs a named `TTimeArray* timeArray` (+4 slot, but +8 frame) with a compensating -8; `endTimer` is right as it stands (changing it moves the linked `TLiveManager::perform`).
+
+## Closure batch 67: levers that cut both ways, and the dead-low-region family
+
+- **A cast inside an accessor vs at the call site changes register allocation, not just the frame.** `TAnimalManagerBase::clipEnemies`: raw `unk18[i]` 0 slots, `(T*)TObjManager::getObj(i)` 1, `(T*)TLiveManager::getObj(i)` 2, three-level `getObj(i)` 2 (saturating); with the cast in the initialiser the loop index and object pointer swap callee-saved registers, with it inside the accessor they come out right (header item: `TEnemyManager::getObj` as `(TSpineEnemy*)TObjManager::getObj(i)`). `getObjNum()` 0; `gpCamera->getFovy()/getAspect()` +8 each; `checkLiveFlag` family 0; `actor->getPosition()` +16.
+- **An accessor retail did not use is a real +8/+16 over-frame in a hot loop**: `TJointObj::getChildrenNum()` cost 16 bytes in `TMapXlu::changeNormalJoint` and 8 in `changeXluJoint`; the raw `mChildrenNum` read closed the unit (const-ness irrelevant, the level is the cost).
+- **A dead inline temporary is reserved in expansion order downward from the named locals**, so a misplaced stream-read buffer localises a missing level *before* it: `TPerformList::load`'s `readU32` buffer at 0x58 vs 0x54 was the fabricated `search<T>` template; `getInstance()->getRootNameRef()->search(name)` spelled out closed it.
+- **Probe a pure callee-saved rotation with a throwaway normalisation**: `bVar5 != 0` at one argument of `M3UMtxCalcBlendAux` reproduces retail's whole ranking and leaves only the instructions it adds, proving "body right, allocator ranking wrong" and naming the live range responsible.
+- **Dead-low-region family: solved as a dead non-trivial local in an inlined callee (batch 69).**
+  See [The dead low region](#the-dead-low-region) below for the rule, the probe
+  table and which member each measurement closes.
+
+## The dead low region
+
+*Measured in batch 69 in a scratch TU with the game flags, on the
+`TMewManager::loadAfter` shape (base frame 0x18, 15 instructions throughout).*
+
+An **uninitialised class local of an inlined callee** is the one construct that
+buys low-region bytes with **zero** instruction change, and its price is the
+local's size rounded up to 8:
+
+| local of the inlined callee | frame delta |
+| --- | --- |
+| trivial POD, any size | **0** |
+| non-trivial, 4 B | +8 |
+| non-trivial, 8 B | +8 |
+| non-trivial, 12 B (`JGeometry::TVec3<f32>`) | **+16** |
+| non-trivial, 16 B | +16 |
+| non-trivial, 20 B | +24 |
+| non-trivial, 24 B (`TVec3<f32>[2]`) | +24 |
+| two non-trivial 8 B locals | +16 |
+
+- **Triviality is the whole switch, and any one of four things flips it**: a
+  user-declared default ctor, a user-declared dtor, a user-declared copy ctor,
+  or a virtual function. A struct with none of them is worth 0 at any size.
+- **Nesting depth is irrelevant.** The same 12-byte local reached at depth 1, 2
+  or 3 costs +16 once. The cost is per *expansion*, not per level, so N call
+  sites of the same callee each pay.
+- Two expansions of one callee, by how the second argument is spelled:
+
+  | local size | 2 exp, by-value 2nd arg | 2 exp, pointer 2nd arg |
+  | --- | --- | --- |
+  | 4 B | +16 | +8 |
+  | 8 B | +24 | +16 |
+  | 12 B | +32 | +24 |
+  | 16 B | +40 | +32 |
+
+  (Frames are 8-aligned, so the same local can read 8 higher or lower depending
+  on what else sits in the low region; use the closest shape as the probe.)
+
+### One 12-byte local explains all four Animal `loadAfter`s
+
+Each body is `Base::loadAfter();` plus one or two `MSRandPlay` calls. Assume one
+dead 12-byte non-trivial local (a `TVec3<f32>`) in an inlined callee and every
+frame falls out, at the right instruction count:
+
+| function | expansions | ours | retail | S=12 predicts | insns |
+| --- | --- | --- | --- | --- | --- |
+| `TMewManager::loadAfter` | 1, by-value arg | 0x18 | 0x28 | 0x28 | 15 |
+| `TAnimalBase::loadAfter` | 1 guarded, ptr arg | 0x18 | 0x28 | 0x28 | 18 |
+| `TAnimalBird::loadAfter` | 2, ptr arg | 0x18 | 0x30 | 0x30 | 17 |
+| `TAnimalBirdManager::loadAfter` | 2, by-value arg | 0x18 | 0x38 | 0x38 | 19 |
+
+S=8 and S=16 each miss two of the four, so 12 is the unique fit. What the callee
+*is* stays unknown: `MSound::setPlayerInfo` matches with six `MSRandPlay` calls,
+so there is no wrapper around those, and the four classes share no base below
+`TNameRef`. Ruled out here (all zero, and `&getPosition()` also adds an
+instruction): `&TPlacement::getPosition()` over `&mPosition`, `getObjNum()` /
+`getCapacity()` / a named `u16` / an explicit `(u16)` cast, inline forwarder
+levels above the call, and 1-, 2- or 3-parameter inline wrappers with no local
+(parameter binding is free here, contrary to the per-parameter rule elsewhere).
+
+### The carrier has to be a callee with no matching out-of-line copy
+
+This is what decides whether the rule can be *applied*, and it is worth checking
+before any spelling work. The dead local grows the callee's own frame too, so a
+callee whose out-of-line copy is emitted and already matches cannot carry it.
+An **UNUSED** callee can: its size is an instruction-byte count, and an
+uninitialised non-trivial local emits nothing.
+
+- `TPerformList::perform` (0xc0 vs **0xe8**): 36-40 B in `forEachPerform` lands
+  0xe8 exactly, with `perform` still 54 instructions and `forEachPerform` still
+  41 (UNUSED size 0xa4 preserved). `forEachPerform` is UNUSED, so this one is
+  legal — it just has no evidence for a 36-40-byte object.
+- `TPollutionPos::isSame` (0x48 vs **0x58**): 28-32 B in `worldToDepth` lands
+  0x58 exactly at 53 instructions, but `worldToDepth`'s own copy is emitted and
+  100% at frame 0x18, so it breaks. `index()`, `isInArea()` and `getDepth()` are
+  shared with `getDepthWorld`, `isProhibit` and `getEdgeDegree`, which match
+  already. **No carrier exists**, so the 32 bytes have to be `isSame`'s own body
+  locals.
+- `TTalkCursor::associateNPC` (0x60 vs 0x78, +24) and `loadAfter` (0x28 vs 0x30,
+  +8): the only inlined callees are `JGeometry::TPosition3::translation`,
+  `MActor::getModel` and `TFlagT::on`/`off`; `TBaseNPC::getCursorPos` returns
+  12 bytes by value and is a real `bl`. Every carrier is a shared header.
+
+
+## Closure batch 66: ladders worth three digits, and slot order as evidence
+
+- **A ladder can be worth 136 bytes with zero instruction change** (`TButterfloid::load`): `getRealoid(i)`+`getBoidNum()` +16/+24 per loop, a boid-leader accessor over raw `unk150` on ten writes +48, nine `TBoidLeader` setters +40, `getMActor()` +8, and a forwarding `TRealoid::getBoidNum()` stacked on the leader accessor the last +8 (a forwarder on the owning class over a member accessor pays a third time). Read a three-digit low-region gap as a missing accessor *set* once the inlined helpers' UNUSED sizes are exact (`loadItem` 0x104, `initBoids` 0x74).
+- **Slot order identifies the declaration form** (`TAreaCylinder::load`): explicitly declared locals form a block above the compiler/inline-temp pool, first-declared highest; inline-callee locals and spills fill the pool in source order. A C-style block `rot; A; B; count;` with two dead scalars, `stream >> count` (address-taken), discarded `readF32()/readS32()` values, and `s32 num = count;` for the loop bound (an escaped local is reloaded across every call, so it cannot be the ROM's r29). Two function-scope value-returning stream reads cost 8 bytes of low region, one costs nothing; splitting `int x = s.readS32();` into declaration plus assignment recovers 4.
+- MarDirector ladder, per site: `SMSGetMarDirector()->mMap` +4, `gpMarDirector->getCurrentMap()` +8, `SMSGetMarDirector()->getCurrentMap()` +12 (Shimmer; a +4 low lever exists). `gpCamera->getUnk124()` +12. Mixing an accessor and a raw member for one field inside a basic block costs two instructions: apply levers per block (ProgSelect). `getGamePad()` +8 low; `u32 prevSelection = getSelection();` fixes the low region alone.
+- An extra `JDrama::TNameRefGen::search<T>` expansion is +24 of frame, a by-value `TRect`/viewport pair +16 (`TMarDirector::preEntry`, 56 low bytes short with one referenced local: retail has ~7 search expansions to our 5, either a deeper `search<T>` chain or two `push_back(search<T>(name), cue)` that CSE; open, needs a JDRNameRefGen.hpp probe).
+- `ctrlMultiPlayerCamera_` (99.1): uniform 16 low delta, but retail's `MsSqrtf` slot sits above 28 bytes of inner-loop temporaries (ours 4), plus an f3/f4 swap on the loop's `fsubs` and one `fmr f31, f0` (retail's `fmadds` writes `camDistance` into f31). `trash[16]` fixes the frame and leaves both register issues, so the lead is the inner loop's extra named scalar, not the size. Three named squares are required (`squared()`/component differences contract to `fmadds`).
+
+## Closure batch 70: aggregates for folded out-parameters, parameter temporaries
+
+- **An out-parameter pair that an inlined callee writes must be one aggregate.** When the callee is inlined and its stores fold away, MWCC drops two separate scalars' slots entirely; `u32 header[2]` closed `TMessageLoader::TMessageLoader(const char*)` and `f32 target[2]` closed `CPolarSubCamera::execSecureView_` (+8 each). Scope does not matter, only aggregation.
+- **An inlined callee's parameter temporary is a placeable 4-byte slot**: `readInfoBlock(stream.getCurrent())` creates it, a named local for the same value is register-allocated and creates nothing (`parseBlock` closed; MessageLoader linked). `readInfoBlock` sits at the depth-1 statement budget — one added statement flips it out of line.
+- **A matching sibling is the best control for a slot-position gap**: `TRailMapObj::setGroundCollision` (exact, 0x50/0x18) vs `TRideCloud::setGroundCollision` (0x50/0x14) localises the missing slot to the guard's inlined accessor reads.
+- **Naming a value that lives across calls is a register-count fix**: `TGraphWeb* graph = unk138->getGraph()` reused for the second node fetch restored r28-r31 in `TRideCloud::control` (96.3 -> 99.8); re-reading after a call costs a load and a callee-saved register.
+- Steps measured: an `MSound` member accessor +8/site (`getModBgm()` parked in BossHanachanNerve, header item); `getConsole()` +8, `SMSGetMarDirector()` stacked +8, saturating at +0x10 for a one-site chain; `const TVec3&` member accessor +8; `TMapCollisionManager::getUnk8()` +8; `SMS_GetMarioX/Z` +8 (pair); `SMS_GetMarioAngleY()` +8 in the inlining caller, +0 in the callee. `sunmgr::load`: colour inputs declared in reverse read order so the reads go to ascending slots; still ~64 low. `sunmgr::perform`: a 48-byte uninitialised local (a scratch `Mtx`) gives 100% but nothing wants a matrix — left open. Open "last 8 bytes" members: `TNerveBossHanachanTumble::execute`, `calcSecureViewTarget_` (must be a trivial aggregate of its own body).
+
+## Closure batch 74: `MSound::startSoundActor` carries the sound-site 8 bytes
+
+`MSound::startSoundActor` (a header inline in `include/MSound/MSound.hpp`,
+marked *fabricated*) holds **one small stack object**.
+The map has no `startSoundActor__6MSound...` symbol at all — consistent with a
+header inline that inlined at every site and so never got an out-of-line weak
+copy, exactly like `MSound::startSoundSystemSE` and `startSeRandPlay`.
+So the object is invisible to `validate-symbol-order` and can only be measured.
+
+The honest spelling is a **named local carrying the callee's return value**.
+`MSoundSESystem::MSoundSE::startSoundActor` really does return `JAISound*`
+(`include/MSound/MSoundSE.hpp`), so a wrapper that hands the handle back is what
+a developer would have written:
+
+```cpp
+JAISound* startSoundActor(u32 id, const Vec* position, u32 ground_no,
+                          JAISoundHandle* out_handle, u32 fade, u8 camera_idx)
+{
+	JAISound* sound = nullptr;
+	if (gateCheck(id))
+		sound = MSoundSESystem::MSoundSE::startSoundActor(
+		    id, position, ground_no, out_handle, fade, camera_idx);
+	return sound;
+}
+```
+
+Measured project-wide, each variant against one fixed baseline, counting
+per-function `fuzzy_match` moves (the whole tree, not one unit):
+
+| variant inside `MSound::startSoundActor` | improved | to 100% | regressed | from 100% | `matched_code` |
+| --- | --- | --- | --- | --- | --- |
+| unchanged (reference) | - | - | - | - | 47.78% |
+| 8-byte non-trivial local | 85 | 59 | 34 | 14 | 48.10% |
+| two 4-byte non-trivial locals | 85 | 59 | 34 | 14 | 48.10% |
+| 8-byte non-trivial local, inside the `if` | 85 | 59 | 34 | 14 | 48.10% |
+| 12-byte non-trivial local | 58 | 37 | 33 | 14 | 48.00% |
+| 4-byte non-trivial local (dtor only) | 54 | 38 | 11 | 2 | 48.04% |
+| 4-byte non-trivial local (default ctor only) | 54 | 38 | 10 | 2 | 48.04% |
+| 4-byte non-trivial local, inside the `if` | 54 | 38 | 11 | 2 | 48.04% |
+| 4-byte non-trivial local, declared last | 54 | 38 | 11 | 2 | 48.04% |
+| **named `JAISound*` result, returned** | **54** | **38** | **10** | **2** | **48.04%** |
+| named `JAISound*` result, discarded inside the `if` | 54 | 38 | 10 | 2 | 48.04% |
+| `return` inside the `if`, no named local | 0 | 0 | 0 | 0 | 47.78% |
+| 8-byte **trivial** POD local | 0 | 0 | 0 | 0 | 47.78% |
+
+What the table settles:
+
+- **The named local is the slot, not the return type.** Spelling the wrapper
+  `if (gateCheck(id)) return MSoundSE::startSoundActor(...); return nullptr;`
+  is worth **zero** everywhere. Only binding the result to a local reserves
+  anything. This generalises the "named call result is 16" rule from `bombhei`
+  down to 4 bytes: the cost is the *binding*, and a pointer binding that is live
+  across a branch merge is not free even though a plain named pointer is.
+- **The object is 4 bytes, not 8.** A 4-byte object lands as +8 in callers with
+  no low-region slack and +0 in callers that have four spare bytes; an 8-byte
+  object costs +8 in *every* caller. 8 bytes closes 21 more callers but breaks
+  12 more, so 4 is the fit.
+- **The raw spelling is a different frame.** `if (gpMSound->gateCheck(id))
+  MSoundSESystem::MSoundSE::startSoundActor(...)` spelled out at the call site
+  is +0 (measured on `TDebuTelesa::receiveMessage`). A site's frame therefore
+  tells you which of the two spellings retail used, and it is the only evidence
+  that does.
+
+### Which spelling each site wants
+
+38 functions go to 100% with the wrapper form, among them
+`TDebuTelesa::receiveMessage` (which makes `DebuTelesa` a 100/100 unit),
+`THamuKuri::behaveToFindMario`, `THaneHamuKuri::attackToMario`,
+`TFireHamuKuri::changeTevColor`, `THinokuri2::updateAnmSound`,
+`TStayPakkun::setBehavior`, `TSmallEnemy::setAfterDeadEffect` and
+`generateEffectColumWater`, `TTelesa::changeByJuice` and `initItemAttacker`,
+`TFireWanwan::receiveMessage`, `TTobiPuku::behaveToWater`, `TMoePuku::hitWater`,
+`TGorogoro::setDeadAnm`, `TTamaNoko::setAfterDeadEffect`,
+`TBombHei::walkBehavior`, `TNerveKazekunHitWater::execute`,
+`TNerveAnimalBirdTakeoff::execute`, `TNerveBeeHiveFall::execute`,
+`TGessoPolluteObj::calcRootMatrix`, `TWoodBarrel::appear`,
+`TMapObjBase::startSound`, `TItem::appeared`, `TSuperHipDropBlock::receiveMessage`,
+`TRoulette::switchStop`, `TPanelRevolve::receiveMessage`,
+`TBalloonKoopaJr::kill`, `TMareCork::drawObject`, `TBigWatermelon::touchWaterSurface`,
+`TBellDolpic::control`, `TDptMonteFence::touchPlayer`, `TMareGate::control`,
+`TMapObjNail::receiveMessage`, `TBreakHideObj::receiveMessage` and
+`TMario::stayWall`.
+
+Ten functions want the **raw** spelling and regress under the wrapper form.
+Two of them are currently exact, so the change cannot land until they are
+converted:
+
+| function | file | pre-change |
+| --- | --- | --- |
+| `TNerveKazekunPreAttack::execute` | `src/Enemy/Kazekun.cpp:531` | 100% |
+| `TMapEventSink::control` | `src/Map/MapEventSink.cpp:106` | 100% |
+| `TMareEventDepressWall::depressing` | `src/Map/MapEventMare.cpp:325,356` | 99.94% |
+| `THaneHamuKuri::walkBehavior` | `src/Enemy/hamukuri.cpp:1490` | 99.90% |
+| `THamuKuri::jumpToSearchActor` | `src/Enemy/hamukuri.cpp:824` | 99.78% |
+| `TEffectObjBase::moveObject` | `src/Enemy/effectObj.cpp:149` | 98.84% |
+| `TMario::oilSlip` | `src/Player/MarioRun.cpp` | 98.49% |
+| `TYoshiTongue::movement` | `src/Player/Tongue.cpp:307` | 78.32% |
+| `TItemManager::resetNozzleBoxesModel` | `src/MoveBG/ItemManager.cpp:34` | 78.57% |
+| `TBossTelesa::forceHide` | `src/Enemy/bosstelesa.cpp:2121,2124` | 49.63% |
+
+Conversely `TEffectEnemy::setDeadAnm` and
+`TBossHanachan::emitOneTimeSandPillar_` currently spell the gate check out and
+are 8 bytes short, so they want the **wrapper**; switching them and landing the
+wrapper closes both, and `setDeadAnm`'s fabricated `JGeometry::TVec3<f32>
+effectPos` should be deleted in the same move.
+
+**Why this batch did not land it.** Reaching zero regressions needs those ten
+conversions, and four of the TUs involved (`hamukuri`, `MapEventMare`,
+`Tongue`, `MarioRun`) do not yet include `MSound/MSoundSE.hpp`; adding a header
+to a TU perturbs BSS and static-init order, so each has to be converted and
+re-measured on its own. The header edit alone is +54/-10 and must not be
+committed by itself.
+
+### Problem B addendum: the Animal `loadAfter` carrier is not `MSRandPlay`
+
+`MSoundSESystem::MSRandPlay::registerTrans(u32, const Vec*)` (0x54) and
+`createRandPlayVec(u32, u16)` (0xa4) are both **emitted, matching, out-of-line
+statics** reached by a real `bl` in all four `loadAfter` diffs, so neither can
+hold the dead 12-byte local itself — the same "carrier has to be a callee with
+no matching out-of-line copy" test that killed `TPollutionPos::worldToDepth`.
+The carrier must be a wrapper that inlines everywhere and so leaves no map
+symbol, like `MSound::startSoundActor` above. The Animal TUs' weak lists
+(`AnimalBase.cpp`, `Bird.cpp`, `AnimalManager.cpp`) contain no `MSRandPlay`- or
+sound-related entry, so the map cannot name it either.
+New lead from this batch: since a *named* local reserves a slot with zero
+instructions, the Animal carrier's 12 bytes need not be an explicitly dead
+object — a named by-value 12-byte result inside such a wrapper would read the
+same. Untested.
+
+## Closure batch 82: the sound sites' second level is a two-argument `startSoundActor`
+
+Batch 74 found that ~37 sound sites are 4 bytes short and that a named
+`JAISound*` result inside `MSound::startSoundActor` supplies them; header round
+13 rejected putting it there, because `TMapEventSink::control` is byte-exact
+with its vector temporary at `0x28 + 4 * bindings = 0x30`, i.e. exactly two
+bindings (`this`, `position`).
+The missing 4 bytes are one level up: a **two-argument overload** in
+`include/MSound/MSound.hpp` that carries the four constant arguments and binds
+the callee's result,
+
+```cpp
+JAISound* startSoundActor(u32 id, const Vec* position)
+{
+	JAISound* sound = startSoundActor(id, position, 0, nullptr, 0, 4);
+	return sound;
+}
+```
+
+so a site pays the 4 bytes only by spelling the short form.
+The six-argument body keeps its two bindings and the eleven sites that need
+them stay byte-exact; making it return `JAISound*` with a direct `return` is
+codegen-neutral whole-tree (zero functions moved), which is how the return type
+was confirmed.
+
+**The slot is the binding, not the level.** Measured in `smallEnemy` against
+`generateEffectColumWater` (0x18 vs 0x20) and `setAfterDeadEffect`:
+
+| second level between the site and `MSound::startSoundActor` | result |
+| --- | --- |
+| plain forwarder `(u32, const Vec*)` | +0 |
+| forwarder taking `const Vec&` or `const JGeometry::TVec3<f32>&` | +0 |
+| member wrapper `(u32 id)` binding only `this` (the `TMario::startSoundActor` shape) | +0 |
+| binds the result, discards it, returns `void` | +0 |
+| **binds the result and returns it** | **+8, both exact** |
+| dead 4-byte **non-trivial** local | +8, both exact (sizes the slot) |
+| `JAISoundHandle handle = ...; releaseSoundHandle(handle)` | new instructions |
+
+A constant argument binds nothing, `this` and a `&member` address each bind 4,
+so a member wrapper cannot be the carrier: its only fresh value is already the
+inner call's.
+That also retires the "per-class `startSound`-style helper" lead — the map's
+only two, `startSoundActor__6TMarioFUl` and `startSound__11TMapObjBaseFUs`, are
+emitted, and `TMario::startSoundActor` is byte-exact at frame 0x20 with one
+raw expansion, which pins the six-argument body's two bindings a second time.
+
+**Apply it per site, never per file.** A function with several sound sites in
+mutually exclusive branches pays per expansion and overshoots, so those stay on
+the six-argument spelling: `TBellDolpic::control` +0x10 (four sites),
+`TRoulette::switchStop`, `TDptMonteFence::touchPlayer`,
+`TMapObjBase::startSound` +8 (two sites each), and the single-site
+`TFireWanwan::receiveMessage`, `TNerveKazekunHitWater::execute` and
+`TTelesa::changeByJuice` (already 8 over). Those want the binding one level
+deeper and are still open.
+
+Landed (26 functions byte-exact, no regressions, DOL unchanged):
+`TDebuTelesa::receiveMessage`, `THamuKuri::behaveToFindMario`,
+`THaneHamuKuri::attackToMario`, `THinokuri2::updateAnmSound`,
+`TStayPakkun::setBehavior`, `TSmallEnemy::setAfterDeadEffect` and
+`generateEffectColumWater`, `TTelesa::initItemAttacker`,
+`TTobiPuku::behaveToWater`, `TMoePuku::hitWater`, `TGorogoro::setDeadAnm`,
+`TTamaNoko::setAfterDeadEffect`, `TBombHei::walkBehavior`,
+`TGessoPolluteObj::calcRootMatrix`, `TEffectEnemy::setDeadAnm` (its fabricated
+`effectPos` deleted), `TBossHanachan::emitOneTimeSandPillar_`,
+`TNerveAnimalBirdTakeoff::execute`, `TWoodBarrel::appear`, `TItem::appeared`,
+`TSuperHipDropBlock::receiveMessage`, `TPanelRevolve::receiveMessage`,
+`TBalloonKoopaJr::kill`, `TMareCork::drawObject`,
+`TBigWatermelon::touchWaterSurface`, `TMapObjNail::receiveMessage`,
+`TBreakHideObj::receiveMessage`, `TMario::stayWall`.
+`Enemy/DebuTelesa` and `MoveBG/WoodBarrel` are now 100/100 and ready to
+source-link.
+`TMareGate::control` passes a real handle (`&sound->unk7C`) so the
+two-argument overload cannot reach it; it needs a three-argument sibling or the
+deeper carrier.
+
+## Closure batch 78
+
+- **A four-corner quad is readable off the store offsets**: twelve `stfs` to consecutive slots with two CSE'd sums is `TVec3 vtx[4]` at function scope plus `vtx[i].set(x±size, y±size, z+size)` in the loop (the `TSplashManager::makeDL` idiom); the twelve by-value `set` parameter temporaries are ~48 bytes of low region (`TQuestionManager::makeDL` 84 -> 100; question linked; its `#pragma dont_inline` was masking a 19-statement body).
+- **A named `bool` per block saturates like an accessor**: one of two blocks +0, both +8 (`TQuestionManager::perform`). `f32 dx; f32 dz;` named in that order so `fmadds` gets register operands (`request`).
+- **The dead-low-region carrier can be sized even when it cannot be named**: a dead non-trivial 4-byte local in `MSBgmXFade::getTimingForce` closes `xFadeBgmForce`, an 8-byte one in `getTiming` closes `xFadeBgm`'s frame (both UNUSED, so legal carriers; not fabricated). `getTiming`'s UNUSED size 0x94 vs our 0x60 is the optional `param_2` output path.
+- **A `JUtility::TColor`-from-`GXColor` conversion temporary is 8 bytes for us and 4 for retail** (Menu: four temps at an 8-byte stride vs retail's 4; header suspect: the commented-out `TColor(const TColor&)` copy ctor in JUTColor.hpp).
+- Hoisting a receiver local above its guard is a register lever (`TMovieRumble::readCurInfo`); retail still copies the ToolData pointer into a second callee-saved register that the guard's `isIndexValid` consumes (+8 in both callers, open). `movement`'s UNUSED 0xb4 vs our 0x78 says fifteen instructions are unrecovered (why `checkRumbleOff` still needs its pragma).
+- `TPollutionManager::load` 0x58 vs 0x60 with the ladder exhausted (the last 8 is a zero-instruction object); `SMSGetPollutionLayer(i)` is the wrong rung there (+0x20, +1 instruction). `cleanedAll` is 8 too big: a const `getLayer(i)` casting `mJointModels[i]` directly (one level) is the header candidate. `TWoodBarrel::kill`: a second dead `TVec3` (the emit direction at its `.prm` default) after `vec`, positional evidence; `appear` closes only with the queued `startSoundActor` item. A signed loop bound shows as `cmpw` vs `cmplw` against an `int` member. Trial scripts must grep for `FAILED`/`build stopped`, not `error` (sjiswrap prints "Shift JIS encoding errors" on success).
+
+## Closure batch 77
+
+- **Slot-allocation order names the source's term order**: for `A*a + B*b + C*c` MWCC gives the second term the `fmuls` and the lowest conversion slot; reading the magic-double slots identified `start*omt^2 + control*mid + end*t^2` (`TBoundPane::update` 55 -> 92.7, then closed with `out.set(nx, ny)` — `JUTPoint::set(int, int)` inlined is worth 16 low bytes where two field stores are 0 — and two named `s16` results; BoundPane linked; its 0x14/0x1C are two `JUTPoint`s, not a `JUTRect`).
+- **One reused `f32 cross[2]` beats two arrays** (0x40) or four scalars (0x30) for the last-declared two-word aggregate (`checkLinesCollision` closed).
+- **Named locals can be worth both the frame and the schedule**: in `TMario::hangPole` computing `b` before `a` plus four named scalars (`sinY`, `cosY`, `nx`, `nz`) was the missing 16 bytes and the `jmaSinTable`/`jmaCosTable` load order. `hitNormal`: a parked `getCurrentNozzleIndex()` returning `s32` (signed `cmpwi` on the `u8` field; header item) fixed the frame; one volatile register left.
+- **An outgoing-parameter area is 8 bytes per `f32` argument** (`matan(f32, f32)` costs 16): when a dead local in an inlined callee lands the size but moves a `volatile` temp, the gap is parameter area, not a local (`MsGetRotFromZaxis`, retail reserves 32). `MsGetRotFromZaxisX2`'s degenerate cases were sign-swapped (real bug; `@1673 = 90.0f`, `@1674 = -90.0f`).
+- **Five stacked accessor levels on one receiver chain are additive to the byte** (`changeAnmRateAndFrameUpdate_`: 32 + 24 + 24 + 8 + 8 = the 0x58 gap; parked `BHA_*` accessors, header items) but per block: the same `getSL*` wrapper that buys 24 bytes at ten sites swaps two float registers at the eleventh. `fuzzy_match` can read lower while differing instructions fall (13 -> 10) because it weights the `stwu` immediate less than register operands.
+- `polygonIsInGrid`: routing `pointIsInPolygon`'s twelve point reads through `getPoint1/2/3()` is worth 296 of 608 dead low bytes; open. `TMarDirector::setup2` (99.9, every instruction exact): exactly 256 bytes = `sizeof(JDrama::TGraphics)` of dead low region below every named local, owner unknown. Restored two behaviours there: the event loop's `u16 eventId` written to `TMapObjBase::mEventId` (0x134; a `clrlwi r0, rN, 16` + `stw` with the increment outside the guard is the tell for an id-assigning search loop) and the pause/talk `mGamePad` assignments. `extsh` before a `stw` into an `int` field means an `s16` intermediate.
+
+## Closure batch 81
+
+- **Each chained `>>` continuation costs 8 bytes of low region** (`TGenerator::load`: 9 unchained reads 0x58, three chains of three 0x88, one chain of six plus one of three 0x90 = exact; `#continuations = #reads - #statements`). A discarded `stream.readS32()` and `stream >> x` place their read target in different pools. Three discarded scale floats are a `TVec3 scale`. `s32 count = stream.readS32(); s32 num = count;` with a named `interval` assigned after the loop gives retail's r31/r0 choice. generator linked.
+- **A named `f32` is worth 8, not 4, in a leaf with an `f31` save** (`TWireBinder::isEndWire` +8 by adding one, `getDirAtPos` -8 by removing one). Two UNUSED sibling helpers with an `f32` parameter next to a predicate are that predicate's target-value ternaries (`getStartRangePos`/`getEndRangePos`, `static` because the callers are const and the mangled names carry no `C`).
+- **An inlined callee's dead non-trivial local can be sized by two callers with different base frames**: `TFileLoadBlock::pushed` (UNUSED 0x9c) needs 13-16 bytes (12 closes only `touchPlayer`, 20 only `receiveMessage`); `JDrama::TDisplay::getRenderMode()` (header inline, no map symbol) needs one dead 4-byte non-trivial local to close all four `SMSSetup*RenderingInfo` with zero regressions (unique carrier; header item — the object cannot be named).
+- `MTXCopy(src->getX(i), dst->getX(i))` vs `dst->setX(i, src->getX(i))` is readable off the register order (right-to-left evaluation puts the destination's base in r3 first; `TMirrorActor::perform`, whose second loop bound is `mWEvlpMtxNum`, and `checkIsInMirror` had a missing `&& !(unk1A & 0x20)` term and a mirror number read through a `const int&` — header item `TMirrorModelManager::getUnk18()`). `getModelData()` is the standard +8/+4 rung in M3DUtil (three SDLModel closures). `SMSGetCamera()->getUnk1EC()` is +0 in `SDLModel::viewCalcSimple` where it was +8 in `TSky::perform`: the global fork is per site. `enemy->unk124->setGraph()` over `getTracer()` was -4.
+- **The JGadget `push_back` temp-pool spacing is off by 8 per group gap in two unrelated units** (`SDLModel::entry` 0xa8 vs 0xb8, `TMirrorActor::init` frame exact but pairs shifted) with everything else exact — one shared-header cause (`std-list.hpp` iterator / `JDRViewObjPtrList::insert`); research item. A `static void dummy(Vec*)` forcing literal emission shifted MapObjOption's whole string pool by 0x18 (removed).
+
+## Closure batch 84
+
+- **A named pointer local is +8 when its initialiser goes through an indexed inline accessor** (`TSunGlass::load`: `SMSGetMarDirector()->getGamePad(1)` +16 plus the named `TMarioGamePad*` +8); refines "named pointer locals are worth zero".
+- **Dead-local carriers pay per expansion; accessor forks saturate**: an 8-byte dead non-trivial local in `getShineAlpha()` pays +8 at each of three expansions, `SMSGetMarDirector()`/`SMSGetFlagManager()` pay once. When a caller with N expansions needs Nx8 and a caller with one needs 8, the lever is a local, not a level. A genuinely dead read (`s32 shineCount = getFlag(0x40000)`) is a named top slot.
+- **A `bl` between two reads of the same inline accessor is a statement boundary**: retail's reload of `getWire(i)` after `getPosInWire` proves two statements with a named `f32 posInWire` (`getPointPosInNthWire` 57 -> 100). **An inlined method's guard reached through a back-pointer identifies its owner**: `lwz r3, 0x78(r30)` (`unk4.unk74->unk7C`) proved the take-check block is `TMapWireActor::checkTakingActor` (its body is 40 bytes short of the map's 0xe8 = three `TVec3` locals; `doActorToWire` 0x30 vs 0x58 closes with them).
+- **A fabricated sound call can be the residue**: `TItemManager::resetNozzleBoxesModel` had no `startSoundActor` in retail (78 -> 100); check for a `>`-only gate-check run first. `makeShineAppearWithTimeOffset` UNUSED restored at 0xc8.
+- A receiver materialised as `addi rD, rBase, off` means one more accessor level above the inline (`getUnkF4().getPoint()`), per site (`execWalk` wants it, `execUTurn`/`isCanWalk` do not). Binding an `s16` return turns `cmpwi rX, 0` into `extsh. rX, rX`; an explicit cast at the compare does not (`getWaterHitCounter()`, header item). Hoisting the inner loop counter above the outer `for` swaps their callee-saved registers (`emitCamShake_`). `TFlagManager::getID()`/`getStatus()` over raw members are +8 per site (MSHandle; real bug: `setSeDistanceParameters` calls `setSeDistanceFxmix`, vtable 0x18). Two sibling UNUSED symbols of identical size are not necessarily wrapper and body. `mr` vs `addi rX, rY, 0` flips per site with no correlate — not worth chasing.
+- Open: `TTakeActor(const char*)` must be both inlined and emitted (UNUSED 0x50 in MapWireManager; header); `TList_pointer<THitActor*>::insert` 16 bytes too big (JGadget); `TVec3::set<f>` reached one level deeper from `isCanWalk` (NpcWalkTurn MISSING); `emitParticle_` 0x90 vs 0xc8, `emitCamShake_` 0x68 vs 0x78 pure frame.
+
+## Closure batch 87
+
+- **A 4-byte named local declared after a 12-byte one lands at the bottom of the named block**: the block fills bottom-up in reverse declaration order with any 8-alignment pad at the top, so a `+4 named` lever can move a `TVec3` up by 4 (`TCameraOption::TCameraOption`: `f32 yaw = tool->getYaw()` after `origin`; CameraOption linked, its `cLoadCamName` is "左サイドカメラ").
+- **A global-accessor level is +4 per read site, not +8** (`SMSGetCameraOption()`: 4 sites +0x10, 8 +0x20, 12 +0x30); the 8-byte-step rule is about member/receiver chains. One extra inline level above `TMario::mModel` (`getM3UModel()`, parked) is +8 per site and closed both MarioInit functions (linked; `initValues` does `new MAnmSoundMario`; the param string is `mHPMax`).
+- **A function-local static's mangling is an oracle for its enclosing function's linkage**: `name$localstatic0$<fn>` means the function was in-class/inline (weak), `name$NNN` ordinary; a weak static also re-materialises `lis/addi` per basic block where a local in `.data` gets one CSE'd base. `calcTowerCenterPos_` is weak with `sPositionNameTable$localstatic0$`, and `inline` cannot give "weak and still called at depth 1" (second confirmation) — the tower branch is an unreconstructed inlined wrapper (`ctrlTowerCamera_`; header item). Fixed the table to `[5]`.
+- `fneg` off a single parameter read is the tell for a symmetric range test `[-r, +r]`; a second `.get()` of the parameter displaces the `.sdata2` pool. A pool longer than the target's whose extra entries are angle factors (`182.04445f` where retail has `0.005493164` or `3.0517578e-05`) is a direction bug (CameraNotice: three real fixes, data 100). Three named squares beat `TVec3::squared(other)` where retail keeps three `fmuls` (third confirmation; parked `CameraNoticeSquaredDist`). A dead 8-byte non-trivial local in an UNUSED callee expanded four times is +32 (`chaseOptionCamera_`), sized and not committed.
+- `MarioEffect::init` is a clean "pure callee-saved rotation with an exact frame": the lever must be zero-frame; one `addi r4, r25, 0` vs `mr` says the operand came from an accessor's returned address. `FeetInvCalc` (92.3): every `r1` displacement exactly 0x68 higher in retail, LR and save slots included — 104 bytes of pure dead low region below every local, plus four batch-86 FPR sites.
+
+## Lever sweep batch 95 (2026-09-18): 30 functions to exact
+
+- **A global-accessor fork buys frame only over a raw global *variable* read.** Over an existing inline accessor it is codegen-identical: `SMSGetFlagManager()` over `TFlagManager::getInstance()` (already `return smInstance;` in-class) gave a byte-identical object at all 13 sites of Guide.cpp. This retires header round 16's "194 raw `getInstance()` sites, +4 each" note (that +4 came from a named result).
+- **Two site shapes accept a fork, by different mechanisms**: (a) frame — a small `load`/`loadAfter`/`reset`/`init`/`execute`/`receiveMessage` with a single raw site and a gap of exactly 8 (25 of 49 kept groups; apply on sight); (b) register allocation — a receiver in front of an argument-heavy call (`fireStartDemoCamera`'s nine arguments, `startDemoCamera`), where the fork fixes the receiver's register and the argument scheduling with the frame unmoved. One spelling per function: 45 of 49 kept groups took all sites; bisect only when the full set overshoots. Hit rates: Pollution 20%, Camera 17%, MarDirector 8.6%, CameraOption 4.5%, MSound 1.9% (`gpMSound->` is nearly always already right; the MSound sites' missing 8 bytes come from the call form).
+- **The six-argument `startSoundActor(id, pos, 0, nullptr, 0, 4)` in a function at 99.7-99.95% is one +8 short**: the two-argument overload closes it (21 of 26 keeps were >= 99.73, 15 hit 100). Below 98% it only nudges; multi-site functions overshoot; `MSoundSE::startSoundActor`'s 42 static sites have no overload. Driver: `lever.py`/`lever6.py` in the batch-95 scratchpad (groups raw sites by function, searches subsets, keeps only strict unit gains with zero per-function regression).
+
+## Second-pass batch 98
+
+- **A params ladder has three independent +-8 rungs** (global -> object, object -> params wrapper, named result); landing a frame means picking the combination, and a wrong pair shows as one misplaced argument load, not a frame error (`TEnemyPolluteModelManager::perform` closed with `gpConductor->unk84.getEnemyFarClip()` plus a named `100.0f`).
+- **Lever pairs, third confirmation**: `int time = spine->getTime()` + `f32 distToMario = seal->getDistToMarioSquared()` are +0 each and +8 together (`TNerveSealWait::execute` closed). Try pairs before declaring a "last 8 bytes" case unnameable.
+- **An inlined callee's local and a block-scope local allocate identically** (both below every function-scope local), and a function-scope object with an empty ctor has that ctor inlined away while a block-scope one calls it at the use site — why `generatePolluteModel` ("matrix allocated first, constructed lazily") cannot be reproduced.
+- **An UNUSED symbol bigger than our out-of-line copy is usually a depth artifact, not missing statements**, when its expansion elsewhere already matches instruction-for-instruction (`TEnemyPolluteModel::generate` 0x178 vs 0xf8; `addCheckDataToList` 0x27c vs 0x124). Conversely a named local inside an UNUSED helper can be sized by the map (`drawModelStamp` 0x5c only with the draw buffer bound to a local; its duplicated copy in `countTexDegree` re-reads the member).
+- MWCC fully unrolls a constant-trip clearing loop whose stores fold to constant offsets from `this`; retail's unroll-by-8 + `ctr` shape means the base was not foldable (`TNpcParts` ctor; three real index bugs fixed there; header item: `TNpcModelData`'s first two words are `const char* unk0[2]`). Free-function vs member linkage in the map decides which register an inlined callee's result must land in (`addGroundNode` etc. are `__F...` free functions => r3). `SMSGetPollutionLayer(i)` is +16 at a `getLayer(i)` site inside a loop (second unit). `getListRoot` (UNUSED) sized for a dead non-trivial 12-byte local (0x108 exact), not committed.
+
+## Third-pass batch 103: five of the earliest stuck units closed
+
+- **An UNUSED symbol left as a stub is a frame-gap suspect, not just a size warning**: `TCameraBck::isDemoFinished` (0x70) was a `void` stub; restored as `bool` and returned from `updateDemo`, it put the result in r31 as retail and re-created the +8 the caller needed (CameraBck linked). Check a unit's UNUSED-size mismatches before hunting levers.
+- **Lever pairs, fifth and sixth confirmation** (`getTexture()` + a named cue bool in `TMapObjWave::perform`; `getTime()` + `getMarchSpeed()` in `TNerveBossHanachanTumble::execute`), and **a fourth lever must be on a class the first three do not touch**: three same-class rungs saturate (`MSBgm::init`'s 0x40 ceiling over 72 spellings fell to one level on `JAIBasic::unk0`, parked `MSBgmGetAudioData`; header item `JAIBasic::getData()`). MapObjWave, BossHanachanNerve, MSoundBGM linked.
+- **A TU-local `static inline` free function taking a pointer and returning a value binds 8 bytes only when the argument is a fresh global load** (`MSBgmGetAudioData(MSGMSound)` +8; the same shape with `this` +0 — TalkCursor). Binding the helper's own result inside it is a further +8. **A free function wrapping a real `bl` can be spelled to preserve argument order**: `CameraSecureViewDistX(this)` keeps retail's min-then-max loads where a helper taking `(this, min, max)` reverses them — take parameters out of the wrapper (CameraSecureView linked).
+- `TMewManager::loadAfter`'s carrier confirmed: a `static inline` wrapper around `createRandPlayVec` holding an uninitialised `TVec3` gives 100% (a dead 12-byte local in the function's own body is +8, in an inlined callee +16); it must be shared (`MSound.hpp`) because Bird's two `loadAfter`s need the same level — header item closing four Animal functions. Open cross-unit question: `AudioDecoderForOnMemory` and `TMapObjRevivalPollution::loadAfter` both have retail interleaving a source local *above* the compiler-generated temporaries while every spelling puts both temporaries on top (research). `SMS_IsMarioOnWire` (17 vs 18 instructions): every documented CSE breaker fails.
+
+## Lever sweep batch 99 (2026-09-18): 126 functions improved, 34 to exact
+
+- Hit rates by lever: `getMActor()` over the bare member 10.4% (the best lever, and every large jump: `TPakkun::perform` 93.7 -> 100, `setHeadAndBodyAnm` 92 -> 98.6, `THauntLeg::init`, `TBossWanwan::shakeCamera`, `TGorogoro::init` — all `mMActor` receivers in front of argument-heavy calls, gap 0: it fixes the receiver's register, not the frame); `getScaling()`/`getRotation()` 8.1%; own-object `getPosition()` 6.4% (94 keeps — the bare `this`-relative form is where the yield is); explicit-receiver `getPosition()` 5.2%; the current-map ladder 4.8% (per function: `getCurrentMap()` alone closed `TShellCup::loadAfter`, the `SMSGetMarDirector()` rung only `TTurboNozzleDoor::touchPlayer`). `getModel()` on an explicit `->mModel` receiver is inert everywhere; the flag family is inert (byte-identical) except in one 0x448-frame function. `&actor->getPosition()` as `startSoundActor`'s `const Vec*` is a real lever (+0x28 `calcAtkParticleAndSE`) — per site, contradicting the Animal-`loadAfter` note.
+- **Named-result lever (lever 6) is exhausted**: all seven hand trials moved the frame onto the target and cost 4-16 points — retail genuinely re-reads the parameter/predicate, so the residual 8 bytes in the ">= 99.5% and 8 short" population (313 functions) is an unnamed object, not a named result.
+- Process: a sweep's worktree must be re-based before landing when units were linked meanwhile (MapObjBlock's edits had to be reverted; chuuhana/MapStaticObject lost 0.2 to interaction with the depth sweep and were restored), and after reverting a hand trial with `git checkout` the stale `.o` makes the driver's "before" snapshot the broken build (rebuild before measuring). Driver `lev.py` (occurrence-based, write-context filter, full-set-first) in the batch-99 scratchpad.
+
+## Closure batch 109: the `a = b - c` pool residue and allocation mechanics
+
+- **Five "depth-sweep 99.6-99.9%" functions share one residue** (koopajr/limitkoopa `bind`, `TLeanMirror::loadAfter` -12; `TFlyEnemy::fly`, `TCannon::moveObject` -32 through an inlined `updateAttachPos`-style callee): our `a = b - c` expansion reserves 16 dead bytes *below* the `operator-` by-value parameter temp; retail reserves ~4 below and a 12-byte dead object *above* it. Frame totals identical; only the `addi rD, r1, N` and six loads/stores around the `bl` differ. Refuted in a scratch TU: `operator-` returning by value (+6 instructions), a by-value wrapper, an inlined callee taking `TVec3` by value (+6), prvalue/cast/block-scope/`getVel()` left operands (slot-identical), a dead named `TVec3` after the local (right structure, 12 too high), a dead `TVec3` in the UNUSED callee (moves the temp the wrong way). Research item.
+- **Allocation mechanics measured**: the inline-temp pool fills downward from just below the function-scope named locals in expansion order; function-scope named locals fill downward from the frame top in declaration order (first-declared highest); a non-leaf with only register arguments reserves no outgoing-parameter area (locals start at 0xc). **Slot order names the declaration form**: `TCannon::moveObject`'s zeroing vector above the velocity copy proves both were function-scope locals with the zero one declared first (`zeroVel.set(0,0,0); mVelocity = zeroVel;`).
+- Rungs: `this` accessors (`getGroundPlane()`, `getRotation()`, `isGold()`) saturate against each other; a class forwarder for the inherited `mSpine` (`getSpine()`) is a separate rung (+8 per two-level `getTime()` site); a params-class `getXxx()` wrapper is +8 per nerve where `getParam()` is out of line, and an owning-class forwarder above it does not stack; `SMSGetMSound()` is a genuine +4 after the two-argument `startSoundActor`'s +8 (`TKiller::bind` closed); `SMS_GetMarioSpeedX/Z()` over the raw globals +8 as a pair; `getPosition()` on two of three `TBGWallCheckRecord` arguments (the `y` argument stays raw). Closed: `TKiller::bind`, `TKoopaJrSubmarine::moveSwing`, `TNerveKoopaJrSubmarineLaunchKiller::execute`. Real fix: `TNerveLimitKoopaGetDown` read `tumbleWeight` (0x1e8) for `downSpeed` (0x1d4). `TBossHanachan::execWalk` is 16 over with five permuted stack objects — `target` is probably a temporary of an inlined distance-test helper.
+
+## Second-pass batch 110: the binding level (three units closed)
+
+- **The single most productive lever: a TU-local `static inline` free function that takes the receiver by pointer and binds its result is one extra inline expansion, worth +8 of low region.** The binding pays — the same forwarder returning directly is +0, and a thin level above a real `bl` is +0 at any spelling. Generalises batch 103's "fresh global load" note: with `this` it is +0 without a binding and +8 with one. **Nested binding levels stack additively; multiple bindings inside one level do not** (`PollutionPosIndex`: two nested one-binding levels +24, one level with two bindings +16). **A binding level can be a register lever independent of its frame cost** (one on `index()` restored `getEdgeDegree`'s whole scratch-register assignment and `lbzx` base).
+- Closed and linked: `TSnapTimeObj::perform` (one level above `TTimeRec::endTimer()` at the DRAW_INIT site moves the inlined `startTimer(u32)` colour temporary +4 with the frame unchanged — the (+4, 0) header round 18 could not find); `TPollutionPos::isSame` (three binding levels, one per member read: `isInArea`/`getDepth` +0 each and +16 together, `worldToDepth` +8) and `getEdgeDegree` (two nested levels on `index()`); `TTalkCursor::loadAfter` (any single binding level) and `associateNPC` (model fetch +0x10, NPC receiver +8).
+- `TSunMgr::perform` closed (`SMS_GetMarioX/Z()` +8 as a pair, bound `SMSGetMSound()` +8, the BGM handle at three sites +8 each); `load` now frame- and instruction-exact with an r30/r31 swap (retail ranks the `.rodata` pool address above `this`; the liveness rule does not cover it). `TRideCloud::setGroundCollision` closed (`mMapCollisionManager` through one binding level); `control` frame exact with a 3-register FPR permutation left (the 300.0f literal in the freed register). `PerformList::perform`'s residue is the JGadget iterator temp-pool *grouping*, not a frame gap. A level above an inlined callee moves the caller's pool (direction depends on expansion order); above a real `bl` it is free. Chained `>>` continuations reconfirmed at 8 each. `TSunModel::isInBounds` carrying a dead 48-byte non-trivial local is the only lead for `TLensGlow::perform`. Note: editing `Map/PollutionPos.hpp` breaks the DOL (linked Pollution TUs depend on `index()`'s codegen).
+
+## Research batch 113: the `a = b - c` temp sits 4 above the local floor in retail, 16 in ours
+
+Measured in a scratch TU against the real `JGVec3.hpp` with the game flags, on the `TKoopaJrSubmarine::bind` shape (frame 0x40, 55 instructions, `next` at 0x28 in both builds).
+The reference point is the **local floor 0xc** (a non-leaf whose calls take only register arguments reserves no outgoing-parameter area), and the number that matters is the `operator-` by-value parameter temp's distance above it.
+
+- **Retail puts that temp 4 bytes above the floor, at 0x10, in every function whose calls are register-only** — `TKoopaJrSubmarine::bind`, `TLiveActor::bind`, `TBaseNPC::bind` and `TEnemyAttachment::bind` all have `addi r3, r1, 0x10`. Ours puts it 16 (or more) above, immediately below the function-scope named locals, and the dead bytes end up *below* it instead of between it and the locals. Batch 109's "12-byte dead object above" is that gap, not an object: the per-function delta is whatever else the pool holds (12 koopajr/LeanMirror, 16 liveactor, 20 enemyAttachment, 24 NpcCollision, 52 chuuhana), so it is a **pool-order swap**, not a missing declaration.
+- **The 12 extra bytes decompose, and 8 of them are the `operator-=` level.** From the floor: the reference return that the caller copies out of is +4 (unavoidable for `a = b - c`); routing `operator-` through `operator-=` instead of calling `sub` directly is a further +8. `void operator-=` and a void-returning intermediate (`fst.subOf(snd)`) both land 8, i.e. halfway. The last 4 was not isolated.
+- **`operator-=` must keep its `TVec3&` return.** The `void` spelling was measured project-wide: -1 function, ~35 regressions and no gain, and it breaks the member's own out-of-line copy — `__ami__` (weak, 0x34, Tongue.cpp) drops 100 -> 98.5 because retail loads `other.x` before `this->x` and only `return *this;` orders the two `lfs` that way. Recorded at the declaration; the 8 bytes have to come from somewhere else.
+- **The only construct that puts the temp *at* the floor is a callee that takes the source by value and writes the destination it was handed**: `inline void f(V* d, V a, const V& b) { a.sub(b); *d = a; }` gives `addi r3, r1, 0xc`, one instruction count identical to the reference-returning form and a frame 8 bytes smaller — and it stays at the floor even when the intermediate returns `V&` and even when the left operand is a named local. Copy-out from a *returned reference* is what lifts the temp. No spelling of `a = b - c` through `operator-` can avoid it, so if retail's sites are really `a = b - c` the lever is elsewhere; if they are not, this helper shape is what to look for.
+- Refuted here, all slot-identical to the stock header (frame 0x40, temp 0x1c, 55 instructions): `operator-` as a namespace-scope inline instead of a friend; `return fst -= snd;` and `return fst.operator-=(snd);`; `operator=` returning `void` or taking `const Vec&`; `operator-` returning `const Vec&` or non-const `TVec3&`; `operator-=` returning `*(TVec3*)this`; wrapping the site in a bare block, an `if`, or one or two inline helper levels; `mLinearVelocity.set(next - mPosition)`. Costing +6 instructions (all forms of a by-value return or a by-value `operator=`): `TVec3 operator-`, `TVec3& operator=(TVec3)`, a helper returning `TVec3`, a named `TVec3 d = next - mPosition`. A dead `TVec3` in an inlined callee, before or after the statement, always lands *below* the temp (+8 frame), which is why batch 109 saw it move the wrong way.
+- **Census — the residue is worth ~40 near-exact functions.** Retail has 102 `bl TVec3::sub(const TVec3&)` sites in 57 units (`fly`, `bind`, `loadAfter`, `moveObject`, nerve `execute`s, eight `TMario` wire functions). **Not one of them is byte-exact in our build**, and 40 are at 99.3% or better, so a single header or call-site spelling closes them together. Full list in the batch-113 scratchpad (`subsites.json`); probe driver `drv.py`/`cc.sh` there.
+
+## Own-class accessor sweep 112 (2026-09-18): 49 functions to exact, game code 39.6 -> 40.25%
+
+- Population: 589 unlinked functions at >= 99.5% short by 8 (388) or 16 (201); 187 had a raw own-member read with an existing getter (830 in-class accessors over 310 classes, resolved through the base chain); 70 of 183 groups kept (38%), 181 sites across 40 units. **A lever saturates per member, not per function**: 45 of 74 keeps took all sites, and bisection only paid on multi-member groups where one member's sites won. Members that paid: `mPosition` 17 groups, `mMActor` 10, `mStatus` 9, `mGroundPlane`/`mVelocity`/`mScaling` 6, `mModel`/`mManager` 5. The own-class fork is exhausted on this population (a widened getter index and a wide subset pass added four).
+- **Missing getters ranked for a header round** (`missing_final.txt` in the batch-112 scratchpad, 741 pairs): `TLiveActor::getSpine()` (31 functions across 24 derived classes; TTinKoopa/TBossHanachan/TSeal already declare a private one), `TMario::mForwardVel`/`mFaceAngle`/`mVel`/`mInput`/`mModelFaceAngle`/`mStatusTimer`/`mFloorPosition`/`mSlopeAngle`/`mStatusState`/`mWallPlane`/`mSlideVelX/Z`, `JPADraw::mDrawCtx`, `MActor::mAnmByType`, card-code `unk*`s, and const overloads (`TTakeActor::getHolder()` blocks six const callers; `TPollutionLayer::isPolluted`, `TMapCollisionBase::mCheckDataNum`, `TCoin::perform`, `TBathtub::load`). Drivers `getters.py`/`own.py`/`gen_gap.py` there. MarioCollision's pre-existing MISSING `TVec3` copy-ctor/`__amu__` come from a still-nonmatching function in that TU.
+
+  Superseded in part by batch 116 below: the count is 130 sites, and the "+4 unavoidable, +8 for `operator-=`" decomposition is really `8 x consumed reference returns` plus a pool-ordering difference.
+
+## Research batch 116: the `bl sub` slot is a pool *ordering* difference, and prefix 4 is off our ladder
+
+Same scratch TU and flags as batch 113, on the strictest model available: `TCoasterEnemy::bind` is 55 instructions in both builds, frame 0x40 in both, `next` at 0x28 in both, and the *only* difference in the whole function is `addi r3, r1, 0x10` (retail) against `0x1c` (ours), plus the six loads/stores that use it.
+Writing the temp's offset as **floor (0xc) + prefix**, ~200 spellings were measured.
+
+- **The ladder is `prefix = 8 x (reference returns the caller copies out of)`, and inline levels themselves are free.** Stock (`operator-` returns `const TVec3&`, `operator-=` returns `TVec3&`) is 16; `void operator-=` is 8; a destination-pointer helper that consumes no returned reference is 0. Inserting one or two extra void forwarders between `operator-` and `sub` changes nothing and `sub` still goes out of line at depth 5, so **depth is not the lever** — only the number of consumed reference returns is. The floor is 0xc and is insensitive to callee arity up to 8 register arguments (9 arguments move it to 0x14).
+- **Retail is at prefix 4, which is off that ladder**, and it also has **12 bytes of pool *above* the temp** (0x1c..0x27 in `TCoasterEnemy::bind`) that our build does not have. Both builds reserve the same 28 bytes of pool, so nothing is missing — the entries are ordered differently.
+- **Prefix 4 is reachable exactly once**, with `friend const TVec3& operator-(const TVec3& fst, const TVec3& snd) { TVec3 r; r = fst; r -= snd; return r; }` plus `void operator-=` *and* `void operator=` (55 instructions, temp at 0x10). But that shape's gap above the temp is 4, not 12, and **every construct that adds bytes above the temp also adds 4 to the prefix** (a bound `const TVec3&` or `const TVec3*` in `operator-` is +4/+4; a second binding is +0/+4; a dead named `TVec3` after the caller's local is +0/+12 but costs 8 of frame). (4, 12) was not produced by any combination of `operator-`, `operator-=`, `operator=`, copy-ctor, call-site and dead-object spellings tried.
+- **Multi-site functions name the mechanism.** Retail spaces consecutive `a = b - c` temps 20-24 bytes apart (`TYoshiTongue::movement` 0xd0/0xe8/0x100, `TEnemyMario::emReplayJumpToNearestNode` 0x11c/0x130/0x148); ours packs them 12 apart and hoists every level byte to the bottom of the pool (scratch three-site probe: temps at 0x3c/0x48/0x54 over a 48-byte prefix). So retail allocates *per statement* — the by-value temp first, then that statement's level bytes — while we allocate all the level bytes for the whole function first. The per-function delta batch 113 saw (12/16/20/24/52) is that hoisting, not a missing declaration.
+- **Also refuted here.** The map's two-argument `sub__...RCQ29JGeometry8TVec3<f>RCQ29JGeometry8TVec3<f>` (weak, 0x34, limitkoopa.cpp) *is* emitted, and its 13 instructions are the plain `x = fst.x - snd.x;` body we already have — it is not `set(a); sub(b);` and it is not what the one-argument sites go through. Removing the user-declared `operator=` (letting MWCC generate it) loses the level and makes `sub` inline, so `operator=` must stay a real level. Both operands by value, `operator-=` by value, `operator-`/`operator=` returning by value, an explicit `TVec3(...)`/cast at the site, and `getPosition()`-style accessors on either operand all cost +6 instructions or move the block the wrong way.
+- **Census reclassified** (130 one-argument `bl sub` sites, 57 units; batch 113's 102 was after filtering). By the copies bracketing the call: **112 have a copy in and a copy out** (`a = b - c` into a member, a named local or a temp), **16 have a copy in only** (the difference consumed as a value — `TBossGesso::doAttack*`, `TAmenbo::control`, `TNerveTabePuku*`), **2 have neither**. **122 of the 130 already emit the `bl` at the right point in our build**; only 8 differ in count (`TCannon::killerShoot` 2/0, the two `TNerveBossTelesa*::execute` 1/0, `TSphereLink::moveHead` 2/1, and four `TMario` wire functions plus `TBossGesso::doAttackSingle` where we emit more than retail). So the depth work is done and the entire population is blocked on this one slot.
+
+## Binding-level pass 115: two units closed
+
+- **A dead low-region gap can be a named local in the wrong place**: scalars held in an inlined callee are trivial PODs worth 0, while the same scalars as the caller's own block locals reserve 8 above the pool (`TBGPolDrop::perform`: the X-rotation block is the map's weak `MsMtxSetRotX(Mtx, f32)`, 0x7c, identified by compiling it out of line at 124 bytes on the nose; bgpoldrop linked; header item next to `MsMtxSetRotRPH` in MathUtil.hpp). The inverse family has a -8 lever: a named intermediate pointer one statement earlier in an accessor chain (`J3DModelData* modelData`; `SMS_InitChangeNpcColor` closed, NpcColor linked; the raw chain is -16).
+- **`search<T>` binds its result, `search2` does not; a binding level on `search<T>` is +12 per expansion**, and the `search2`+cast temporary is one shared 4-byte slot however many sites use it (`TMarDirector::preEntry` frame exact with four binding levels plus one plain `search2`; residue one 4-byte slot; header item: `JDRNameRefGen.hpp`'s `search<T>` should bind). **Global forks are not independent of other levers**: `SMSGetMarDirector()` was +0 alone and +4 once two binding levels were in place (`EffectUtil`, frame and every displacement now exact; residue a three-way FPR rotation with results ranked descending by component) — measure global forks last.
+- **A binding level is a frame lever but not always a register lever** (three counter-examples: `TMapObjRevivalPollution::loadAfter`, `NPCNeckCallBack` — two `gpCurrentNpc` levels land 0x190 but in the wrong slots — and `SMS_IsMarioOnWire`, where a binding level on the holder fetch is byte-identical: it is not a CSE breaker); batch 110's register claim is narrowed to chains the caller's own receivers go through. A parameter binding is free where a global binding is +12. A zero-parameter level can be free (`TUtil<f32>::one()` in `execPosInbetween`) — the lever there must change liveness ranking. The liveness probe costs one `stw` and a use that constant-folds does not rank the local (`AudioDecoderForOnMemory`). Diagnostic: a dead 4-byte named local declared last lands the frame and all named slots, isolating a residue to one expansion temporary (`warpPosAndAt`: one 4-byte temp after the `getUsualLookat` sret).
+
+## Research batch 133: an **implicit** derived-from-base conversion on a `return` reserves 16 bytes
+
+Model: `JGadget::TList_pointer<T*>::insert(iterator, const T&)`, a weak 0x4c symbol whose retail copy lives in `Map.a MapWireManager.cpp`.
+It is 19 instructions in both builds and the only difference is the frame: retail 0x30 with its three pool words at 0x18/0x1c/0x20, ours 0x40 with them at 0x2c/0x30/0x34.
+Forcing an inline member out of line for measurement is easy: take its address in a scratch TU (`L::iterator (L::*p)(L::iterator, THitActor* const&) = &L::insert;`).
+
+- **The lever is the spelling of the conversion on the `return` statement.**
+  `return Base::insert(where, what);` — where the callee returns the base iterator and the function returns the derived one — reserves **16 extra bytes at the bottom of the frame**, with the whole pool riding 20 bytes higher and 4 fewer dead bytes above it.
+  `return iterator(Base::insert(where, what));` removes them and lands retail exactly, instruction stream unchanged.
+  The signature of this residue — **+16 frame, pool 20 low / 4 high** — is the one `SDLModel::entry` shows after `++it`, so read a "+20 low / -4 high, +16 frame" gap as a missing explicit conversion first.
+- It is the *implicitness* that costs, not the conversion or a named result: `iterator r(Base::insert(...)); return r;` is 0x48, worse again, and `insert` taking `const iterator&` does not compile against `TList_pointer_void`'s fixed signature.
+  `begin()`/`end()` in the same class were already spelled `iterator(Base::begin())` and are byte-exact, which is the style evidence for `insert`.
+- **Everything else in `std-list.hpp` is frame-inert for this function** (all 19 instructions, all frame 0x40): stubbing `TList::insert`/`CreateNode_`/the destructor/`erase`, deleting `TList_pointer<T>::begin` or either iterator's `operator++`/`operator*`/`operator==`, public instead of private inheritance at either level, a user copy ctor or `operator=` on `TList::iterator`, a one-word `TNode_`, and renaming the shadowing `typedef Base::iterator Base;`.
+  A stripped micro-model reproduces the fork in nine lines, so the property is the conversion and nothing about JGadget.
+- **Post-increment's cost on a JGadget iterator is its by-value return slot, not its copy local.** Respelling `operator++(int)` as `TNode_* p = p_; p_ = p_->pNext_; return iterator(p);` — no `iterator copy` at all — is byte-identical to the stock `iterator copy = *this; operator++();`, and the extra pool word survives. Since retail has no such word, **retail's list walks are spelled `++it`** (`SDLModel::entry`'s grouping with `++it` is retail's exactly).
+- Open: the `TSeal::init` / `TMirrorActor::init` / `TPerformList::perform` gaps are *not* this lever (applying it leaves all three byte-identical), and no `std-list.hpp` or `singlelinklist.hpp` spelling moved them. Retail's inter-group gaps are 4 (seal, one word) and 8 (MirrorActor, two words per gap) smaller than ours with the group *sizes* already right. Measured and rejected on the four callers: `push_back` with a named `end()`, `insert`/`iterator`/`operator==` taking `const&`, named returns everywhere in the chain, implicit `begin()`/`end()`, explicit by-value slicing of `where`, `push_back` bypassing `TList_pointer<T>::insert`, and dropping `getChildren()` at the site (-8 frame, gaps unmoved). For `TPerformList::perform` the bottom `[4]` splits into retail's `[2]+12 [2]` shape only by deleting the derived iterator's `operator==` (13 slots, gap 8 not 12) or its `operator!=` (11 slots, wrong count) — recorded at the declaration, not applied.
+
+## Research batch 119: the per-statement geometry is a **by-value return**, and it costs 6 instructions
+
+Same scratch TU, flags and model as batches 113/116 (`TCoasterEnemy::bind`: 55 instructions, frame 0x40, `next` at 0x28 in both builds; retail `addi r3, r1, 0x10` against our `0x1c`).
+Retail's pool is written here as **(below, above)** = dead bytes under the live `bl sub` temp and between it and the named locals.
+Retail is **(4, 12)**; the stock header is **(16, 0)**.
+
+- **Retail's `a = b - c` allocates two 12-byte vector slots per statement, and the lower one is the live temp.** `TYoshiTongue::movement`'s retail pool is a *dense* run of 12-byte objects (0xb8, 0xc4, 0xd0, 0xdc, 0xe8, 0xf4, 0x100), of which the three `bl sub` temps are 0xd0/0xe8/0x100 — the 24-byte spacing batch 116 measured is two slots, not a slot plus level bytes.
+- **The property that produces that geometry is `operator-` returning `TVec3` *by value*.** The return slot is allocated per statement, immediately above that statement's by-value parameter temp, and the pool then fills downward statement by statement. On the three-site scratch probe this reproduces retail's spacing exactly: stock temps 0x3c/0x48/0x54 (12 apart, 48-byte hoisted prefix) against by-value 0x18/0x30/0x48 (**24 apart**), frame 0x90 in both.
+- **Adding exactly one bound `const TVec3*`/`const TVec3&` inside `operator-` supplies the 4 bytes at the pool bottom, and the single-site model then lands on retail's layout precisely**: `friend TVec3 operator-(TVec3 fst, const TVec3& snd) { const TVec3* p = &snd; fst -= *p; return fst; }` gives frame 0x40, temp **0x10**, `next` **0x28**, (4, 12). That geometry is invariant under `operator-=`/`operator=` returning `TVec3&` or `void`, dropping the user copy-ctor, `operator=(const Vec&)`, and the call site spelled `m = a - b`, `setLinearVelocity(a - b)` or `m.set(a - b)`.
+- **But every by-value return costs +6 instructions (61 against 55), and nothing removes them.** MWCC 1.2.5 has no NRVO and no parameter-to-return elision: returning the by-value parameter, a copy-constructed or copy-initialised named local, a constructor expression, a member `operator-` instead of a friend, a `const`-qualified by-value return, and letting the copy-ctor or `operator=` be implicit all emit the three-word copy into the return slot. **In our build the second 12-byte slot and 55 instructions are mutually exclusive** — every reference-returning spelling allocates exactly one slot and can only put dead bytes *below* it. Retail reserves the return slot and elides the copy into it; that is the whole remaining residue for the 130-site population.
+- **New lever, and a project-wide trap: a user-declared `~TVec3() { }` collapses the inline-temp prefix to 0** (temp at the floor 0xc, frame 0x30, still 55 instructions) and makes callee-side dead objects free. It is the only construct found that reaches prefix 0 without changing the instruction stream. **Do not ship it**: measured project-wide it is total fuzzy_match 97.36 -> 95.87 and matched_code 50.85 -> 48.82, because it also makes `TVec3` non-trivial everywhere — `__dt__17TMarioPositionObjFv` and `__dt__18TModelWaterManagerFv` 100 -> 46.5, `loadYBBMtx__7JPADrawFPA4_f` 99.8 -> 10.1, most of JPADraw/JPAField/JPAEmitter and every `TVec3` array member's implicit dtor. Reverted.
+- **Dead-pool sizing law (useful for reading any frame gap).** A dead *named local in the caller* adds its own size **above** the temp — `TVec3`/`Vec` 12, `u8[8]` 8, `u8[4]` 4, `f32` 0 (register-allocated) — while a dead object inside an inlined callee adds **below**, and is dropped entirely once `TVec3` has a destructor.
+- **Also refuted here, all slot-identical to the stock header** (frame 0x40, temp 0x1c, (16, 0), 55 instructions): `TVec3` as the **primary class template** with the operators in class rather than an explicit `template <> class TVec3<f32>` specialisation (hypothesis from batch 104 — the specialisation is not the problem); `operator-` as a **namespace-scope `inline` function template** `template <class T> TVec3<T> operator-(TVec3<T>, const TVec3<T>&)` or as a namespace-scope non-template, both with a reference and a by-value return (the by-value forms give the same (0, 12) and the same +6 as the friend); a memberwise copy-ctor; no user copy-ctor at all; and up to four bound references inside `operator-` when a destructor is present (with a destructor the prefix stays 0 whatever is added below).
+
+## Closure batch 118
+
+- MarioWait closed and linked (`stopCommon`: one binding level on `mYoshi`; header item `TMario::getYoshi()`). **A trailing dead 4-byte scalar is a real "+4 named" lever when the frame is already exact and the whole named block sits 4 low** — declared last (first, it is absorbed by frame padding; check for 8 bytes of slack first: `drawRefracAndSpec` is the counter-case). `TMapObjTree::controlLeaf`'s own copy-paste bug named it (`f32 absAngularVelocity`).
+- Lever pairs across classes (a search-chain binding level +8 and an own-class `getAttackRadius()` +0 alone, +16 together — `TMapObjTreeScale::loadAfter`). **Declaration order of a `TVec3` against a `MtxPtr` is a +-4 positional lever** (`emitSweat`: `pos` before `mtx`). **`getM3UModel()` over `mModel` is worth +8 per *pair* of sites** (`warpOutEffect`, bisected over twelve: any exact-frame subset of a large identical site set is arbitrary — the real lever is elsewhere). A float truthiness test (`if (p.get())`) vs `!= 0.0f` swaps the `fcmpu` operands (second unit). **`if/else if` vs two sequential `if`s is readable off the frame**: mutually exclusive arms kill the receiver's live range across the intervening call (`TNerveNameKuriLand::execute` retail 0x8 vs our 0x20). The const-accessor CSE rule cuts the other way for `checkLiveFlag`/`onLiveFlag` in one statement pair (raw `mLiveFlag` read, `TNameKuri::isHitValid` — which also had a whole missing `onLiveFlag(HIDDEN)` block). `(T*)TLiveManager::getObj(i)` can *remove* 8 where the three-level accessor overshoots. A binding level applies per call site within one function (`TTobiPuku::changeOut`: `mJuiceBlock` bound at the `kill()` site only).
+- Real bugs: `kickRoofEffect` reads `mJointIdChnFootR`, `kickFruitEffect` writes `mGlobalTranslation`. Open: namekuri's `setDeadAnm`/`setMeltAnm`/`init` short by exactly 40 (a dead 12-byte named local above the unnamed `setVelocity(TVec3(0,0,0))` temporary at 0x48 plus 28 low); `drawRefracAndSpec` (seven GXColor temporaries 4 high); `TTobiPuku::TTobiPuku` (retail spills `this` to `8(r1)`). **Tooling trap: `decomp-diff.py -d` prints "100.0% match" for a function that is not exact** (slot offsets differed) — trial drivers must count `~|<>` markers, not read the header; `sweep.py` in the batch-118 scratchpad does.
+
+## Binding-level sweep 121 (2026-09-18): 53 functions to exact, game code 41.0 -> 41.4%
+
+- Driver `bind.py` (with `acc.py`: 1697 zero-argument in-class accessors, 9777 fields, 157 global pointers) generates the level verbatim per site — `static inline RET PrefixMeth(const Cls* p) { RET v = p->meth(); return v; }` — full same-receiver set first, singles, then cross-receiver pairs; 507-function population, 542 + 70 trials, 80 groups kept over 56 units. **A single binding level at a single site is worth +8 in 53 keeps but +16 in 12** (batch 110's +8 is a floor). Saturates per receiver (12 keeps took more than one site; three sites still bought only +8 twice); six keeps needed a cross-receiver lever pair. Accepting sites: local/parameter receivers 55, implicit `this` 32, own member pointer 12, global 6; by method `getMActor()` 14, `getModel()` 5, `getPane()` 4 (the batch-99 ranking, now for the level above the accessor). Nested levels are a thin second rung (3 of 15; one stack gave only +8). **A mutator forwards as well as an accessor** (`unsetUnk165` through a level closed a nerve) — the lever is the binding, not the getter.
+- Interaction rule: a sweep started before a header round must be re-verified per function after landing — header round 20's getters had already closed `TBubble::init`, `startAppearCoin`, two CardSave waits, `readRailFlag`, `boardJumping` and `calcCreateParticle`, and the sweep's levels on top double-levered them (restored to the getter spelling). Headroom: 57 unswept lowest-score files, 227 functions with no resolvable candidate (template/namespaced bodies), the nested round on the 8-short population. Kill trial waiters by pid, not `pkill -f`.
+
+## Closure batch 120
+
+- **A missing `void` return type is a register-allocation bug**: `TMarioGamePad::read()` declared `u32` with no `return` kept the callee's r3 alive across the body, shifting every scratch register (both functions now exact — but the unit still rests on the pre-existing `u32 stackAlloc[83]` padding in `updateMeaning`, 336 bytes of dead low region over 26 inlined expansions; **do not link MarioGamePad** until that is honest). **The dead-4-byte-local-after idiom generalises beyond path buffers** (`TLensGlow::TLensGlow`, `read()` after `s32 resetPort`, `TMario::drawSyncCallback` after the `GXPeekARGB` target): one named slot 4 low at an exact frame, moved only by a local declared after it. **A loop counter declared in the `for` init vs ahead of the preceding local swaps their scratch registers** (`int i;` before `u16 dc`, `updateMeaning`'s unroll-by-8 loop).
+- **A named pointer local is a zero-instruction "+4 named / -4 low" lever** at an exact frame (`M3UMtxCalcBlendAux`); a compiler-generated global-address temp's callee-saved rank floats against the source values' live ranges (shortening one promotes it) and inline levels are inert on it. **Rogue-include order is load-bearing for string-pool offsets and objdiff scores it 100%**: `System/DummyStrings.hpp` must precede `Player/MarioDirtyStrings.hpp` (`MarioCap`'s `cDirtyTexName` 0x20 low). **Classify a large gap by inter-slot deltas**: uniform => low region (levers); growing between an `operator-` copy and its consumer => the batch-113/116 pool-ordering residue (`TMarioCap::perform`, levers wasted); a hole in the named block => a missing declaration (`TMario::receiveMessage`'s 68-byte object).
+- Binding levels: over the raw `gpMapObjManager` +8 per expansion, three exclusive branches paid it (`TMario::getGesso` closed; header item `SMSGetMapObjManager()` binding); a binding fludd accessor +16/expansion at 8 of 9 `mWaterGun` sites plus `getM3UModel()` landed `TMario::perform`'s 0x168 (the real `getFludd()` is only +16 total: the rung is the binding). `MarNameRefGen_BossEnemy`'s last residue is one level between `TSleepBossHanachan`'s ctor and `TVec3(f,f,f)` (no defaulted-argument forwarder: the map has no `__ct__18TSleepBossHanachan` at any arity). `TLensGlow::perform`'s 96 missing pool bytes are two inlined shared callees (`TSunModel::isInBounds`, `J3DFrameCtrl::update` x2, 48 each). MSoundScene: retail re-derives one indexed load independently (`lwzx` for `getDistFromCamera(mMaxTrans[d][rank])`) and keeps `rank`/`rank << 2` callee-saved; its three empty UNUSED stubs are the frame candidates.
+
+## Binding-level sweep continuation 124: +32 exact, JPAParticle closed
+
+- **The resolver, not the lever, was the limit**: the previously-unresolvable functions gave 21 keeps from 43 (49% vs 22% for the unswept low-score files). Two parser bugs hid them — a one-line `RET C::f() const { return x; }` definition swallowed the following function (51 of 65 NOFUNC cases, every `DEFINE_NERVE` after a one-line getter), and namespaced bodies (`int TTrack::noteOn` indented inside `namespace JASystem {`) failed a column-0 test. **One-argument indexed/predicate accessors accept a level at least as readily as zero-argument ones and dominate the keeps** (`checkFlag` 5, `isState` 4, `isBckAnm` 4, `checkLiveFlag` 3, `checkMapObjFlag`, `checkSdlFlag`, `checkStatus`, `getLightSet(i)`). **A two-level stack on an 8-short frame is usually the whole gap** (13 of 69, eleven landing exactly, eight of them indexed accessors), whereas on a 16-short frame it is a partial step. `getCurrentMap()` is a receiver that paid three times (`SunGlass`, `MapMirror`, `MapObjMare` load/init to 100). JPAParticle 100/100 and linked. Headroom: 217 population functions with no accessor call site at all (a level over a raw member read is untried there) and the header-resident `MActorAnmDataEach<T>::loadAnmPtrArray` instantiations. Drivers `bind2.py`/`acc2.py` in the batch-124 scratchpad; wait on the python pid, not `pgrep -f`.
+
+## Raw-member binding sweep 127 (2026-09-18): 100 functions to exact, game code 42.2 -> 43.2%
+
+- **A binding level over a raw member read pays like one over an accessor**: `static inline T PrefixFoo(const Cls* p) { T v = p->mFoo; return v; }` (+8, occasionally +16, per expansion; saturates per member — 121 of 142 keeps took one member's full site set). Receivers: implicit `this` 112 sites, pointer local/parameter/member 29, **the fork-plus-binding form over a global 42** (`gpMarioParticleManager` 9, `gpMSound` 7, `gpMarDirector` 7, `gpMap`, `gpCameraShake`, `gpItemManager`) — the single most reliable shape. Members: 100 pointers, 52 scalars (including `unkNN` placeholders). **The lever is independent of the accessor lever**: the already-swept accessor-bearing population gave 47 keeps from 74 (64%). Two-level stacks are a thin rung on raw reads (5 of 226). **The register lever is real but rare** (6 of 141 frame-exact functions, every one straight to 100%: `TGesso::pollute`, `TSunShine::perform`, `TBellDolpic::control`, `TFireWanwan::receiveMessage`, `TNPCManager::makePartsModelData_`, `TBossEelHeartCoin::perform`). Struct members are excluded (a by-value copy is +6 instructions). ItemManager, NpcManager, JDRDisplay closed and linked. Headroom: 111 frame-exact accessor-bearing functions below the top-80 cut, 82 no-accessor functions with only struct/array/private members (a private field needs a member level). Drivers `raw.py`/`acc3.py`/`unlev.py`/`gen_gap2.py` in the batch-127 scratchpad; the driver refuses trials that move the frame further from retail's. Traps: killing a trial mid-build leaves the trial text in the source; a `.c` TU breaks a prefix derived by stripping four characters.
+
+## Second pass 128 on the Sonnet units (Opus): six functions closed
+
+- **A named result can be a "+8 low" lever where the whole global-accessor ladder is +0** (`TMapObjFlagManager::load` closed: `char* name = stream.readString(buffer, 8)` and `u8 map = getCurrentMap()` for the switch, +8 each — retires "unnamed 16-byte object" readings for stream-read + switch bodies). **A required named local can be paid for by unbinding a sibling value** (`FifoSetFog` closed: `c_hex` must be named for r27 across `__cvt_fp2unsigned`; two of the five FIFO words are written straight into `GXWGFifo.u32` — which two is undetermined). **The named-scalar rule closes clamp loops** (`f32 y = pos.y; if (y > 0.0f) pos.y = 0.0f;`, `TFishoid::perform` closed). `TJumpBase::initMapObj` closed (`getUnk8()` +8); `TMushroom1up::perform` closed (a lever pair: `getStateTimer()` at both sites +8 together, plus a binding level over the director's frame counter +16); `~TSelectDir` closed (one binding level over the gamepad member; header item `TSelectDir::getGamePad()` binding).
+- **A named pointer local through an indexed inline accessor is per-expansion, so it can be unpayable**: `TBoid* boid = getBoid(i)` closes the out-of-line `TRealoid::clipBoids` but costs the byte-exact `TRealoid::perform` which inlines it — the exact sibling wins. **Classify before levering** (delta histogram over all single-slot `~` markers): `SelectDir::direct` uniform +0x80 = a carrier ladder (fader x6 +0x38, `unk20` x7 +0x40, gamepad pair +0x20 land 0xd0 exactly but leave the pool 4 bytes off — not committed); `rsetup` deltas spread 28-64 over 233 slots = several misplaced objects in a 0x600 area. A missing store pair can belong to a different block than the diff offset suggests (`TJumpBase::control`'s `unk13C = 0; unk138 = 2;` is in the ground-plane block; 326/326 instructions now, r29/r31 `this`/pool swap left — fourth instance, no lever). `MSoundStruct::startSoundSetDyna`'s r23/r24 swap is not a declaration-order property; every restructuring of its shared `li r0, 1` adds instructions. `JMASSin`/`JMASCos` shared-index CSE is not steerable from the caller (negative-confirmed). `TMushroom1up::control` is a genuine +4 pool with a dead 12-byte named slot (positional only). `TMapObjFlag::draw`'s 80 bytes are dead low region below every local (twelve GX writers + `getViewMtx()` expansions).
+
+## One-function pass 129: three more units closed
+
+- **A member accessor can be a -8 anti-lever at depth 2 while free at depth 1** — the level's cost is paid by the inlining caller (`TPollutionLayer::getPollutionDegree()` inside the loop `cleanedAll` inlines; raw `mCounter` closed it; PollutionManager linked). **A non-void return type with no `return` reserves r3 for the whole body** (second confirmation: `createMActorFromAllBmd` -> `void`; ObjModel linked). **Cast-outside vs cast-inside on an indexed accessor is a +-4 low-region lever at equal depth** (`(TMapObjBase*)TObjManager::getObj(i)` closed `makeObjAppear`; MapObjManager linked). **"+4 low / -4 named" after a stack buffer is often a split-declared pointer**: `T* p; ... p = f(buf);` reserves the slot below the buffer where `T* p = f(buf);` is register-allocated (NpcManager's `makePartsModelData_`, already linked via the sweep's spelling). `newAndRegisterCoin`'s carrier is one dead 12-byte non-trivial local in `TMapObjBase::setEventId(u32)` (header inline, measurable only — ItemManager was linked through the sweep's spelling meanwhile).
+- **Post-increment on a JGadget iterator costs exactly one 4-byte pool word in the caller**: `++it` reproduces `SDLModel::entry`'s pool grouping exactly and reduces the SDLModel/MirrorActor/seal push_back family to a pool-base translation (retail's pool more compact with more dead bytes below) — seed for a `std-list.hpp` research batch. `MovieSubtitle::setupResource` is sized to one dead 12-byte non-trivial local in the UNUSED `makeBmgName`. Naming the product of a literal-times-member (`f32 x = K; x = x * m;`) decides the literal's FPR and both multiply destinations (`TRideCloud::control` half solved; the member loads' f0/f1 order is immovable). Binding levels were frame-neutral and register-inert on `TMapObjTree::initMapObj` (fourth counter-example).
+
+## Sweep batch 130 (2026-09-18): the address-binding lever (7 exact, 5,853 trial builds)
+
+- **A binding level over the *address* of a struct or array member pays exactly like batch 127's pointer/scalar lever**, and it is what the 8/16-short residue was waiting for: `static inline const TVec3<f32>* PoihanaPosition(const TPoiHana* p) { const TVec3<f32>* position = &p->mPosition; return position; }` is worth +8 or +16 of low region per expansion and lands the frame exactly (10 of 11 keeps hit retail's frame on the nose). Hit rate 10/37 of the 8/16-short functions with such a site; batch 127's by-value form was excluded for aggregates because the copy costs +6 instructions, but binding the address copies nothing. Exact: `TNerveFireWanwanHungTail::execute`, `TGorogoro::boundSE`, `TPoiHana::moveObject`, `TBombHei::calcRootMatrix` (two stacked address levels, one alone moved nothing: the 0x20-vs-0x30 TODO), `TRailMapObj::resetPosition` (+`TNormalLift::resetPosition`, same inline body), `TMarDirector::initECTMir`.
+- **It is a frame lever only, never a register lever**: 0 keeps from 335 frame-exact functions with sites. The pointer/scalar fork behaves the opposite way (its one keep this batch, `TCardLoad::titleDraw`, was a frame-exact register gain) and is now exhausted on the 8/16-short population (0 of 186, cross-member pairs included).
+- **The reference form is inert**: `const S& s = p->mFoo; return s;` gave 0 keeps from 189 functions / 1,243 trials, despite batch 116's "8 bytes per consumed reference return" ladder. The lever is the bound *pointer*, not the binding of a reference.
+- **Rejected as a fakematch**: `TMapObjBase::throwObjToFrontFromPoint` lands its frame exactly (99.94) only by binding `mRotation` at the `.y` read of a three-component `MsMtxSetRotRPH` call; binding all three or naming a `const TVec3* rotation` local is worse. Left as a TODO at the site.
+- **Headroom**: of 186 resolvable 8/16-short functions, 100 have no member-read site of any kind (accessor-only bodies or work through locals), 14 are unparseable (template/namespaced bodies), 63 pointer/scalar and 31 struct/array sites are both swept. The "private members" blocker from batch 127 does not exist (9,789 of 10,499 fields resolve public). Drivers: `grpdf/raw2.py` (`NESTED=n`, `REF=1`), `acc4.py` (field index with 724 array members); `unlev.py` cannot parse the address form, revert with `git checkout`.
+
+## One-function pass 131 (2026-09-18): SunGlass and CameraWarp closed, signed accessor knob, FPR ranking
+
+- **Read the direction off the slot map, not the frame.** `CPolarSubCamera::warpPosAndAt(f32, s16)` was 4 bytes *over* (sret 0x24 vs 0x20), so no accessor lever could close it; dropping `getCamMode()` for the raw `mMode` at that overload's three sites was the -4 (the sibling `(const Vec&, const Vec&)` overload keeps the accessor and stays exact). Accessor levels are a signed knob; check which way before sweeping.
+- **A single-site binding level can be +16, not +8**: `TSunGlass::startFade` (0x58 -> 0x68) closed by one level over `SMSGetFlagManager()` at the dead `shineCount` read. The frame is the only way to tell +8 from +16 apart.
+- **FPR ranking rule**: the callee-saved FPR each component of a scalar-replaced `TVec3` local gets follows the declaration order of the producing helper's temporaries, f31 to the last-declared. Retail's descending x/y/z ranking means `cross()` declares `_z, _y, _x` (proved on `SMS_EmitSinkInPollutionEffect` with a frame-neutral TU-local clone, 17 -> 13 markers; reversing the stores alone fixes one component). Header item for `JGVec3.hpp`, untested tree-wide.
+- **A 4-byte pool item and an 8-aligned frame are not independent**: with no slack every +4 of pool rounds to +8 of frame, so a 4-byte slot difference at an identical frame proves an ordering difference, not a missing object (`TMarDirector::preEntry`, `linGetSRT`).
+- **Dead-object sizing refinements**: a 4-byte non-trivial struct is +4 per expansion inside a level, +8 of frame in a single-expansion level, +0 in the caller's own body; `u8 pad[4]` or a dead `f32` beside a dead `TVec3` in an inlined callee is +0 (only class objects count; a POD array is dropped entirely). An inlined callee's reserved size can be 16 for a 12-byte object, payable as a pair with a named caller result worth +0 alone (`sqDistance` + `maxDist` in `ctrlMultiPlayerCamera_`, 61 -> 6 markers; not committed, the dead local is not evidence).
+- **A lone params-pointer member level can be worth 0x40** when taken at all ten reads (`ctrlNormalOrTowerCamera_`'s `mCurrentParams`), large enough to look like a missing inlined callee; check for a `bl` and a map symbol first. Retires batch 87's `ctrlTowerCamera_` theory.
+- **An explicit base-class upcast is a real inline level**: `*(J3DTevOrderInfo*)material->getTevOrder(0)` instead of the implicit slice is -4 in `SampleCtrlMaterial`'s ctor (8 over -> 4 over). Three byte-exact spellings exist, each routing one of 24 `getColorChan(i)`/`getTevStage(i)` sites through `getColorBlock()`/`getTevBlock()` directly; not committed as a mixed path at one line looks artificial (open judgement call: it would link the unit).
+- **Classify before levering `bl sub` members**: `NPCNeckCallBack`, `TSpider::bind` and `linGetSRT` are all the per-statement by-value-return pool residue (a real `bl TVec3<f32>::sub`, pool differing by ordering not total). Stop spending lever budget on them. `sunmgr::load` is the fourth `this`-vs-pool-base register swap with no lever; `M3UMtxCalcBlendAux` confirms levels are inert on that ranking.
+- Tooling traps: `decomp-diff.py -d` prints "100.0% match" for a function two markers from exact; trial drivers must rebuild before reading the `.o`.
+
+## Library pass 135 (2026-09-18): five library objects linked
+
+- **A named pointer for a global singleton accessor is a +8 low-region lever**: `JAIBasic* basic = JAIBasic::getInterface(); basic->mX = v;` closed `setParamSoundOutputMode` (JAIGlobalParameter linked) where the raw chain was 8 short and nothing else in the function had a lever.
+- **Naming an intermediate of a two-step address computation is +8 with no instruction change**: `u32 aligned = ALIGN_NEXT((u32)content, align); u32 offset = aligned - (u32)content;` landed `JKRExpHeap::allocFromHead`'s 0x38 frame; an explicit mask local before the loop stops the mask folding into the `and` (~80 operands). Residue: the hoisted `~(align-1)` sits in our prologue (r6) and after the `size` alignment in retail (r4).
+- **Test a shared-header carrier against a linked sibling before believing it**: `J3DNBTScale`'s two ctors each accept a +4 binding and two of them close both `newNBTScale`s exactly, but they break `J3DMaterial::createTexGenBlock` (byte-exact today) and the DOL. A byte-exact caller elsewhere pins an inline's body as hard as a map size. Batch 127's parked `J3DMaterialFactoryNBTScaleIdx` level is the wrong lever (frame right, object 4 high); the natural sibling idiom plus one 8-byte aggregate declared last is what lands both.
+- **A uniform per-site accessor lever makes the landing subset ambiguous**: `JAInter::StreamLib::callBack` needs 32 of 24 x 8 available bytes from `TDSPChannel::getNumber()` sites and three different 5-site subsets give byte-identical objects (JAIGFrameStream linked with one, recorded at the site so a consistency cleanup does not break it).
+- Recorded residues: `JAIBasic::initDriver` (8 short, every callee `void`, nothing to bind); `JDrama::TActor::load` (needs -4 pool and +4 named local at once; each `>>` continuation is 8 pool bytes); `IssueGXCopyDisp` (scratch permutation on a dead `rlwinm.` inside inlined `IssueGXSetCopyFilter`, whose out-of-line copy is exact and pins the body); `TFrmGXSet::perform` (frame solved by a named `GXRenderModeObj` copy, blocker is a leaf-allocator start register); `TDSPChannel::updateAll` (three fabricated +8 header levers land the frame but score lower; not committed); `TRKSuppAccessFile` (r28/r29 swap, no declaration order fixes it); `TPolarCamera::perform` (two live zeros in callee-saved FPRs = more `setTrans` expansions than ours).
+
+## Closure batch 136 (2026-09-18)
+
+- **An accessor retail did not use reserves a dead 12-byte slot per aggregate-returning call, not 8**: `TMapWire::getStartPoint()/getEndPoint()` were `TWireBinder::init`'s whole 24-byte over-frame and `TLiveActor::getPosition()` `bind`'s 16; raw member reads closed `init` and took `bind` to 99.96 (residue: one `a = b - c` temporary at 0x3c vs 0x24, the by-value-return family; ten spellings recorded at the site).
+- **The ladder's modulus**: when the referenced local sits at `0xc + low` and the required low region is not congruent to the baseline modulo 8, no accessor or binding level lands it (nine forms measured on `ctrlNormalDeadDemo_`, all multiples of 8). The odd rung is a binding *around a real `bl`*: `static inline f32 W(Vec* v) { f32 m = MsVECMag2(v); return m; }` is +12. `ctrlNormalDeadDemo_` closed with `mInbetween` fetch (+8) + `&mPosition` binding (+8) + that wrapper (+12) = 28. A dead unwritten 4-byte local reaches the frame with the padding on the wrong side; named `f32`/pointer locals reserve nothing.
+- **Refuted: MWCC does not size the outgoing-parameter area by argument count.** On `MsGetRotFromZaxis`, calls with 3 or 4 `f32`s, 1 pointer + 3 `f32`s, or 8 pointers leave the frame at 0x48; only a ninth pointer adds 8. Batch 77's "8 bytes per f32 argument / retail reserves 32" is retired; that gap is a dead pool object of the right size in the wrong position (a dead 12-byte non-trivial local lands 0x58 from five placements, MsSqrtf temp still 0x10 low). The three historical `char trash[]` paddings were removed in the later pad sweep; the current MathUtil source has no padding, and its five residuals are allocator-only.
+- **Two inlined bindings inside an UNUSED helper pay +8 each in every caller**: `TFileLoadBlock::pushed()` with `startStateTimer(120)` (the real `MapObjBase.hpp` accessor) in place of raw `mStateTimer` stores and an in-class `getEffectPos()` binding `&unk144` at the second `emit` only closed both `touchPlayer` and `receiveMessage` (MapObjOption linked; the earlier "dead 13-16-byte local" reading is superseded). `updateDemoCamera_` stays 99.7: two `origin + offset` temporaries 36 bytes high behind three 12-byte pool objects retail allocates first.
+
+## Sonnet library sweep 138 (2026-09-18)
+
+- **The library 8/16-short population has no lever sites**: of 32 frame-short JSystem functions (24 unlinked units), 29 show zero opcode differences and no accessor chain, singleton call or address computation to bind; the three lever attempts were inert. The two gains were statement order, not levers: `JAIBasic::checkEntriedSeq` sets `mLoadingFlag = true` *before* `Vload::loadFileAsync` (98.79 -> 99.93), and `TTrack::writeRegParam` case 2 names the u16-truncated value before the second `writeRegDirect` (99.36 -> 99.98). Both keep a pure-frame residue.
+- **Tooling trap**: `objdiff-cli diff` defaults to `functionRelocDiffs=data_value` (what `decomp-diff.py` and the earlier sweep drivers use) while `report generate` defaults to `none`; they disagree by tenths of a percent on sda21-relocated functions and produce false regressions in a driver that compares against `report.json`. Pin `functionRelocDiffs=none` for live comparisons against the report (`grpdo/lev.py`).
+
+## Header round 22 (2026-09-18)
+
+- **A carrier candidate is disproved by its exact callers, not by frame arithmetic**: a dead 12-byte local in `TMapObjBase::setEventId` costs six 100% functions (`TCoinBlue::loadBeforeInit`, three `*HideObj::load`, `TShellCup::loadAfter`, `evSetEventID`) for one 0.12 gain; rejected. `TShine::loadBeforeInit`'s layout (retail `name` 0x24 / `eventId` 0x20 / `v` 0x18: 12 bytes low region plus a dead 4-byte slot at 0x1c) is recorded at the site.
+- **The binding ladder is strictly additive, so the lever set is over-determined**: if no subset of the measured steps hits the target frame, the lever in hand is the wrong one. `TSelectDir::direct()`: 0x50 baseline, gamepad binding at both sites 0x70, fader+menu on top 0xe8; only fader+menu+stage lands retail's 0xd0, so retail reads the pad raw there. `getGamePad()` accepted as a de-fabrication only (dtor exact).
+- **When the residue is the total size of the inline-temporary pool, every equal-cost expansion is an interchangeable knob and none is evidence**: `SampleCtrlMaterial`'s ctor is 4 over and each of the 24 `getColorChan(i)`/`getTevStage(i)` forwarder expansions contributes 4, so any single one routed through its block matches. Not linked; `unk38` in an initialiser list 98.0.
+- `TAfterEffect`'s `TVec3` member at 0x5C accepted (`TModelGate::screenBlur` 83.74 -> 87.07); the fifth stack vector (`blurDir.set(viewDir)`) rejected at 84.94; remaining 0x30 = 12 vector + 8 second `stfd` slot + 28 unexplained. `isInBounds` carrier and the level above `TVec3(f,f,f)` stay rejected (round 21 measurements).
+
+## Library closure pass II, batch 140 (2026-09-18)
+
+- **Naming an intermediate is a +8 frame lever with zero instruction change** (third confirmation, library side): `f32 max = 1.0f; f32 min = 0.0f;` clamp bounds closed `HardStream::volFloatToU8`; `f32 cos = v.y; f32 sin = v.z;` closed `JPADraw::loadYBBMtx`; binding a `new` result into a local before `append` closed `JALSystem::appendGrpMember` (retail double-checks `found` only in the last four arms). Try it before calling a frame residue unnameable.
+- **Declaration order is inert for callee-saved allocation**, not only for inlining: three hoists in `createEmitterBase` and a shared `int i` in the JPAEmitterManager ctor all +0 or worse.
+- **An uninitialised class local of an inlined callee is +sizeof of pure low region only if the class has no destructor**; a ctor+dtor class adds 8 more above the caller's named block (measured at 8/16/20/24 bytes on `fileOpen`; `startFirst`/`startSecond` need a 24-byte ctor-only class the map lacks).
+- Recorded residues: `JPADraw::initialize` (16 bytes of temp pool, unlocalisable), JPAEmitterManager (two register rotations at exact frames), `expf` (pure FPR permutation: retail keeps long-lived values in f6-f9), `powf` (frame 0x18 too large + scheduling), `J3DDeformer::deform` (two 4-byte gaps + `rlwinm` pair order; the first `Vec deform` is confirmed), `initMtxIndexArray` (one `add` operand order), JAIGFrameSe (callee-saved rotation over twelve up-front locals; `sendPlayingSeCommand` needs -8 pool and +6 named). `JALSystem::append` needs 0x68 = 13 x 8 of temp pool against twelve in-class `JALSeModXxx` ctors in a shared header (parked). objdiff prints `__log2_F@ha` and `...rodata.0@ha` for the same address.
+
+## Closure batch 139 (2026-09-18): MapObjGrass and PollutionAction linked
+
+- **Dead-local carriers in UNUSED callees are legal zero-code levers and their sizes are fixed**: an uninitialised `JGeometry::SMatrix34C<f32>` in `TMapObjGrassManager::draw()` is +48 (`perform` closed; `initDrawFar()` is indistinguishable as the host); the first uninitialised `TVec3` is +16 and each further one +8 (`TPollutionActionManager::action` +40 = one in `electric()`, two in `spread()`). The split across callees decides where the live slots land.
+- **Bindings pair super-additively**: `mPollutionMap` and `SMS_GetMarioPos().y` are +8 each alone and +24 as a pair (`getPollutedPosNear` closed); `mWidth` +16 and `j3dSys.getViewMtx()` +8 closed `initDrawNear`. For `BossHanachanEffect::emitParticle_` any single binding is +8 but n in combination cost 24 + 8n, so exactly five reach 0xc8 (not committed: frame-exact only drops 103 -> 90 markers, the `this`-vs-pool-base rotation remains).
+- **No 4-byte lever exists** (refuted again): global forks returning directly, a `one()` constant helper and a director-state accessor are all +0 or +8. MapWarp's `init` residue (+4 from the `Vec&` base binding retail needs for eager address materialisation) is therefore open.
+- **Stack arrays' offsets read off their declaration order** (named locals descend from the top, first declared highest; `TMapWarp::init`, 93.8 -> 97.2 with the frame exact). `readU32()` gives each expansion its own low temp; one named `u32` + `operator>>` shares one slot placed above the named block. Each chained `>>` continuation is 8 low bytes and one loop-hoisted `addi rN, rStream, 0`; groupings "3,3"/"4,2"/"5,1" are codegen-identical, only the count is evidence (`loadWarpPointPos`: six).
+- **A flat pointer walk with `++slot` in the `for`'s third clause is the only spelling giving an unroll-by-8 `bdnz` with ctr = 3** (`TNpcParts` ctor 84.8 -> 94.2, 24 slots).
+- Parked shared-header need: `MActor::initSimpleMotionBlend` wants a `frame = -1` defaulted wrapper resolving to `TBaseNPC::mPtrSaveNormal->mMotionBlendFrame` (retail keeps a dead `li r4, -1; cmpwi r4, -1`); a TU-local `static inline` does not reproduce it, since MWCC folds the default through one level, so a second inlined level is involved. riccohook `init` +8 sits *between* two sub-expansions of an inlined JGadget insert (every binding lever puts it at the bottom instead); `emitCamShake_`'s residue is MsSqrtf's `volatile float y` at 0x44 vs 0x40.
+## Research batch 142 (2026-09-18): the `a = b - c` slot is an allocation-*order* difference, and retail's geometry needs dead bindings
+
+Model: `TCoasterEnemy::bind` rebuilt in a scratch TU (private `JGVec3.hpp`, game flags, a `Model` with `mPosition` 0x10 / `mLinearVelocity` 0x94 / `mVelocity` 0xac), which reproduces our object byte for byte.
+Geometry is written **(below, above)** = pool bytes under and over the live `bl sub` temp; retail is **(4, 12)** and the stock header **(16, 0)**, both frame 0x40 with the named local at 0x28 and 55 instructions.
+
+- **Retail's instruction stream holds one 12-byte temp and twelve copy instructions — exactly ours — so batch 119's "two 12-byte slots per statement, from a by-value return" is wrong as a *source* hypothesis.**
+  Both builds reserve the same 28 pool bytes (12 temp + 16 dead); retail puts 4 of the dead bytes below the temp and 12 above, we put all 16 below.
+  The residue is an allocation **order** difference inside one statement, not a missing slot.
+  Every by-value return still costs +6 (61 against 55), reconfirmed on three spellings.
+- **The `below` ladder is finer than batch 116's "8 per reference return": the callee's return type prices it — reference 8, pointer 4, void 0 — and the prices are additive over the levels inside `operator-`.**
+  So `TVec3* operator-=` gives below 12 and `void` gives 8; the by-value-parameter family (`operator-(TVec3 fst, const TVec3&)`) has a floor of 8 because `operator-`'s own reference return is always 8.
+- **below 4 needs a named result *and* both inner steps void-returning**, and it is reachable with `operator-=` and `operator=` left alone:
+  `friend const TVec3& operator-(const TVec3& fst, const TVec3& snd) { TVec3 r; *(Vec*)&r = *(const Vec*)&fst; r.subV(snd); return r; }` plus `void subV(const TVec3& o) { sub(o); }` gives (4, 4) at 55 instructions.
+  A raw `Vec` assignment is the only free copy: `r = fst` costs 8, `r.set(fst)` and `r.set<f32>(fst)` cost 4 (the derived-to-base conversion), `TVec3 r(fst)` costs 4.
+- **The `above` region is fed only by a binding declared *after* the subtraction and never used, at 4 bytes each.**
+  Two of them land retail exactly — (4, 12), frame 0x40, temp 0x10, named 0x28, 55 instructions — and `const TVec3*`, `const TVec3&`, `Vec*`, `const f32*` and a pointer to `snd` are interchangeable.
+  Any binding that is *consumed* (returned through, or used as the `sub` receiver) costs 4 **below** as well and misses.
+  A dead trivial POD (`u8[4..16]`, `f64`, `Vec`) is worth 0 here; a dead `TVec3` after the subtraction is (+4, +12), before it (+12, +0).
+- **The prize is measured and real, and it is still not committable.**
+  The exact-geometry shape is **+9 functions to 100%** (`TEnemyAttachment::bind`, `TChuuHana::bind` and `attackToMario`, `TAmiNoko::bind`, `TKoopaJrSubmarine::bind`, `TCoasterEnemy::bind`, `TLimitKoopa::bind`, `TLeanMirror::loadAfter`, `TLiveActor::bind`), 24 improved against 17 regressed, matched_code 53.57 -> 53.67, total fuzzy flat at 97.40.
+  Reverted: the two bindings are dead padding, and routing `operator-` past `operator-=` drops `__ami__` (weak 0x34, Tongue.cpp) from 100% to MISSING, with `TMario::isTakeSituation` and `toroccoEffect` 100 -> 99.8 and `TSphereLink::moveHead` 85.7 -> 82.2.
+  Read it as the size of the bounty, not as a lever.
+- **Also refuted here, all slot-identical to the stock (16, 0) at 55 instructions.**
+  The **declaration order** of `sub`, `operator-=`, `operator=`, the copy constructor and `operator-` inside the class body (eight permutations, completely inert).
+  The whole caller side: the site as `setLinearVelocity(a - b)`, `m = a - b`, `m.set(a - b)` or `TVec3 d = a - b`, a setter body of `m.set(v)`, a setter taking `TVec3` by value, a setter with two levels, and a setter calling `operator=` explicitly — none of it moves the temp.
+  `operator=` returning `const TVec3&`, `TVec3*` or `void`, or with a memberwise or `set`-forwarding body; `sub` declared out of class with `inline`; `operator-` returning `TVec3&`; a member `operator-`; `return *fst.subP(snd)`.
+- Census notes: retail's `below` is 4 only for the nine single-statement minimal-frame functions, and over all 130 sites it takes 57 distinct values from 4 to 760, because retail allocates per statement in source order — so "temp at the floor + 4" is not a universal target, the *intra-statement* order is.
+  `__mi__` appears nowhere in the map (0 hits), so `operator-` is inline at all 130 sites and its shape cannot be read off a symbol size.
+
+## Research batch 144 (2026-09-18): the callee-saved allocation order, and `sunmgr::load` closed
+
+The `this`-vs-pool-base swap was a known-open register class (pass 131).
+It is now explained, and one of its four instances is closed at zero frame cost.
+
+**The ranking rule, from a scratch TU compiled with the game flags** (drivers `grpds/rdrv.py`, `t6`-`t14`; `run(int n, C* q)` with three string literals to force a `.rodata` pool base, one `bl` per use so every value is live across a call).
+Callee-saved GPRs are handed out **r31 downward in reverse order of value introduction**: the compiler's pool/base-address temp first, then locals in reverse declaration order, then parameters in reverse parameter order, with `this` last.
+
+| variant | ranking, r31 first |
+| --- | --- |
+| pool + `q` + `n` + `this`, seven permutations of first-use order | pool > q > n > this |
+| same, use counts 5/1/1/3 and 1/1/1/9 | pool > q > n > this (unchanged) |
+| pool materialised only at the end of the body | pool > this (the `lis` sinks, the rank does not) |
+| two literals only | no pool base: each literal gets its own `lis`/`addi` |
+| a loop added around the uses | pool > i > n > this |
+| two pointer locals from calls, either declaration order | b > a > this (later-declared higher) |
+| reference parameter driven by an inlined `operator>>` chain | pool > stream > this |
+| three disjoint ranges packed into one register | chain > pool > this |
+
+**First-use order, use counts, loop depth and range length are all inert** (that is the one thing every variant agrees on), so a swap is never fixed by moving a use, shortening a range or hoisting a materialisation — which is why every level and binding tried on these sites was inert.
+
+**What *does* move the pool temp's position in that list is how many named scalar locals the frame holds.**
+A stub-level mimic of `TSunMgr::load` (same 93 instructions and same frame in every variant) ranks pool > this > stream with five or six named scalars and **this > pool > stream with seven**, and putting four of them into a `u32 v[4]` array puts it back to pool-first.
+Inert in the mimic: naming or not naming the search result, declaring the temporaries before the input locals, an extra dead named local at either end, computing the pair through an inlined helper, and storing the pair through an inlined two-argument setter.
+
+- **`TSunMgr::load` closed (99.12 -> 100, unit 77.69 -> 100 matched_code)**: the four colour words are read into `u32 color[4]`, not four named scalars, and the two colour temporaries stay named — they are what hoists all four loads above the first store (dropping them fixes the registers but sinks the stores and moves the named block 4 bytes, 14 markers). The array is frame-neutral, so the low-region decomposition recorded at the site still holds. The batch-32 "array plus a four-read loop" rejection stands; it is the array *without* the loop that lands.
+- **`M3UMtxCalcBlendAux` stays open and is a different animal**: retail's permutation is a one-step rotation of r25-r30 that puts the `&j3dSys + 0x38` address temp on top and ours puts it at the bottom, with relative order otherwise preserved. Eleven spellings measured, all inert or worse than the stock 55 markers: dropping `pQuat`, dropping the `Vec& currentS` reference, the pointer walk as an indexed loop, a named `J3DModel*` at the first `getModel()`, named blended-scale components, a named `u16` joint index, and `bVar5` at all seven declaration positions (55 at its current position 1, then 64, 64, 65, 67, 69, and 92 at position 0). Declaration order is therefore a real but coarse knob on this ranking, contrary to batch 140's "inert" reading — it moves the rotation without ever landing it.
+- **`sunmgr` is 100% matched_code and still not linkable**: adding `Camera/sunmgr.cpp` to `config/GMSE01/objects.json` gives a DOL of `934a10aa`, so the unit's remaining difference is section content, not instructions (`validate-symbol-order` passes; the `.ctors` gap symbols are the suspects). `configure.py`'s `Matching` flag is inert for GMSE01 — the linked set is that json — and a bare `python3 configure.py` regenerates `build.ninja` for GMSJ01 and breaks the build; always pass `--version GMSE01`.
+- Not retried here: `TBossHanachanEffect::emitParticle_` (frame 24 + 8n short, so not the frame-exact case) and `TDSPChannel::updateAll`; neither has a group of named scalars to group into an aggregate.
+
+## Closure batch 143 (2026-09-18)
+
+- **A binding written into the unit's own accessor is +4 per expansion, not +8**, and materialises the callee-saved copy retail keeps: `Koga::ToolData* d = unk14; return d;` in `TMovieRumble::getToolData()` closed `perform` and `checkRumbleOff` (with a TU-local level over `TTHPRender::getFrameNumber()` for the +8 both frames needed). Rejected: the local inside the `if` (-1.7), the guard re-reading `getToolData()` (+12), `const`/reference variants, `&buf[0]`, dead `u8[4]`. Corollary confirmed twice: a TU-local level over a *shared* class's getter is +8 per expansion and can be the whole residue (`MovieFrameNumber`, `JAIActorTrans` in MAnmSound: 0x88 -> 0x90).
+- MAnmSound real bug: the gate divisor is `(entry.unk10 >> 24) + 1`, not `mLoopCount >> 24`; naming the masked `flags` local restores the entry reload (NPC anim sound 81.0 -> 84.3). Residue: `std::sqrtf` inlined where retail calls it (weak-plus-`bl` class).
+- Recorded: `MSHandle::calcPan`'s 8 bytes are tied to the third callee-saved FPR, not a statement (nine spellings inert); `Menu`'s two `perform`s are the JUTColor `x = c.get()` temp stride (4 retail / 8 ours), its ctor reloads `this` from the 8(r1) spill; `MarDirectorSetup2::setup2` writes `graphics.unk0` (268 bytes of inline-temp pool missing, `MSStage::init` args right to left); MSModBgm `modBgm` shares one `li r31, 0` between the null test and the `stb`; MarioCap ctor reloads `unk30` through `this + idx*4`.
+## Targeted batch 145 (2026-09-18): the ranking rule's declaration-order knob is class-bounded
+
+Batch 144's rule holds, but its "declaration order is a real but coarse knob" reading (from `M3UMtxCalcBlendAux`) is narrower than it looked.
+**Declaration order moves the callee-saved ranking only among function-scope named locals that live in callee-saved registers.
+It is inert on the rank of `this`, of parameters, of the compiler's pool/base and constant temps, and of inner-block locals; block scope is inert everywhere.**
+That is the whole explanation of why `bVar5` moves `M3UMtxCalcBlendAux`'s rotation (a function-scope local competing with other function-scope locals) and why none of the four sites below move at all: in each of them the two values that must swap belong to *different* classes.
+
+- **`TRKSuppAccessFile` is the one site where order is a knob, and it is now exhausted.** All 120 orders of its five register-held function-scope locals (`done`, `exit`, `error`, `replyBuffer`, `length`; the other five declarations are address-taken and stack-homed) were built and measured. The present order is the unique minimum at 12 differing operands; every other order gives 19, 20, 23, 27 or 28. Retail's ranking is `length > replyBuffer > done > exit > error`, ours `length > done > replyBuffer > exit > error`, and no permutation reaches retail's. Do not re-sweep this function's declarations.
+- **`TBossHanachanEffect::emitParticle_`, `JAIBasic::checkNextFrameSe` and `TNpcParts::partsPerform` are fully inert to both knobs.** emitParticle_: a shared `int i` hoisted to function scope, `int i` plus `int foot` hoisted, a block-scoped `int i` for the first two loops, and `position` declared above `waterHeight` — all exactly 103 markers. checkNextFrameSe: 25 orders of its twelve up-front locals (reverse, all eleven rotations, twelve random) and eight relocations of subsets of them into the `for (i...)` body — all exactly 129. partsPerform: `u16 j` hoisted to four positions among `starglowMatIdx`/`matNum` and `Mtx44 mtx` declared ahead of `mactor` — all exactly 31.
+- **`checkNextFrameSe` is the pool-vs-local boundary with a four-wide pool block, not a permutation.** Retail puts all four of its base/constant temps on top (r31 `&candidates`, r30 the 0x4330 int-to-float magic, r29 `&JAIConst::dummyZeroVec`, r28 `0x7fffffff`) and `this` at r24 *below* both parameters — batch 144's rule verbatim. Ours puts the same four at the bottom (r23-r20) with `this` at r28. The pool block and the local block trade places wholesale, so the only known mover is still the named-scalar count, and it cannot be exercised: all twelve locals are load-bearing (`k` is read after its loop, `j`/`l` are assigned their bounds as early exits).
+- **`partsPerform` shows a second boundary: inner-block locals.** Retail ranks them *below* `this` (r30 `data`, r28 `i`, r27 `it`, then r26 `param_2`, r25 `param_1`, r24 `this`, then r23 `starglowMatIdx`, r22 `j`, r21 `matNum`), which is the rule's order with inner-block locals appended after `this`. Ours lifts `matNum` and `j` above the parameters (r26/r25) and drops `starglowMatIdx` to r21. The +40 frame gap (0xf8 vs 0xd0) is separate: 24 bytes below `Mtx44 mtx` and 16 above it.
+- **`TDSPChannel::updateAll`'s register instance is closed and the recorded note is stale.** `delta` is r29 on both sides now; the function is 17 markers, every one an r1 displacement, no opcode, insert or delete. All that is left is the 24-byte low-region gap, whose three measured levers are header-side (batch 74/136), so it stays parked.
+
+## Header round 23 (2026-09-18): JASDSPChannel linked
+
+- **Accessor bindings are +8 only on u16 member reads**; u8/bool accessors (`getStatus`, `getPriority`, `DSPBuffer::isFinish`) and a u16 accessor over another class's member are +0. `TDSPChannel::updateAll`: two u16 bindings in `JASDSPChannel.hpp` (0x38 -> 0x48) plus `decCBInterval()` spelled `setCBInterval(getCBInterval() - 1)`, a getter/setter composition codegen-identical to `mX--` that buys the third expansion of the getter when the class saturates at two. 100%, linked (478). A frame lever that introduces a callee-saved register is the wrong lever (`getHandle(u32)` with a binding landed 0x50 but pushed `delta` r29 -> r28).
+- **Promoting a TU-local level into a new reference-returning accessor keeps its +8; promoting it into a binding inside an existing accessor drops to +4 and hits every other expander** (`JAIActor::getTranslation()` promoted, neutral; `TTHPRender::getFrameNumber()` rejected: `checkRumbleOff` 100 -> 99.97 and `TMovieSubTitle::perform` breaks).
+- `JALSystem::append` (0x68 pool gap): `TFlagManager::get()` binding +8/expansion breaks three functions; a named pointer per arm +4; 0x68 is not divisible by twelve so part is not per-arm; a dead 8-byte local in `JALSeModData<T>`'s ctor is +0. `MActor::initSimpleMotionBlend` defaulted-wrapper hypothesis refuted (the `20` site has `li r4, 0x14` with no compare, so the -1 comes from an inlined accessor returning the constant, not a default argument).
+
+## Library re-pass 150 (2026-09-18): three links from the new rules
+
+- **A plain u16 accessor (`return mX;`) is +4; the +8 needs the binding form (`u16 x = mX; return x;`)**, both measured on `getMaterialID`. Two binding expansions of the same u16 read cost +12, not +16 (CSE merges part); mixing a binding accessor and a raw read on one member keeps the offsets but breaks CSE (one extra reload). The +8 binding survives being parked as a TU-local `static inline` wrapping the class's own accessor by pointer; in the header it drops two linked `J3DModelLoader_v26` functions, so it stays parked. `J3DMaterialFactory::newNBTScale` and `_v21` closed this way (plus map-exact `getMaterialInitData` bodies); both linked.
+- **The inline-temp price rule closes pool-high residues**: `TNameRefGen::search<T>`'s pointer return was one 4-byte level too many in `JDrama::TActor::load`; `getInstance()->getRootNameRef()->search(str)` directly gives -4 and 100% (JDRActor linked).
+- Still open with notes: `JAIBasic::initDriver` (needs a dead 8-byte class local in `initAudioThread`), `IssueGXCopyDisp` (scratch permutation), `TFrmGXSet::perform` (allocator start), `allocFromHead` (scheduling; a hoisted `alignMask` does not move the `nor`), `TPolarCamera::perform` (66%: retail holds 0.0f in f31 and f30, 1.0f in f29, `-unk44` in f28; needs a `TPosition3f` setup rewrite with named scalars, its own batch).
+
+## Closure batch 151 (2026-09-18)
+
+- **Try removing an existing lever before adding one**: batch 127's TU-local binding over `mRevivalTexStampNum` overshot by a step once the pool changed; a plain `getRevivalTexStampNum()` in the unit's own header closed `drawRevivalTexStamp`. On a u16 read a binding inside the class's own accessor and the TU-local one give the same +8.
+- **A reference-returning accessor costs frame per expansion, and mixing by-reference and by-value reads at one site is a lever**: `TParamT<T>::get()` fabricated as `const T&`; `TCameraShake::startShake` six reads = 0x60, three (the f32 amplitudes) = 0x50 = retail, zero = 0x48, so the three s16 velocities are by-value reads. Header item: for an integer parameter `get()` returned `T` by value. `startShake`/`keepShake` frame-exact, one FPR coalesce left. Wrapping a by-value read in a TU-local getter is not neutral (99.9 -> 99.7): read `.value` directly.
+- **"Pointer return = +4" is not universal**: `ECTSearch` stacked twice is +8 per level in `setupPerformList_console` (4 low; overshoots).
+- Recorded: `MSSetSoundTL` ctor instruction-exact with 104 = 13 x 8 bytes of dead low region (one 8-byte dead local per `JADPrm` ctor expansion, carrier in shared JSystem audio headers); enemymanager `copyAnmMtx` r27/r28 swap unreachable by declaration order (and an UNUSED `TPosition3f::TPosition3()` in the map is a lead), `createEnemies` is the JGadget grouping class, `performShared` the JUTColor stride; emario `perform` is the batch-142 order class (a function-scope `s32 i` is byte-identical: block scope inert), `init` needs a 40-byte shared carrier; boid `calcGoalForce` 4 over (`getPoint()`'s reference return is worth 8).
+
+## Closure batch 149 (2026-09-18)
+
+- **An accessor's inline temp is +4 of low region per expansion; bisect sites first**: several individually +0 sites sum (six `getCollision(i)` sites gave +16, plus `getCollision(i)->getPosition().x/.z` +16) and only some are codegen-neutral; closed `execNpcObjCollision_`. `setVariableDamageRadius_` closed by dropping a one-use local and inlining `SMSGetNpcInitData(...)` into the product, which alone flips retail's `fmuls` operand order.
+- **A leaf callee that has a matching out-of-line copy can still carry dead locals** (`getTipPoints`: its own copy allocates no frame for them), so "carrier must have no out-of-line copy" is too strong. **Dead locals price as floor(total/8) x 8**, not per-local rounding.
+- **Inline temps allocate statement by statement in reverse statement order and by level within a statement**; a named intermediate adds a third copy per step, a pure chain elides one. `TWarpInCallBack::execute` 38 -> 74 with five named scalars (f31-f27 in declaration order), `factor += 1.0f` as its own statement (stops the `fmadds`) and a `set(x, y, z)` tail. Residue: one extra 12-byte copy per scale step; header item: a member `TVec3 operator*(f32) const` instead of the by-value friend has exactly retail's six temp slots there.
+- walker `calcFarthestVertex` reaches 100 only via a dead `TVec3` plus two asymmetric `getPoint1()` expansions (rejected as an accounting coincidence). MarDirectorLoadResource (+64/+24) and NpcInitPrg (+112, `TBaseNPC::init` wants a dead non-trivial local in an inlined NpcBase ctor) are pure dead-low-region gaps with every callee a real `bl`. `TTakeActor(const char*)` is an in-class inline in TakeActor.hpp (cannot also be defined in the .cpp); MarioParticle's 8 UNUSED stubs need declarations in shared Mario.hpp.
+
+## Game re-pass 152 (2026-09-18): MapArea linked
+
+- **Dead-carrier price is 12 bytes per `TVec3` per expansion**, not "first 16, each further 8": MapArea's 288 dead pool bytes are three reserved `TVec3` vertex locals in each of the UNUSED `pointIsInPolygon` and `checkLinePolygonCollision` (12 x 3 x 4 expansions x 2); the apparent 16 at single-expansion sites is frame alignment. Both UNUSED sizes stay exact; MapArea linked. A carrier is disproved when its own out-of-line copy breaks while the caller's frame does not move (`checkLinesCollision`): a one-build test.
+- **Class-object locals of an inlined callee are allocated after the scalar temps** regardless of where the callee expands (CameraMultiPlayer: `sqDistance`'s dead vector, now legal, lands above the later MsSqrtf slot; 61 -> 5 markers, frame exact).
+- **The +4 binding form is u16-specific**: a binding in a new accessor over a pointer member is +8 (MovieSubtitle's `getScreen()`), so no 4-byte lever exists yet (MovieSubtitle needs exactly 4; `makeBmgName` compiles to 84 vs map 0x4c). MarDirectorPreEntry needs a paired +4 below / -4 above the TViewport statement. lensglow requires +96 below `avg` and -8 above, carrier in shared `SunModel.hpp`. BathtubBinder's `dir` is a `TVec3` (44-byte named region) whose z/x retail ranks in f31/f30 above the products. THPAudioDecode/MapObjTree/M3UJoint: ranking knob exhausted.
+
+## Header round 25 (2026-09-18)
+
+- **A ctor that is only an initialiser list holds no dead local** (generalising round 24's JADPrm test from map size to source shape), and a byte-exact caller elsewhere excludes a shared ctor as a carrier outright: `TBaseNPC::init`'s 112 bytes would need seven +0x10 carriers and every candidate (`TNpcInbetween`, `TNpcSink`, `TNpcUnk22CStruct`, `TNpcUnk230Struct`, `TMultiMtxEffect`) is excluded.
+- **MWCC 1.2.5 does no NRVO**: a by-value member `operator*(f32)` is inert (the return temp survives, nine slots stay); only a reference return collapses a per-step temp, and that shape (`friend const TVec3&` / member `const TVec3&`, the header's `operator+`/`-` idiom) gives retail's six slots in `TWarpInCallBack::execute` (73.9 -> 92.5) and ~12 other gains, but drops four weak out-of-line copies to MISSING (`div`, `dot`, `TUtil<f>::sqrt` in boid; `__ami__` in Tongue) and loses ~13 functions: tree-wide -0.02, rejected with the trial table beside the operator.
+- **An UNUSED size equal to a sibling's body plus ~4 instructions proves a per-call-site inline split** (`emitSweatSometimes(s16)` = `emitSweat` + a 4-instruction guard, 0x30 vs 0xe4), which is what a `#pragma dont_inline` in the same TU stands in for; a one-argument forwarder's UNUSED size says which parameter passes through (pass-through in r4 = one `li`, a swap = `mr` + `li`; `emitFootPrint` 0x24 vs 0x28). MarioParticle's eight UNUSED bodies defined (five size-exact), symbol order 8 MISSING -> PASS.
+- lensflare's three-deep `set(const Vec&)` chain is already present (two of three `bl set` and both `JMAS{Cos,Sin}` reproduce); the third is lost to the nine-scalar lerp whose products fp_contract fuses, so retail built the two difference vectors as objects (0x90 frame gap, four extra callee-saved FPRs).
+
+## Research batch 159 (2026-09-18): `operator*`'s return type is a **consumption** split, not an overload split
+
+Round 25 left the `TVec3<f32> operator*(f32)` return type open because one header shape gained ~12 functions and lost ~13.
+Both populations are now characterised from the source and from the retail stream, and the discriminator is not overload resolution.
+
+| site | source shape | retail objects | reference return |
+| --- | --- | --- | --- |
+| `TEffectColumWater::generate` | `mScaling = param_2 * 1.3f` | 1 (0x18 copied straight into `mScaling`) | 91.95 -> 99.79 |
+| `THamuKuri::forceRoll` | `local_20 = local_20 * k` | 1 | 90.23 -> 99.66 |
+| `TRope::moveHead` | `mPoints[i].unk18 = v * scale` | 1 | 93.60 -> 99.80 |
+| `TIgaiga::setMeltAnm` | `scale = mScaling * 0.5f` | 1 | 92.14 -> 96.06 |
+| `SMS_MakeJointsToArc` | `TVec3 a = dir * t` (copy-init) | 1 | 84.56 -> 88.83 |
+| `TWarpInCallBack::execute` | `TVec3 v1 = *vel * k`, three steps | 2/step: scale target + copy-out | 73.92 -> 92.47 |
+| `TYoshiTongue::emit` | `mInitialVelocity = dir * mInitialSpeed` | 1 | 93.64 -> 93.95 |
+| `TTamaNoko::landEffect` | `setGlobalScale(mScaling * 0.8f)`, four sites | 2 (0x40 copied to 0x74, 0x74 read) | 94.64 -> 82.97 |
+| `TNameIndParCallback::execute` | `setGlobalScale(local_7c * 0.5f)` | 2 | 82.05 -> 79.55 |
+| `TConeBeam::calcVertices` | `local_11c += local_140 * c` | 2 | 95.67 -> 88.48 |
+| `TMapObjPuncher::touchPlayer` | `dest += dir * 100.0f` | 2 | 99.72 -> 92.86 |
+| `TMario::keepDistance` | `mPosition += diff * step` | 2 | 93.96 -> 91.20 |
+| `TBoidLeader::calcForces` / `calcBoids` | `force += v * k`, `+= d / d2 * radius` | 2 | 99.55 -> 92.95 / 95.53 -> 85.50 |
+| `TWalker::bind`, `TMario::gunExec` | `pos + dir * k` | 2 | 92.34 -> 86.01, 94.54 -> 92.30 |
+
+Gains are exactly the sites that **copy the product into a destination object** (`x = a * k`, `TVec3 v = a * k`); losses are exactly the sites that **consume it by reference** — a function argument, or the right operand of `+=` or `+`.
+`div`, `dot` and `TUtil<f>::sqrt` (boid), `__ct__` (MarioCollision) and `__ami__` (Tongue) dropping to MISSING, plus `damageExec` -2.6 and the four wire* functions, are secondary: those functions hold no product of their own.
+
+- **At a destination-copy site retail materialises one object, at a consuming site two, so no single overload reproduces both.**
+  `generate` copies `operator*`'s object straight into `mScaling` with nothing in between; `landEffect` copies 0x40 into 0x74 and reads 0x74 for the inlined `setGlobalScale`.
+  A reference return gives one object everywhere and a by-value return two, and a member/friend by-value form is inert (round 25), so the return type is decided per *consumption*, not per operand type.
+- **Two candidate splits are refuted by the map without a build.**
+  `__as__Q29JGeometry8TVec3<f>FRCQ29JGeometry8TVec3<f>` and `__ct__Q29JGeometry8TVec3<f>FRCQ29JGeometry8TVec3<f>` both exist, so `operator=` and the copy constructor take `const TVec3&`: a by-value `operator=` (whose parameter could double as the return temp) and an implicit copy constructor are both impossible.
+  `__ml__` has 0 hits in the map, so no `operator*` signature can be read off a symbol size.
+- **Direct-initialisation is inert**: `TVec3 v1(*vel * k)` is byte-identical to `TVec3 v1 = *vel * k` (73.92, identical markers), so MWCC does not elide the return temp into the destination — the caller-side counterpart of round 25's no-NRVO result.
+- **The parameter form is an orthogonal knob**: `friend const TVec3& operator*(const TVec3&, f32)` with an internal local reproduces the by-value-parameter reference return to within 0.1 on every member of both populations.
+  It also warns `function result is a pointer/reference to an automatic variable` in all 377 TUs, which the `operator+`/`operator-` form does not — a small argument that retail's reference-returning operators return their *parameter*.
+- **The only legal C++98 selector found is operand order**: by-value `operator*(TVec3, f32)` for `v * k` beside `const TVec3& operator*(f32, TVec3)` for `k * v` (equivalently a member/friend pair).
+  It reproduces both populations mechanically, but which order a site spells is unfalsifiable from the asm, so choosing it per site is picking codegen rather than following evidence. Not applied.
+- **Two of the regressions are our call sites, not the return type.**
+  `TTelesa::behaveToWater`'s retail stream copies `operator*`'s object into `local_20` and only then into `mVelocity`, i.e. retail wrote `local_20 = local_20 * fVar1; mVelocity = local_20;` — exactly its sibling `THamuKuri::forceRoll`; with the reference return that spelling is 99.9% with **zero** structural markers.
+  `TMapObjPuncher::touchPlayer` recovers to 99.65 with `TVec3 ofs = dir * 100.0f; dest += ofs;`, but the named local lands in the high region where retail's second object is a pool temp (+0x10 frame): the consuming population wants a *temporary*, and only a by-value return makes one.
+- **Near-miss worth re-trying: the parameter form alone.**
+  `friend TVec3 operator*(const TVec3& fst, f32 snd) { TVec3 r(fst); r *= snd; return r; }` keeps the by-value return, so neither population moves, and is +12 improvements — `TBoidLeader::calcBoids` 95.53 -> 98.79, `TMario::damageExec` 95.71 -> 97.83, `wireSWait` 93.09 -> 97.00, `wireHanging` +1.7, `wireWait` +1.1, `wireRolling` +0.6 — against six tenth-of-a-point regressions (`generate`, `landEffect`, `touchPlayer`, `emit`, `calcForces`) and `__ami__` MISSING, total fuzzy flat at 97.46 and -1 function.
+  Reverted for the `__ami__` loss only.
+  Spelling the same body `TVec3 r; r = fst; r *= snd;` is worse: boid's gain survives but `__ct__` **and** `__amu__` go MISSING in MarioCollision and the four wire* gains become losses.
+
+## Library closure III, batch 155 (2026-09-18)
+
+- **A one-argument inlined helper level costs exactly 8 bytes of frame**: writing `bankOscToOfs(i)`'s body out at both sites (`unk38[i]->isOsc() ? getOffset() : 1.0f`) landed `overwriteOsc` 0x38 and `playLogicalChannel` 0x50 exactly (JASChannel 6 -> 4). Return-type pricing confirmed on the same unit: a void helper shared by two tails is +0, a value binder +8, a reference/pointer receiver binder on the same member +16; nesting makes a binder per-site (one level over `unkB4[i]` is +8 saturating for two sites, two levels +8 each). Two levers flip the ranking (every binder pair that hit both target frames moved `channel` r31 -> r30), so a missing 16 must come from one construct.
+- **An UNUSED helper can be the missing half of two siblings**: calling the UNUSED `JPAGetSVecElement` (0x18c) closed `JPAGetRMtxSTVecElement` and gave `JPAGetRMtxElement` its exact 0x24c body. `JPAConvertFixVecToFloatVec` closed with an uninitialised `TVec3<f32>` local (a 12-byte class local reserves 16 and shifts the caller's temps up).
+- `-fp_contract` fuses a sum of squares only from locals: `squared()` on a memory-resident vector keeps three `fmuls` apart, so a contracted `fmadds` pair proves register operands; only a pointer aliasing a local struct keeps a `TVec3` local in memory. `if (x <= e) A; else B;` emits `cror eq, lt, eq; bne` with A as fall-through, the inverted spelling `ble` (+5.4 on `JPAVecToRotaMtx`). m2c's `local_NNN` names encode retail stack offsets and pin layouts (JDRSmJ3DAct's named region is exactly three matrices: the last two concats are the in-place `concat(b)`, 48 bytes of low region left where retail spills concat's twelve results; measured 74.06 vs 74.53, recorded not committed). JASTrack: `writeRegDirect`'s only landing is an identity wrapper (padding in disguise, rejected); `noteOn` is a zero-frame r23/r24 rotation on inner-block locals.
+
+## Header round 26 (2026-09-18): RenderModeObj linked
+
+- **A header inline with no map symbol in any TU is a free carrier**: `JDrama::TDisplay::getRenderMode()` has no symbol anywhere, and the binding lever inside the accessor (`GXRenderModeObj* rmo = &unk10; return *rmo;`) lands all four RenderModeObj frames (0x20/0x28/0x30/0x38; Game pays twice). `return *(&unk10);` is +0, so it is the named binding, never the address-of. RenderModeObj 25.6 -> 100, linked (483).
+- **A consumed reference binding at the call site is 4 bytes of low region**, the mirror of batch 142's dead-binding +4 above: `const TVec3<f32>& goal = unk104.getPoint();` slides `calcDist`'s by-value copy 0x24 -> 0x20 in `TSpineEnemy::isReachedToGoal` (100; fishoid 69.7 -> 73.2). `AnimalNerve.cpp` already spelled the same body that way: look for a committed sibling before inventing a lever.
+- JGadget `TVector::insert`'s 0x20 is additive over the MSL helpers (`O dummy` in `uninitialized_copy` -0x10, flattening `__copy_backward` -0x8, `dealloc` 0x18 but its dtor is four real instructions), not one object; `if (it == end())` is +8 (an accessor lever works, so it is a shortage). DrawSyncManager: map `end()` is 0x80 (a real method, not an accessor) and the dtor is 0x20 short: a unit round item.
+## Research batch 161 (2026-09-18): the JGadget iterator pool ignores the return-type price ladder, and the grouping has no shared cause
+
+Batch 133 left eight functions blocked on the JGadget list/iterator temp pool and batch 142 then found the inline-temp price-by-return-type rule (reference 8, pointer 4, void 0, additive over levels).
+This batch re-ran the analysis with that rule on all eight sites at once, measuring slot maps directly out of the compiled objects against the dtk asm (driver `grpek/{score,run}.py`: frame, absolute slot offsets, and group sizes with the dead gaps between them).
+
+**The eight residues, measured.** Retail against ours, as `frame  [group]+gap ...`:
+
+| site | retail | ours |
+| --- | --- | --- |
+| `TLampTrapIron::loadAfter` / `TLampTrapSpike::loadAfter` | `0x78 [5]+8 [3]` | `0x78 [2]+4 [3]+4 [3]` |
+| `TSeal::init` | `0xc0 [1]+4 [1]+56 [2]+8 [2]+8 [1]+52 [2]` | `0xc0 ... [2]+12 [2]+8 [1]+48 [2]` |
+| `TMirrorActor::init` | `0xd8 [1]+132 [2]+12 [2]+8 [2]` | `0xd8 [1]+116 [2]+20 [2]+16 [2]` |
+| `TRiccoHook::init` | `0xd8 [2]+4 [3]+16 [3]` | `0xd0 [2]+4 [3]+8 [3]` |
+| `TEnemyManager::createEnemies` | `0xb0 [5]+8 [4]` | `0xa8 [5]+4 [3]+12 [1]` |
+| `SDLModel::entry` | `0xb8 [3]+8 [2]+4 [3]` | `0xb8 [3]+8 [2]+8 [3]` |
+| `TPerformList::perform` | `0xe8 [2]+12 [2]+4 [5]+12 [4]` | `0xc0 [4]+8 [2]+4 [3]+12 [4]` |
+
+- **The return-type ladder is inert for this pool.**
+  Measured on all eight sites at once, byte-identical slot maps to the stock header: a `void`-returning `TList<T>::iterator::operator++()`, a `void`-returning `TList_pointer<T>::iterator::operator++()`, both at once, `operator*` routed through `operator->`, and a new pointer-returning `operator->` on the derived iterator.
+  Probing `TList_pointer<T>::insert` with an extra inlined level whose return type is by-value, pointer or reference leaves the three temps of the `insert` sub-block at exactly the same offsets in all three cases.
+  So batch 142's price ladder is a `TVec3`-shaped rule, not a general one; do not re-derive the JGadget grouping from it.
+- **Most of the chain is pinned byte-for-byte, so its return types are not free at all.**
+  `TList<void*>::begin()`/`end()` (12 B each, ObjHitCheck / enemymanager), `TList_pointer<THitActor*>::end()` (36 B, bossManta), `TList_pointer<THitActor*>::iterator::iterator(TList<void*>::iterator)` (12 B, by-value parameter), `TList_pointer<THitActor*>::insert` (76 B, batch 133), and all of `std-list.cpp` (`operator==` 24 B, `erase` 108 B, `CreateNode_` 116 B, `TList_pointer_void::insert` 136 B) are 100 % today.
+  Retail's `loadAfter` loads `TList_pointer_void::insert`'s return slot, so the "void in the base, iterator in the wrapper" split is refuted by the binary, and every `begin()`/`end()` is a by-value return with a hidden r3 slot, so the by-reference variant is refuted too.
+  `__pp__`, `__dr__` and JGadget `__ne__` have zero map hits, but so do ours: MWCC only emits the weak copy of an inline it also calls out of line, so that absence carries no evidence.
+- **The site spelling is fixed by the frame.** `getChildren().push_back(this)` is the only one of `->push_back`, `->insert(obj)`, `->add(obj)` and `getChildren().push_back` that keeps `loadAfter` at retail's 0x78; the other three land 0x68-0x70. The remaining free spelling on the five `TList_pointer` sites is `TList_pointer<T>::push_back`'s body, and five bodies (`insert(end(), what)`, a named `end()`, a dead named result, an `iterator` return, `this->`-qualified) all miss.
+- **The residue is a per-expansion block *stride*, and it is not uniform across the eight.**
+  Reading `loadAfter` instruction by instruction, both builds allocate the same eight temps in the same order; retail packs the `end()` block `{0x30,0x34}` and the `insert` block `{0x38,0x3c,0x40}` at stride 8 and we place the second block at 0x3c, i.e. stride 12, leaving a dead word at 0x38 and one at 0x48 where retail has both at 0x44/0x48.
+  `TPerformList::perform` has the same stride-12 hole between the `begin()` and `end()` blocks.
+  But `TSeal::init` is a flat +4 on one block, `TMirrorActor::init` wants 16 bytes moved from its two upper gaps to the bottom, `TRiccoHook::init` wants 8 *more* dead bytes and `TEnemyManager::createEnemies` wants +8/+12 on two groups: there is no single shift, so **no return-type/level assignment reproduces all eight, and none was found that reproduces even two.**
+  A nine-line scratch model of the two-sibling-expansion shape (`D begin(){return D(L::begin());}` over a one-pointer iterator) packs all eight temps contiguously, so the stride is not a property of the derived-iterator idiom by itself.
+- **One new lever, refuted by the map's own byte-exact neighbours.**
+  Naming the result in `TSingleNodeLinkList::begin()`/`end()` (`iterator r(mTail); return r;`) packs those two blocks at stride 8: `TPerformList::perform` goes 0xc0 -> **0xe8 exactly**, keeps thirteen slots and lands retail's top two groups and both 12-byte gaps (99.33 -> 99.78 tree-wide), and the emitted weak 12-byte `end()` stays byte-identical.
+  It is still not committable: it adds one temp to `TSingleLinkList<T,I>::Push_back`'s chain, dropping `TPerformList::push_back(TViewObj*, u32)` 100 -> 92.53 and `push_back(const char*, u32)` 100 -> 94.16, and six `Push_back`/`Insert` respellings (named `end()`, named `Insert` result, dead result) all keep seven slots where retail has six. Reverted.
+- Also measured and inert on all eight: `TSingleNodeLinkList::iterator::operator=` deleted or void-returning, the derived `iterator(TSingleNodeLinkList::iterator)` ctor non-`explicit`, and `TList_pointer<T>::end()` spelled with an implicit derived-from-base conversion (the batch-133 lever is about the *emitted copy's* frame only; at an inline expansion it is free).
+  Worse: a user copy constructor on `TSingleLinkList<T,I>::iterator` (perform 0xe8 -> 0xa8), `TSingleLinkList::begin()/end()` named (0xf0), `TList<T>::begin()/end()` named (SDLModel +0x20, seal +8, MirrorActor +8), the derived `operator==` comparing `unk0` directly (loses two slots), `TList<T>::push_back` as a named `end()`, a dead result or an `iterator` return (all `SDLModel::entry`-only and all worse).
+
+## Follow-up closure 163 (2026-09-18)
+
+- **Cross-unit header lead**: spelling `Enemy.hpp`'s `setGoalPathMario()` as `THitActor* mario = (THitActor*)gpMarioAddress; setGoalPath(mario);` (a pointer binding, +4) lands seven functions byte-exact tree-wide (`TGesso::behaveToFindMario`, `TNerveHaneHamuKuriUpWait`, `TPakkun::load`, `TNervePakkunShoot`, `TNerveFireWanwanAttack`, `TNerveBombHeiAttack`, `TNervePopoWait`; matched_code 53.91 -> 53.95) and costs two that are then 8 over (`TNerveWalkerTraceMario` 0x60 -> 0x68, `TNerveTelesaFreeze` 0x40 -> 0x48), which therefore carry a lever of their own to remove in the same change. Header round 28 item.
+- **A binder's frame price is not uniform across sites**: the same construct was +4 on one function's temp and +8 on its frame, and 8/8/24/16 across a nesting ladder (JASChannel `buf` chain); bracket with two spellings before assuming a step. walkerEnemy `behaveToFindMario`: 8 per binder, 12 per conversion level, so the missing item is worth 4. NpcNerve `GraphWander`: the tracer accessors sit at depth 3, +2 levels make both `bl`s, so retail's chain has four enclosing levels and `getGraphNode` indexed `unk0[i]` directly (rejected: needs two invented forwarders). MarioCollision `damageExec`: the two copies are `operator*`'s by-value parameter copy (depth 3, we expand) and its `return fst` copy; the level cannot go inside `calcDamagePos` (already 0x18 over). `genEventCoin`: two errors netting +8 (one 8-byte pool item too many before the `operator-` copy, 16 missing after).
+
+## Game re-pass 162 (2026-09-18)
+
+- **The price of a dead non-trivial class local in an inlined callee is its exact `sizeof` once >= 8** (12 -> 12, not 16; rounded up to 8 below that): `ShapePacketCallBackFunc` is 0x90 short = exactly 18 expansions of the four UNUSED helpers x 8, an 8-byte local lands 0x178 to the byte and a 12-byte one gives +0xd8. A carrier's expansion count reads off the map by excluding emitted siblings and constant-argument sites. `SMS_InitPacket_Fog` closed: retail reads the PE block above the packet lookup and a named `peBlock` intermediate is the +8 (naming an intermediate also reorders a member chain when the named link is the one retail loads first).
+- **A carrier needs an UNUSED function or a callee with no out-of-line copy**: MapMakeData's TU has no UNUSED function and both `setVertex` (0x40) and `initAllCheckData` (0xd0, two `setCheckData` expansions) are frame-exact, so its two 24-byte gaps have no legal carrier; MapObjItem2's `TMushroom1up::control` 12 dead bytes are a named local of its own body. MSModBgm's `getTiming`/`getTimingForce` are legal carriers but no candidate object exists (`getTiming`'s missing `param_2` body, 0x60 vs 0x94, is the way in).
+- `MarNameRefGen_BossEnemy`: a TU-local binding level on the `TSleepBossHanachan` factory site puts `TVec3<f>::set<f>` at depth 4 so retail's `bl` appears, and binding the result buys the +8 (98.66 -> 99.99, instruction-exact; two spill slots left). SelectDir `rsetup`: every `push_back` expansion stores five words at stride 0x14 where retail reserves 0x18 (the JGadget stride, accumulating).
+
+## Header round 28 (2026-09-18): +7 exact from one header binding
+
+- **A +4 pointer binding inside a shared header inline is a global knob whose per-caller cost is identical, so its apparent losers were TU-local levers standing in for the header's missing 4**: `TSpineEnemy::setGoalPathMario` as `THitActor* mario = (THitActor*)gpMarioAddress; setGoalPath(mario);` made seven functions exact (`TGesso::behaveToFindMario`, `TNerveHaneHamuKuriUpWait`, `TPakkun::load`, `TNervePakkunShoot`, `TNerveFireWanwanAttack`, `TNerveBombHeiAttack`, `TNervePopoWait`; 53.96 -> 54.03) once telesa's two TU-local binder levels (4 bytes of pool each) and walkerEnemy's `getPosition().y` accessor (worth 4, not 8, when it feeds a single scalar component) were removed. Before rejecting a header change over a regressing function, check whether it carries a removable 4-byte lever.
+- **The binding needs a consuming call in the same body to pay**: binding a global inside a header inline that only returns it (`SMS_GetMarioPos` 54.03 -> 53.55, `SMS_CheckMarioFlag`, `SMS_GetMarioGroundPlane`, `SMS_GetMarioX/Y/Z`) is broadly destructive.
+## Library re-pass 162 (2026-09-18): the caller-side dead-carrier price is finer than the rules card
+
+Six JSystem closure units (`JAIBasic::initDriver`, `TPolarCamera::perform`, `TFrmGXSet::perform`, `IssueGXCopyDisp`, `JKRExpHeap::allocFromHead`, `J3DModel::entryModelData`) were re-run against header round 26's two new rules.
+None closed, but three of the measurements sharpen existing rules.
+
+- **A dead named class local in the *caller* only reserves a slot when its constructor is empty, and its position is pinned to the last-declared slot.**
+  `TPolarCamera::perform`'s 104-byte gap is 100.0% with zero markers for `volatile char trash[104]` declared immediately after `local_A4`, and also for `TPosition3f d1; TPosition3f d2; JGeometry::TVec2<f32> d3;` there (48 + 48 + 8).
+  Declared *before* the first matrix the same 104 bytes still land 0x1a0 but scramble the three matrices (52 operands), so the dead block is the bottom of the named region, not the top.
+  Granularity is 8 with a four-byte pad below the saved registers absorbing the remainder: trash[96] through trash[100] all stop at 0x198, trash[101] reaches 0x1a0.
+  Two refinements to the card: a dead `TVec3<f32>` is worth **0** in this caller, not 12, and `JDrama::TRect` is not a zero-instruction carrier at all because its `JUTRect()` initialiser list emits 13 instructions (90.4%).
+  The remaining 8 bytes still have no natural owner, which is why nothing was committed.
+- **All expansions of one inlined callee share a single temp block, so a large dead low region is never "one pool per expansion".**
+  All three `concat` expansions in `TPolarCamera::perform` spill their three float temps to 0xc/0x10/0x14 in *both* builds, which kills the reading that retail gives each `SMatrix34C<f32>::set(12 f32)` expansion its own 48 bytes.
+- **An address binding at a call site is +8 whether the local is a pointer or a reference, and it can buy a register cluster.**
+  In `J3DModel::entryModelData`, naming the shape packet (`J3DShapePacket* p = &mShapePackets[shape->getIndex()];`, or the `&` form, or with the whole chain inside the binding) removes all five operands of the `addShapePacket` cluster -- retail's `lwzx r4` / `lwz r5, 0x84(r29)` homes appear exactly -- and costs +8 of frame (0xf0 against 0xe8).
+  Net markers are unchanged, so retail holds this binding *and* eight fewer bytes elsewhere; the obvious donor, the else branch's `J3DMatPacket* packet`, is an address binding retail demonstrably has too (`add r24, r0, r23`, read twice).
+- Inert or refuted, with no new rule: hoisting `content`/`aligned`/`offset` in `JKRExpHeap::allocFromHead` to function scope (byte-identical -- the batch-145 declaration-order knob really is confined to callee-saved locals), folding its `aligned` away (frame 0x30), `size += 3; size &= ~3;` (98.6); hoisting `entryModelData`'s `mat`/`dlSize`/`packet` to function scope (r20/r21 do not move); `render_mode.aa != 0` (98.0) and `(bool)render_mode.aa` (byte-identical) at the `IssueGXSetCopyFilter` call.
+- `JAIBasic::initDriver`'s carrier is now known to be *legal* and still unfindable: `initAudioThread` is UNUSED at 0x78 -- the same size as `initDriver`, which is what a pure forwarder gives -- so a dead 8-byte class local in it is allowed, but no two-word non-trivial class is reachable from the TU, and the map refutes an accessor carrier (`getParamAudio*ThreadPriority` are UNUSED **out-of-line** symbols of JAIGlobalParameter.cpp, and every callee takes plain scalars).
+  Scanning the map for it turned up an unrelated stub: `bootDSP__8JAIBasicFv` is UNUSED at 0x20 while ours is an empty body.
+- `TFrmGXSet::perform`'s frame shortfall is now 0x70, not 0x78, because round 26's `getRenderMode()` binding moved it 0xb8 -> 0xc0; the two-copy reading in its TODO has to be re-derived. Its register residue is exactly one reservation: ours allocates the scratch pool {r4, r6, r7}, retail {r6, r7, r8}, so `cue` stays live past the guard in retail and no guard spelling reaches that.
+
+## Header round 29 (2026-09-18): the consuming-binding shape is exhausted
+
+- **Receiver bindings in shared headers are destructive, argument bindings pay**: binding a global that becomes the callee's `this` (`SMS_LoadParticle` -1, `SMS_EasyEmitParticle` -6, `TNameRefGen::search`/`search2` -62 and DOL broken, `TSpineBase::pushNerve` -58) loses, because a bound receiver binds only as a fresh load; `gpMarioAddress` in `setGoalPathMario` was the only argument-passing global read in `include/`. A consumed *reference* binding on a by-value-returning inline call is the payable form (third confirmation): `switchNextGoalPath` as `const TPathNode& next = unk114.pop(); unkF4 = next;` (+1 exact, `TNerveBPFlyPivot`).
+- **When a header binding supplies part of a TU-local lever's value, reduce the lever's expansion count rather than delete it**: `JPAParticleGetStep` is +8 per expansion, the `getEmitterDataBlockInfoPtr` binding +8, so one expansion instead of two restores `checkCreateChildParticle`; `JPADraw::initialize` then sits at retail's 0x190 with one dead 4-byte named local declared first (slot 0x184 reserved, never touched: a dead scalar is worth 0), so it stays parked. `getMaterialID`'s binding is +4 per expansion and the two linked `J3DModelLoader_v26` readers carry no lever (already byte-identical streams, residue purely frame): parked with a positive reason.
+
+## Research batch 171 (2026-09-18): the callee-saved **FPR** allocation order
+
+Research 144 pinned the callee-saved GPR ranking; the FPR one had no rule and was blocking a named residue class.
+Measured the same way, in a scratch TU with the game flags (drivers `grpeu/fdrv.py`, `t1`-`t5`: `C::run(f32 p, f32 q, f32 r)` with one `bl sink()` per use so every value is live across a call).
+
+**Callee-saved FPRs are handed out f31 downward: long-lived temporaries of an *inlined callee* first, in *reverse* declaration order inside that callee; then the function's own named `f32` locals in *forward* declaration order; then parameters in *reverse* parameter order.**
+Only a **named** local (any initialiser) or a computed callee temporary qualifies; an anonymous literal, member or global read is rematerialised at each use and never takes one.
+
+| variant | ranking, f31 first |
+| --- | --- |
+| locals declared `a`, `b` / `b`, `a` | a > b / b > a (first-declared highest) |
+| the same with `b` used first, or `a` declared uninitialised and assigned after `b` | unchanged (first use and definition order inert) |
+| locals `a`, `b`, `c` / `c`, `b`, `a` | a > b > c / c > b > a |
+| five locals | f31-f27 in declaration order |
+| one local + one parameter | local > parameter |
+| parameters `p`, `q`, `r` | r > q > p (reverse parameter order) |
+| two locals + two parameters | a > b > q > p |
+| named local holding a literal, a member read, a global read, a call return, or a loop accumulator | ranked purely by its declaration position |
+| anonymous `1.0f` / `mb` / `0.0f` live across four calls, or a literal stored to five places across a call | **no** callee-saved FPR at all |
+| two locals both `= 0.0f` | CSE'd into one register |
+| a local not live across any call | no callee-saved FPR |
+| inlined helper's temps `u`, `v` / `v`, `u` | v > u / u > v (**reverse** declaration order) |
+| inlined helper's temps `u`, `v`, `w` / `w`, `v`, `u` | w > v > u / u > v > w |
+| a caller local declared before **or** after the helper call | helper temps outrank it either way |
+
+This **corrects batch 86/90's prose**, which read "the last-declared local gets f31" while its own worked example (`f32 z` before `f32 y` giving f31 = z) said the opposite; first-declared is right.
+It also explains batch 153's "literal temps rank above named locals": those were an inlined callee's temps, not literals.
+Batch 86's "a member read must be a named local", round 22's "declaration order inside an inlined helper does not transfer" (it does, reversed) and batch 145's "block scope is inert" all hold as measured.
+
+**Volatile FPRs (f0-f13) are allocated as blocks and are not a source-order knob.**
+`expf` is the clean instance: every instruction, the whole Horner chain and the 0x28 frame match, and retail simply puts the four long-lived values in f6-f9 with the coefficients in f1-f5 where we do the reverse (f1-f4 long-lived, f5-f9 coefficients) — the same wholesale block trade batch 145 recorded for `checkNextFrameSe`'s GPRs.
+Inert there: both declaration orders of the two reciprocal constants, `const`/`static const`/plain (plain is worse), splitting the float declarations, declaring floats before ints, one or two spare float locals, grouping the two constants, dropping the named `finalVal`, reordering the two multiplies, naming the table entry, staging the sum, spelling the constants as literals, and moving `__HI(pow2)` below the chain (68%).
+**The one knob that does move a volatile pair is naming the values as locals**, because raw arguments evaluate right to left while named locals evaluate in declaration order: that decides which of the two is loaded first and carries its register with it.
+`TPollutionCounterLayer::drawJointObjStamp` closed on exactly that (99.88 -> 100, unit 88.21 -> 94.35 matched_code): `f32 minZ = layer->mMinZ; f32 minX = layer->mMinX;` before the `makeWorldToPollutionMtx` call, **mMinZ first**, which is retail's load order; `minX` first is the stock four markers.
+
+- **`TRideCloud::control` (MapObjCloud, the unit's only non-exact function) is exhausted at four markers.** Fifteen more groupings and operand orders of `getScaling().x * 300.0f * unk160`, reusing `fVar8` as the literal's home (four forms), naming one or both member reads in both orders, `mScaling.x` raw, and putting `mDamageHeight = 50.0f` first (9 markers) are all 4 or worse. Batch 129's "halved on paper" note is optimistic: the named-product form measures the same 4. Keep the stock single expression.
+- **`TBathtubBinder::float_` is a group trade, not a rank inside a group.** Retail's dir pair sits in f31/f30 *above* the two `fmadds` products (f29/f27), ours in f28/f27 *below* them (f31/f30), and the swap survives: `f32 dirZ`/`f32 dirX` in place of the `TVec3 dir` (either order, 115 markers and -8 frame), and an inlined four-statement `BathtubDirXZ(dir, rot)` helper in both temp orders (116 markers, +8 frame). What *does* move is the **load order**: declaring or assigning z first reproduces retail's `lfs 0x104` before `lfs 0xe4`, for free. Parked at 96.2.
+- **`JASChannel::updateEffectorParam` (14 markers) is also a block trade**: separate `panOut`/`fxmixOut`/`dolbyOut` locals (25), clamping after `unk98` (84), clamping inside the two call argument lists (118) and clamping dolby first (20) all lose. Retail's f5/f6 Clamp01 temps are unreachable from the source.
+
+## 4-byte residue re-pass 172 (2026-09-18): the nested fork is the general +4, and two links
+
+Batch 170's ladder said the +4 rung was "a nested direct-return fork over a global or file-local static".
+This pass re-ran the recorded 4-byte residues against it and the rung is broader than that, but also fussier about where it is spelled.
+
+- **A direct-return fork nested inside a binder is +4 over a plain *member* read too, not only over a global**, and it has to be inside the binder -- at the call site it is +0.
+  `TMovieSubTitle::setupResource`'s last 4 bytes (`buffer` 0x24 against retail's 0x28, frame already exact since batch 151) close by having the TU-local binder read the member through a new `TMovieSubTitle::getScreen()` fork instead of `p->unk14` directly: +4 on top of the binding's +8, zero instruction change. MovieSubtitle 70.55 -> 100, linked (486).
+- **A fork over a global that the header already reaches is +4 only where the site is itself a fork, and it must be used at *every* site or it perturbs the register coalescing.**
+  `TMarDirector::preEntry` needed +4 of pool below the `SMSGetRederRect_Game()` return buffer (0xb4 against 0xb8).
+  One TU-local `PreEntryRootNameRef()` fork over `JDrama::TNameRefGen::instance`, used by both wrappers in place of the header's `search<T>`/`search2`, is exactly that +4 and closes the function byte-for-byte; MarDirectorPreEntry 0 -> 100, linked (487).
+  Routing only the four binder sites through it is frame- and register-neutral, so it costs nothing to reach the fifth site; nesting it under `search2` *alone* lands the 0xb8 buffer but makes the first expansion's root-ref temp coalesce with r28 (the scratch the other four use) where retail coalesces it with r29, `setViewMtx`'s own register.
+  Two identical stacked forks collapse (+0), so a redundant wrapper buys nothing.
+- **Header round 26's consumed reference binding is +4 out of line but +8 in an inlined expansion of the same body**, which is why it has to be paid for across a whole family at once.
+  `TRealoid::clipBoids` closes with `const TVec3<f32>& boidPos = unk150->getBoid(i)->mPosition;` ahead of the named copy (0x48 -> 0x44); the same binding costs `TRealoid::perform` 8, paid back by spelling its loop bound `unk150->getBoidNum()` instead of `getBoidLeader()->getBoidNum()`; that in turn moves `TFishoid::perform`, which takes the same reference binding (+8) plus a new `TRealoid::getBoid(int)` forwarder -- a nested fork over `getBoidLeader()`, the last +4. All three byte-exact, fishoid 73.20 -> 77.27, nothing else in the tree moved.
+- **Where the residue is an allocation *order* difference inside a fixed pool, the whole ladder is 0/8/16 and no +4 exists.**
+  `TMovieRumble::init` is the clean case: its low region is 0xc..0x30 = 36 bytes on both sides, split 28/`type`/4 by retail and 24/`type`/8 by us, and the frame never moves for +-4 because the named region is 16-aligned. Sixteen init-only constructs were measured and every one is 0, +8 or +16 (list in the unit's TODO); the only two -4 steps both delete a member reload retail keeps, so they are refuted by the binary.
+- **`JAIBasic::checkPlayingSeqTrack`'s second dead slot is the `u32* portFlags = sud->mTrackUpdate;` binding**: removing it gives retail's 0x98 exactly at the price of sixteen reloads, so retail holds that pointer in a callee-saved register with no dead pool slot while every caller-side pointer binding we know reserves one. Two bindings in one *comma declaration* do not share a slot the way two bindings in one inlined *level* do.
+- `TMarDirector::setupPerformList_console` drops from 17 markers to 6 with a console-only three-level stack (instance fork, `search` fork, existing binder) -- every slot up to 0x54 lands and only the `TList_pointer_void::insert` sub-block is left, 4 bytes high, which is the research-161 stride. Not committed: two fabricated helpers for a function that still does not close.
+- Still inert on their own residues, re-measured here: `TFishoid::load`'s TPathNode/`eventId` slot swap (a `const TPathNode&` binding at the call is +8, a dead `u32` copy +0), `TNpcInbetween::execPosInbetween`'s f1/f2 pair (naming the reciprocal, naming the converted timer, and the reversed product are all worse), `TRideCloud::control`'s three-factor product (nine orderings and namings, all 4 markers), `TMapObjTree::initMapObj` and `TMarNameRefGen::getNameRef_BossEnemy` (register/spill-slot permutations with no source knob).
+
+## Library structural pass 170 (2026-09-18): three library links
+
+- **Frame-lever price ladder, measured twice**: a one-parameter pointer-returning binder is +12, a parameterless one +8, a nested direct-return fork over a global +4, a void return +0; sub-8 steps exist. `HardStream::TControl::startFirst`/`startSecond`'s "24-byte class local" was three stacked levels over the two file-local statics (name binder +12, `rootDir` binder +8, `streamFiles` fork +4); JASHardStream linked.
+- **A binder's site count is a dial (+8 each): use it at k of n identical sites**, and a TU-local binder beats the same binding in a shared accessor with other callers: `JPADraw::initialize`'s 16 bytes are a TU-local binder over `getEmitterDataBlockInfoPtr()` at two of five sites (header round 27's header version cost `checkCreateChildParticle`); JPADraw linked. `JAIBasic::checkEntriedSeq` closed with one binder over the `&unk0->mSeqTrackInfo[i]` lookup; JAIGFrameSequence linked.
+- **`volatile` on a status word converts one CSE'd load into per-site loads: a diagnostic for a CSE residue, never a fix** (`JPABaseField::calcFieldFadeScale` closes with `volatile u16 unk54` but `JPAAirField::affect` CSEs the same member; bitfields refuted). `checkPlayingSeqTrack`'s residue is exactly 4 dead bytes (the real `addi r30, r26, 8` reference costs them). `JPAVecToRotaMtx`: retail's `axis` is memory-resident and scalar replacement is not blocked by an inlined pointer-taking helper (mechanism unknown). Library structural census: 9 functions of 22 units in the 1..16 range; the well is dry.
+## FPR re-pass 172 (2026-09-18): an inlined callee's **parameter**, modified in place
+
+Research 171's knobs are all about which value gets which register.
+This re-pass found the knob for the other half of the question — which register the *load* lands in — and it is the same lever the rules card already records for subtraction (`f32 x = a - b` subtracts into `b`'s register).
+
+**A parameter of an inlined callee that is modified in place (`amp *= scale`) makes the load land directly in the result's register; copying it into a fresh named local first (`f32 a = amp * scale`) loads into a scratch register and writes the result elsewhere.**
+`TCameraShake::setShakeAngleOne_` is the clean instance: retail is `lfs f3, 0x2c(r31); fmuls f3, f3, f31` and the named-local form gives `lfs f1, 0x2c(r31); fmuls f3, f1, f31`, only in the *first* of the three expansions (the other two coalesce either way, because the reciprocal is already CSE'd and the value only needs f1 there).
+Batch 129's rejected `f32 a = amp; a *= scale;` looks like the same shape but is not: it is one statement *more* than the stock form and pushes the body out of line at depth 2, while modifying the parameter is two statements *fewer* (no `f32 a`, no `s16 v`), which leaves room to spare.
+The integer parameter takes the same treatment (`vel = -vel`), and it is worth 0 frame.
+
+Second finding, on the same function: **dropping the two named locals also drops 8 bytes of frame**, because one inlined callee's named scalars share a single temp block across all its expansions.
+`TCameraShake::startShake`/`keepShake` recovered it by reading all six `TCamSaveShake` parameters through `TParamT<T>::get()` instead of the amplitudes through `get()` and the velocities through `.value`: a `const T&` return reserves an inline temporary per expansion, so six get()s are retail's 0x50 where three are 0x48.
+That also makes the call sites uniform, which the mixed spelling never was.
+Both functions went to 100% and the unit's `matched_code` 32.48 -> 60.05 (only `execShake`, a 56-byte low-region gap, is left).
+
+Negative results from the same re-pass, all measured:
+
+- **`BHSCalcRevisionDistXZByRotateZ` cannot be fixed from its own body.** Naming the two results (`f32 revisedX`/`revisedZ` before the two stores) lands the standalone frame exactly (0x58, and all 9 operand markers go: 94.0 -> 94.3, one instruction-order difference left) **but costs +8 at the inlined site** in `TSphereLink::setDegreeZAndRevisionPosXZ`, which is frame-exact at 0xa8 without it (98.2 -> 98.1, 18 -> 37 markers). Since both sites share one body, retail's extra 8 bytes in the out-of-line copy are not in the body at all — they are the standalone's own dead region, and its 52 bytes are entirely unreferenced in both builds. Also re-measured worse: `sine` before `cosine` (92.9), un-naming both (66.9, it recomputes, though the frame does land).
+- **`TBellDolpic::ring`'s two clusters are block trades.** Un-naming the whole `rand()` chain is 30 markers and -8 frame; `0.000030517578f * (f32)r` with `14400.0f * tmp` is byte-identical to the stock spelling. Retail keeps both literals in f1/f0 and chains into the literal's register where we load them into f2/f3 and accumulate into f0 — no operand or naming spelling reaches it.
+- **`MSHandle::calcDolby` is a block trade too** (retail merges the four if/else results into f0 and the clamp into f2, ours f3/f0, every instruction and the 0x20 frame exact). Both values are already named locals, which 171 says is the only knob.
+- **`JPAGetRMtxTVecElement`'s rotation does not fit 171's ranking.** Retail is x f31, **z f30, y f29**; we are x f31, y f30, z f29. Neither reverse (callee temps) nor forward (own locals) order produces x above a reversed {z, y}, and the sibling `JPAGetRMtxSTVecElement` — same body, but the vector is a reference parameter rather than a local — is byte-exact, so `JPAGetSVecElement`'s body cannot be touched to chase it.
+- Re-confirmed as *not* FPR residues, so out of this class: `TPollutionCounterLayer::countTexDegree` (0x58 low-region gap), `JDrama::TPolarCamera::perform` (104 dead bytes, fully diagnosed), `TMapCollisionBase::updateTrans` (24 dead bytes), `CPolarSubCamera::updateDemoCamera_` (36 bytes of pool below the named block), `TMario::surfingEffect` (argument evaluation order plus 0x10 of frame), `TNpcInbetween::execPosInbetween` (a single volatile destination choice between two dying temporaries), `SMS_EmitSinkInPollutionEffect` and `TSmJ3DAct::perform` (both blocked on shared JSystem headers whose tree-wide measurements are already recorded and negative).
+
+## Batch 177 (2026-09-18): execShake and countTexDegree diagnosed
+
+- **The pool is allocated in reverse statement order, so bytes below an inlined callee's local belong to the statements after it**: `countTexDegree` (149 = 149 instructions, 88-byte gap) has 116 below / 8 above the inlined `loadPollutionLayer` texObj against our 32 / 4, while `countObjDegree` with the same inlined body is byte-exact, so the debt is `countTexDegree`'s own later statements. A TU-local pointer-returning binder over `mLayers[t]->getPollutionImage()` is +4 per site here, not the library ladder's +12 (the ladder is per context); a binding inside `getModelStampDrawBuffer` is +8 per expansion but breaks `calcViewMtx`. The three short UNUSED bodies are each one instruction, not a dead local.
+- `TCameraShake::execShake`: retail builds the roll axis from `origin`, not `*pos`, and `unitVecTo` must be `static inline` (the map has no room for a local symbol; camerashake's four `>>>` weak duplicates are `setRotate`/`scale`/`dot`/`inv_sqrt`). Residue: one dead 8-byte named local plus 52 dead pool bytes reproduced byte-for-byte with padding, with no legal carrier (the TU's UNUSED callees are not called from here and every inlined callee has an empty frame); ten register markers are retail CSEing a bool flag's constants with neighbouring field stores (`0` in r8 serving `anyActive`, `i` and `mRollAccum = 0`).
+
+## 4-byte residue re-pass II 178 (2026-09-18): `normalize()` is the +4 dial, and a parameterless binder can be +4
+
+Re-pass 172 had left five recorded 4- and 8-byte residues unreached.
+This pass closed two of them and pinned a third's remaining half; the three findings are all about *where* a rung's price is charged, not about new rungs.
+
+- **`normalize()` against `setLength(1.0f)` is a per-call-site +4 dial.**
+  `JGeometry::TVec3<f32>::normalize()` is `setLength(*this, TUtil<f32>::one())`, so it carries the card's `TUtil<f32>::one()` rung; spelling the unit vector `setLength(1.0f)` drops that level and with it 4 bytes of low region, with a byte-identical instruction stream.
+  `TBoidLeader::calcGoalForce` closes on it (99.59 -> 100, frame 0x50 -> retail's 0x48 and every displacement).
+  The dial is per site, not per file: the same respelling is **-8** in the sibling `TBoidLeader::calcForces` (0xa0 -> 0x98, still 8 over, 99.6 -> 99.5) and -8 in `TBoidLeader::calcBoids`, which is already 144 bytes short, so both keep `normalize()`.
+  Statement-by-statement pool triage on `calcGoalForce` is worth recording as a method: deleting each `+=`/`-=`/`*=` in turn left the frame untouched, so the whole 40-byte low region was the one `normalize()` expansion, which is what made the rung findable at all.
+  Scanned and rejected as candidates for the same dial: every other unit with one non-exact function that calls `normalize()` (`CameraJetCoaster` +200, `feetinv` +104, `walker::calcFarthestVertex` +24, `camerashake::execShake` +56, `MathUtil::MsGetRotFromZaxis` +16) is *short*, so the dial points the wrong way there. The inverse -- `setLength(v, 1.0f)` -> `normalize()` to buy +4 -- is the form to try on a short frame.
+- **A parameterless binder is +4, not +8, when its body also does the arithmetic the call site would have done.**
+  `CLBScreenFPosToSPos` needed 8 bytes of dead pool below its int-to-float conversion pair, with no inlined callee anywhere in the body to carry them (header round 30 had parked it for exactly that reason).
+  Two `static inline` binders in `cameralib.hpp`, `CLBGameRenderWidthMax()`/`CLBGameRenderHeightMax()` (`u16 w = SMSGetGameRenderWidth(); return w - 1;`), give +4 each and close it (98.04 -> 100, frame 0x28 -> 0x30; sunmodel matched_code 63.53 -> 71.08, no other unit in the tree moved).
+  The `- 1` has to be **inside** the binder: returning the raw size and subtracting at the call site keeps the frame but reorders the `0.5f` literal load against the `1.0f + x` add (89.6), and a plain `u16 width = SMSGetGameRenderWidth();` local in the function body is +0 -- though that local alone is worth 98.04 -> 99.8, because it un-rotates all four volatile FPRs, so measure the naming before measuring the level.
+- **The `SMSGetMarDirector()` global fork is the +4 that a `Vec&` base binding costs.**
+  `TMapWarp::init`'s every-displacement-4-high residue (batch 136) is closed on displacements: retail's 92-byte low region is 48 (six `>>` continuations) + 16 (loadWarpPointPos's inlined parameters) + 4 (the `Vec& pos = positions[no];` binding, which is *needed* -- without it MWCC folds `+4`/`+8` into the `addi r4` at each call and loses retail's hoisted `addi r20, r5, 8`) + 4 (`SMSGetMarDirector()` instead of `gpMarDirector->`) + 16 (two of the three `getUnk8()` accessor sites, +8 each).
+  Also measured there: naming `stream.readString()`'s result rotates seven callee-saved registers for nothing (97.2 -> 98.1 for the un-naming alone), and a continuation count is verifiable by *register* count, not only by frame -- the "3,3,1,2" grouping loses both 8 bytes of pool and one callee-saved register.
+  What is left is the known-open callee-saved permutation (retail `this` r31 / stream r25 / one register shared by the array base and `cnt`; ours r24 / r27 / two registers).
+- **Two residues re-measured into the block-trade and allocation-order classes, so they are out of the lever budget.**
+  `TAmiNoko::isHitValid` is frame-exact and its whole residue is one volatile-FPR block starting two registers higher in retail (f5/f4/f3 against f3/f1/f2), with identical load order and identical `fsubs` destinations; naming matan's discarded result, moving the call, building the vector from the subtractions, `SMS_GetMarioX()/Z()` and a named `const TVec3<f32>& up` are all inert or worse.
+  `SampleCtrlMaterial::SampleCtrlMaterial` is the cleanest instance of the pinned-pool class yet: frame 0xc8 and the saved-register block at 0xb0 on both sides, one single referenced slot in the whole 164-byte pool (the 4-byte lookup table a J3D `getColorChan` inline copies to the stack), and it sits at 0x90 retail against our 0x94 -- 4 bytes too many attributed to the statements *after* it, in a pool whose total is already right.
+  `TSunModel::perform`'s 72-byte named block is the same size on both sides but internally reversed (retail `mtx` 0x78 below `dir` 0xa8, ours `mtx` 0x98 above `dir` 0x80), and a fabricated `SunModelCalcAnim(TSunModel*)` level around the whole `CUE_CALC_ANIM` body -- the reading its TODO called untested -- is byte-for-byte inert, so `mtx` is not steerable from the caller at all. Its frame half is cheap once the reversal is understood: the `SMSGetCamera()` fork is +4 at each of four read sites there (all four raw gives 0xd8, -16).
+
+## Research batch 184 (2026-09-18): the JGadget stride is not a property of `std-list.hpp`
+
+Delta-debugged the real header against a faithful standalone model (driver under the batch's scratch dir; ~150 compiles, slot maps read off the asm), on `TLampTrapIron::loadAfter` and then all eight blocked sites at once.
+The JGadget inline-temp pool splits into two blocks: the `TList_pointer<T>::iterator` objects at the top of the pool (identical in both builds) and the `TList<void*>::iterator` by-value temps below.
+The residue on the eight sites is never a missing or extra temp but the position of the dead word inside the lower block: retail packs every expansion's base temps into one contiguous run and parks both dead words at its top; we pad each expansion's sub-block by one word.
+
+- **No structural property of the header controls it.** Private vs public inheritance at either level, replacing the derived iterator's inheritance with containment of a `Base::iterator` member, deleting `operator*`/`operator++`/`operator++(int)`, making `TList<T>::iterator(TNode_*)` public, routing `end()` through `TList_pointer_void::end()` and the batch-133 implicit conversion are all **byte-identical at all eight sites**.
+  The one-word iterator size is pinned by the map (`__ct__` of `TList_pointer<THitActor*>::iterator` 12 B, of `TList<void*>::iterator(TNode_*)` 8 B), and the `insert`/`end` signatures by their emitted copies (MapWireManager 0x4c, bossManta 0x24), so only the *bodies* of `begin`/`end`/`insert`/`push_back` are free.
+- **In the model the pad is a function of inline nesting depth alone**: one expansion packs, two nested expansions with a discarded by-value class result pad one word per block, a third enclosing level packs again, and naming the outer result packs.
+  None of it transfers: a forwarding helper in `push_back` or `insert` (or both), a named-result `push_back`, dead iterator locals before or after the call and `this->`-qualified calls are worse or inert on the real sites.
+- **The three free bodies are exhausted.** A 125-cell sweep (5 `end()` x 5 `insert` x 5 `push_back` bodies) over the five `TList_pointer` sites took the summed slot distance from 47 to 22 (`iterator w = where; return iterator(Base::insert(w, what));`, mostly `createEnemies` 21 -> 4 and `TMirrorActor::init` 12 -> 4) at the price of `loadAfter` and `TSeal::init` 3 -> 4, landing nothing.
+  `SDLModel::entry` and `TPerformList::perform` never move under any `std-list.hpp` edit: they are not on this header's chain, so "eight sites, one cause" is refuted a second time.
+  The remaining lever is outside `std-list.hpp` (the callers' own enclosing levels), and a further header sweep is not worth a batch.
+
+## Header round 31 (2026-09-18): the `operator*` consumption split reaches the number of materialised copies
+
+V2 (`friend TVec3 operator*(const TVec3& fst, f32 snd)` with an internal named local, by-value return) is +12 fuzzy improvements (`calcBoids` +3.3, `damageExec` +2.1, `wireSWait` +3.9, `wireHanging` +2.4, `wireWait` +1.1, `wireRolling` +0.6) against six tenth-of-a-point losses: total fuzzy +0.0046, matched_code flat, zero functions to or off 100, and Tongue's weak `__ami__` (0x34) drops to MISSING.
+Retail's two `(a - b) * k` sites in `TYoshiTongue::movement` decode to `bl __ct__`, `bl __ami__`, `bl __ct__`, an inline copy, `bl scale`: **three** objects per site, i.e. V3 (`TVec3 operator*(TVec3 fst, f32 snd) { TVec3 r(fst); r *= snd; return r; }`), which tree-wide costs `TWarpInCallBack::execute` 73.9 -> 42.3, `generate` -14.5, `forceRoll` -9.3 and about 25 more.
+The only V2 repair that re-emits `__ami__` is an explicit `TVec3(a - b)` temporary at both sites, inert under the stock header (a pure level substitute, i.e. a fakematch) and costing `movement` 1.43.
+Rejected, nothing committed. Do not retry a member/friend by-value pair: the populations differ only by consumption, so overload resolution cannot select between them; the class is closed until a caller-side mechanism is found.
+
+## Research batch 193 (2026-09-18): a fabricated gate hid a constant-folded real one (MSound)
+
+- **`MSound::checkUnkA8` never existed.** Every one of its eight sites passes a constant sound id, and `(id >> 11 & 1) | (id >> 24 & 0xC0)` folds to 0 or 1 for all eleven ids, collapsing the real `MSound::gateCheck(id)` to exactly the `unkA8 & 1` / `unkA8 & 2` test the binary shows. Folding it in is worth +8 of low region per function (saturating, not per expansion) and closed `pauseOn` and `demoModeIn`. `gateCheck` inlines at depth 1 only: at depth 2, inside `MSound::startSoundActor`, it stays a `bl`, which explains every out-of-line `bl gateCheck` in the game and rules the wrapper overloads out at these sites. When a TU's sites are gated by a fabricated one-line flag test whose call sites all pass constants, check whether the TU's real gate function folds to that test before treating the test as a carrier.
+- **The missing carrier is sized but unnamed.** A dead 8-byte non-trivial local in the fabricated gate was +8 per expansion and fitted six functions (`startBeeSe`'s four expansions to the byte); the real `gateCheck` cannot hold it (emitted and byte-exact) and `MSBgm::setAllTracksVolume` cannot either (`demoModeOut` goes 8 over). It must live in `MSoundSE.hpp` around `startSoundActor`/`startSoundSystemSE`/`startSeRandPlay`. Refuted at these sites: a named `bool`/`u8` local in the gate, a `u8& getSeStatus()` reference accessor, the `MSoundCheckUnkA8` binder (+0), the 2-arg `MSound::startSoundActor` (turns `gateCheck` into a `bl`).
+- A TU-local **direct-return** fork over a raw member read (`MSoundUnk0D(p) { return p->unk0; }`) is +8 in a loop whose body only calls and +16 in a loop that also does a float-to-int conversion; the binder form is +16 in both.
+- Data closed (85 -> 100): `@3109` is `0.48f`, not `0.6f` (`talkModeIn` fades the BGM tracks to 0.48), and `talkModeIn`'s category loop is `setCategoryVOLs(0x44, 0.0f)` (the constant folds the `min<u8>` block away). `fadeOutAllSound` 76.7 -> 100: `setCategoryAllVolume`'s list walk carries a counter and breaks after 100 sounds, which also puts the UNUSED body at its map size 0x9c.
+- Residues: `startMarioVoice` 0x28, `startBeeSe` 0x18, `pauseOff`/`talkModeIn`/`talkModeOut` 8 (the unnamed carrier); `setParameterSeqSync` 0x30 plus a callee-saved rotation (retail ranks the `TTrack*` parameter above both loop counters); `loadWaveBackword` frame-only with the buffer 12 bytes low; `MSound::MSound` 86.9.
+
+## Library closure 202 (2026-09-18): eight near-link JSystem units, none closed, ladders measured
+
+- **An address binding that costs +8 can be paid for by dropping a neighbouring named pointer local the binding's chain already reloads**: `J3DModel::entryModelData`'s named shape packet (`J3DShapePacket* p = &mShapePackets[shape->getIndex()]`) lands the five `addShapePacket` operands at +8, and dropping the `J3DMaterial* mat` local in the else branch is exactly -8 with no instruction change (99.82 -> 99.92, frame 0xe8 exact, 312/312 instructions). Residue: `dlSize`/`J3DMatPacket*` in retail's r25/r24 against our r20/r21, a zero-frame rotation; reference form, `mMatPackets + i`, `int dlSize`, hoisting to block or function scope are inert. Look for the donor inside the same loop before rejecting a binding as unaffordable.
+- **MWCC emits `ptr + index` as `add rD, rIndex, rPtr` and no index spelling reverses it** (casts, reassociation, `&a[..]` vs `a + ..`, named intermediates; `J3DSkinDeform::initMtxIndexArray` 99.96 stays).
+- **A TU-local binder scoped to one function prices a frame lever a shared accessor would break elsewhere**: in `JALSystem::append` a binder over `TFlagManager::get()` is +8/+16 alternating per site (0xd0, 0xe0, 0xe8, 0xf8, 0x100, 0x110 for 1..6 sites), over `JALSystem::spFManager` a uniform +8/site, a second nested level +24/site; a direct-return fork inside the binder and a `void` wrapper are identical to the plain binder; a pass-through pointer binder on `&set1`/`&prm` at all twelve arms is +12 each and perturbs the named block. Target 0x130 = six-site binder (0x110) + exactly 4 x 8, matching the four named `JALPrmSet`/`JADPrmS<f32>` constructions in the prologue: a +8 binding level inside those constructors (`JALModSe.hpp`, shared with MSoundBGM, mameGesso, MSSetSound) is the last item, and closing it links the unit.
+- Recorded open: `JKRExpHeap::allocFromHead` (the `nor` for `~(align-1)` hoisted into the pre-`stwu` slot; source position inert across five spellings); `J3DDeformer::deform` (frame 0x110 vs 0x118 as two independent 4-byte gaps); `IssueGXCopyDisp` (six-operand scratch permutation inside an inlined body whose out-of-line copy is byte-exact: retire to known-open); `TFrmGXSet::perform` (frame solved by two named `GXRenderModeObj` copies, the blocker is retail keeping `cue` live in r4); JPAEmitterManager ctor (scratch round-robin) and `createEmitterBase` (base temp ranked above the named `linkInfo`, seven named-local-count changes inert); `sendPlayingSeCommand` (low pool 8 larger below the float temps; dropping the `portMask` binding moves the frame -8 at 142 operands). Declaration order and scope stay inert for inner-block callee-saved locals (fourth confirmation).
+
+## JALModSe closure 205 (2026-09-18): the 0x68 hole is positioned but unnamed
+
+- **A contiguous dead block whose neighbours keep their absolute offsets names the expansion region that produced it.** In `JALSystem::append` the six `new`-result temps sit at 0x58..0x6c in both builds, so the missing 0x68 is one block allocated above them, during the four prologue `JALPrmSet`/`JADPrmS<f32>` constructions and before any switch arm; the `JALSeModDataGrp<T>` (6 x 8) and leaf-ctor (12 x 8) families the arithmetic allowed are refuted by position (they would move the arm temps).
+- A dead uninitialised non-trivial class local in the prologue is +8 per *expansion*: `JALPrmSet`'s ctor is 3 expansions (0xe0), `JADPrmS<T>`'s 7 (0x100; the standalone `prm` plus two per `JALPrmSet`), and `JALPrmSet` at 16 plus `JADPrmS` at 8 lands 0x130 exactly, 100.0% with zero differing operands (`3 x 16 + 7 x 8 = 0x68`). Not committed: probe structs are padding; the open question is which real C++ in those two constructors reserves it. Refuted: `JADPrmS(const T&, const char*)` (+2 instructions), `JALPrmSet(const f32&, const f32&)` (one opcode), a defaulted `const char* name = nullptr` on `JADPrmS` (exactly +0: a level above the 8-byte out-of-class weak `JADPrm<T>::JADPrm` `bl`).
+- Real bug: the `ModType_JALSeModPitFunk` arm passes `&set3` (retail `addi r8, r1, 0xd8`); all four `Pit` arms share the second pair. With it `append` is 371/371 instructions; the unit links the moment the hole is named.
+
+## Closure re-passes 206 and 207 (2026-09-18): the one- and two-function game tiers under today's rules
+
+- **Zero closures in 54 units.** Every residue is a recorded known-open class: the `a = b - c` allocation order (NpcCollision `bind`, wireBinder `bind`, temp exactly 0x18 low), the JGadget stride (PerformList, MirrorActor, seal, SDLModel, riccohook), zero-frame callee-saved rotations (MapObjTree, THPAudioDecode, BossHanachanAnm `setHeadAndBodyAnm`, MapObjPollution `loadAfter` with a 0x28 frame gap), volatile-register coalescing (NpcInbetween, MarioCheckCol `hitNormal`, CameraMultiPlayer's `fmr`), pinned-pool order at exact frames (MovieRumble, CameraDemo, MarioMain, MarNameRefGen_BossEnemy, SampleCtrlNode, ScreenUtil, MarioReceiveMsg), per-expansion temp grouping (beam `calcVertices`: retail groups two `scale` expansions by role, we by expansion), dead low region with no legal carrier (PollutionCount 64 B, MarDirectorLoadResource +24/+72 with every callee a real `bl`). Do not spend another closure pass on these tiers until a research result names one of the classes.
+- **Naming a negated variable in only the earlier arm lands the later arm's volatile-FPR pair**: `f32 a = -param_1;` in `matan`'s `param_2 >= 0` arm while the other arm mutates its parameters in place (99.4 -> 99.85); naming it in the later arm, in both, or once at function scope all return to the original assignment; swapping the outer test's polarity costs 4.6.
+- New negatives: the `x op= k` compound-assign lever lands a `fmuls` destination but swaps the two int-to-float conversion buffers (NpcInbetween 99.1 -> 97.5); block scope is inert for callee-saved GPR ranking as well as frame (`setHeadAndBodyAnm`, `body` hoisted alone or with `i`); a TU-local inline level at a call site is not codegen-neutral when the callee owns a pool temporary (`MarioMainStartTimer`, -3 instructions); an unnamed `TColor(r, g, b, a)` is +8 frame, `color.set(...)` +2 instructions.
+- Research seed (batch 208): retail's named block in `TSunModel::perform` is `mtx` 0x78 / `dir` 0xa8 / temp 0xb4 against ours `dir` 0x80 / temp 0x8c / `mtx` 0x98, so the inlined `moveSun_`'s locals rank above the caller's own `Mtx`; the same question is open in CameraMultiPlayer (batch 151) and in the MapObjPollution/THPAudioDecode rotation pair.
+
+## Research batch 208 (2026-09-18): an inlined callee's class-object locals outrank the caller's own
+
+Measured in a scratch TU with the game flags (a caller with a 48-byte `Mtx` and an inlined member declaring two 12-byte class objects, one `bl` per use).
+**Stack objects are grouped by the body they were written in, and the groups stack downward from the top of the named area in expansion order**: the caller's own named locals highest, then the first inlined expansion, then the second, and so on; inside a group addresses ascend with declaration order (later-declared higher), and the compiler's `0x4330` int-to-float temps sit above every group.
+Inert, byte-for-byte: the caller's array at function scope declared first or after the call, in an inner block before or after the call; the callee's locals trivial or with a user ctor; the second callee spelled as a member or as a free `static inline` taking the receiver by pointer.
+The only knob is **which body the object is declared in**: passing a caller-declared `Mtx` into the callee by pointer restores the caller-first order exactly. So when retail places what looks like a caller's array *below* an inlined callee's locals, that array is a local of a **second** inlined callee.
+
+- `TSunModel::perform` is the worked case (97.48 -> 97.61, 40 markers -> 7, frame 0xe8 -> retail's 0xe0): the `CUE_CALC_ANIM` body becomes `inline void TSunModel::calcAnim_()` holding the `Mtx`, and the three camera subtractions bind `CPolarSubCamera* camera = SMSGetCamera();` once (-8 of low region) while the `scaleAdd` argument stays a fresh `gpCamera->` read, which retail reloads after `MsVECNormalize`. The recorded "`SunModelCalcAnim` level is byte-for-byte inert" was wrong and is withdrawn. Left: a constant 4 bytes at the top of `calcAnim_`'s block (`dir - mtx` 0x34 against 0x30), invariant under a 4- or 8-byte local before or after `mtx`, hoisting `calc()` out, a `J3DModel*` binder and `MTXCopy(mtx, getBaseTRMtx())`; the scratch TU with the same shape shows no such pad. Per-site `gpCamera->` is -4 at each subtraction operand and +0 at the `scaleAdd` argument.
+- Re-classified: `TMapObjRevivalPollution::loadAfter` and `AudioDecoderForOnMemory` have no class-object local; both are batch 145's wholesale pool-block/local-block trade (retail ranks the named scalar above the `@ha/@l` address temps, `this` between the groups in `loadAfter`; `loadAfter`'s 40 dead bytes have no legal carrier since `registerPolluteTex` is emitted). `ctrlMultiPlayerCamera_`'s residue is a low-region ordering of a single carrier (`MsSqrtf`'s temp 0x28 retail vs 0x18 ours), which this rule does not reach.
+
+## Research batch 210 (2026-09-19): a zero-frame callee-saved rotation is an inlined callee's `this`-vs-parameter rank; J3DModel linked
+
+- `J3DModel::entryModelData`'s surviving pair (`dlSize` r25 / `J3DMatPacket*` r24 in retail against our r20/r21) is not a declaration-order problem: declaring the packet first, uninitialised, and assigning it after `countDLSize` is byte-for-byte inert (batch 171's FPR finding holds for GPRs). **Making both values arguments of one inlined call lands it**, because the explicit parameter outranks `this` (batch 144). The header already had the callee: `J3DDrawPacket::newDisplayList(u32)` in `J3DPacket.hpp` is retail's `stw 0x30`/`lwz 0x30` pair verbatim, so the else arm is `mMatPackets[i].newDisplayList(pModelData->getMaterialNodePointer(i)->countDLSize())`. **Before fabricating a TU-local level for an ordering, grep the class's own headers for a method with that body**: a fabricated `static inline X(packet, dlSize)` produces the identical stream and the identical +8.
+- The +8 was paid by *removing* batch 202's own lever: with the arm going through the header inline, the `J3DShapePacket* shapePacket` binding is frame-neutral and is replaced by a binding of the **array base** (`J3DShapePacket* packets = mShapePackets;` then `&packets[shape->getIndex()]`), which is 0xe8 and also lands a volatile r4/r5 swap at the `addShapePacket` argument: **which operand of an indexed address is the named local decides which volatile register the chain is built in**. Worse, do not retry: folding `shape` into the binding (+8), a named `u16` index (+8), a named `shapePacket` on top of `packets` (+8), a named `J3DMaterial* mat` across the loop (28 markers), dropping `mat` in either NBT loop (+8/+32). The function's whole 0xb0 named region is dead (no `r1` reference in the body): its frame is pure inline-temp accounting.
+- `entryModelData` 99.92 -> 100, J3DModel 88.56 -> 100 matched code, **linked (490th object)**.
+
+## Research batch 209 (2026-09-19): a defaulted **class** argument is codegen-neutral and frame-positive
+
+- **A defaulted argument of class type whose object is never read emits nothing and still reserves stack at every call site of the inline that declares it**: `align8(sizeof)` for the object plus the same again as an outgoing copy area once the class is too big for a register (`sizeof <= 4` is +8 per site, 8 is +16, 16 is +32). This refines header round 19's "a defaulted argument is a codegen-neutral level": neutral in instructions, not in frame. A live by-value class argument is never free (a `JADPrmName` wrapper carrying `JADPrmS`'s `const char*` is +24 instructions).
+- In `JALSystem::append` one such argument on `JADPrmS<T>`'s ctor (7 sites x 8) plus an 8-byte one on `JALPrmSet`'s (3 sites x 16) is 0x68 exactly: frame 0x130, 100.0%, 371/371, zero differing operands, nothing else in the tree moves. **Not committed**: no clean source names a 4- or 8-byte JAudio debug type, and an empty class invented to hold the slot is a probe struct with extra steps. The unit links the day that type is named from evidence.
+- Refuted there: by-value `JADPrmS` parameters on `JALPrmSet` (0x110, +27 instructions); copy-init of the four prologue objects from same-type temporaries (0xe0, +14); forwarding `JALPrmSet`'s defaulted objects to its members instead of defaulting again (0x118, wrong total). Sibling: `MSSetSoundTL`'s ctor is missing the same 0x68 with seventeen `JADPrm` constructions, so "8 bytes per `JADPrmS`" does not generalise; either independent, or both bodies declare one dead object of the same unnamed type.
+
+## Research batch 211 (2026-09-19): the JGadget pool stride is the container receiver's naming at the call site
+
+- **Not a level at all**: whether the receiver of `getChildren().push_back(x)` is a *named local pointer* or an unnamed expression. A named receiver packs every expansion's base-iterator temps into one contiguous run and parks the dead words at the top of the block; an unnamed receiver (a `TNameRefGen::search<T>(...)` result consumed in place, a member read) pads each expansion's sub-block by one word. `TIdxGroupObj* group = JDrama::TNameRefGen::search<TIdxGroupObj>(...); group->getChildren().push_back(this);` takes `TLampTrapIron::loadAfter` and `TLampTrapSpike::loadAfter` from `0x78 [2]+4 [3]+4 [4]` to retail's `0x78 [5]+8 [4]`, both exact.
+- The knob is one step out from the list: naming the `TList_pointer<T>&` or `*` packs the pool too but drops the `push_back` block 4 bytes (pointer/reference ladder inert, confirming 161); only naming the *searched object* keeps both. A TU-local helper holding search plus push_back out-lines the chain (0x50); an empty forwarder loses a temp; naming `this` adds a slot.
+- **The sign is confirmed in reverse by `TSelectDir::rsetup`**: our seven named receivers pack `[48]` contiguous against retail's four padded `[5]+4` groups, so retail's `root` pushes went through an unnamed expression there (the member `TDirector::unk10` is a `TViewObj*`, not the list type: the open lead is which expression).
+- Oversteers by one level where the site already wraps `push_back` (`TIdxGroupObj::add` in `TEnemyManager::createEnemies`: the pool collapses to `[8]`); wrong dial where the pool's shape already matches and the residue is missing dead bytes under it (`TRiccoHook::init` 8 above the pool plus a 4-taller named region; `TMirrorActor::init` a low-region shortfall). `TSeal::init` with the named receiver and `->push_back(this)` gets the first gap right (one slot and 2 markers left) but loses 0.1 fuzzy to its independent r30/r31 rotation: pair it with a 4-byte lever above the pool. `SDLModel::entry` and `TPerformList::perform` not reached.
+
+## Rotation-rule application 212 (2026-09-19): the six-rung callee-saved ladder
+
+- **Full ladder, measured on `TBossHanachanAnm::setHeadAndBodyAnm`**: inlined-callee parameters > caller locals > caller parameters > `this` > pool/base temps > caller inner-block locals. Moving the loop body into an inlined member makes `body` an inlined callee's parameter and it jumps r25 -> r31 with everything below exactly retail's; retail's `body` (r30, one rung under `i`) sits in the *caller locals* bucket, which an inner-block local never reaches and which hoisting to function scope does not reach either (batch 205 reconfirmed). Helper parameter order is inert.
+- **An inlined member call costs +8 of frame per parameter** (0x68 -> 0x88 with four), so the rotation rule is priced out wherever the frame is already exact and no named pointer local can be dropped to pay it.
+- The rule needs a genuine receiver/argument pair: a dead-range coalescing tie (`TMapObjTree::initMapObj`: the leaf count dies before both format-string bases exist, both assignments legal), a local-vs-stack-address pair (`copyAnmMtx`: retail's first named local is a 4-byte one declared before the matrix, the 0x64/0x68 hole), and a C TU (`AudioDecoderForOnMemory`: a `static inline` helper folds and MWCC regenerates the global-address temp) are outside its reach. `JPAEmitterManager::createEmitterBase`'s two TU-local binding levels are not the cause of its r29/r30 swap (direct calls, frame -0x10, same swap): landing it needs `&unkA4[param_3]` as the explicit parameter of a call whose receiver is `linkInfo`, and no such call exists.
+## Research batch 214 (2026-09-19): retail's (4, 12) is reachable but the map forbids its only carrier
+
+Batch 142's driver rebuilt in this batch's scratch (`drv.py`, `x1`-`x7`), reproducing the stock `(16, 0)` and its `(4, 4)` shape byte for byte before anything was changed.
+Geometry stays **(below, above)** = pool bytes under and over the live `bl sub` temp, frame 0x40 / temp 0x10 / named 0x28 / 55 instructions being retail.
+
+| spelling (on top of batch 142's `(4, 4)` operator- unless stated) | below | above | instructions |
+| --- | --- | --- | --- |
+| stock header | 16 | 0 | 55 |
+| batch 142's `const TVec3&` `operator-` + `void subV` | 4 | 4 | 55 |
+| + defaulted class argument on the **copy constructor** (empty class, or the header's real `TUtil<f32>`) | 4 | **12** | 55 |
+| + the same with an 8-byte class | 4 | 20 | 55 |
+| + the same with `Vec` | 4 | 28 | 55 |
+| + defaulted `int` / `f32` argument on the copy constructor | 4 | 4 | 55 |
+| defaulted class argument on `sub` | 12 | 4 | 58 |
+| `TVec3 nextPos(mPosition.x, mPosition.y, mPosition.z)` (the real 3-argument constructor) | 4 | 8 | 55 |
+| `operator-` as `TVec3 r; r.sub(fst, snd); return r;` (the real two-argument `sub`) | — | — | 51, no `bl` |
+
+- **The exact geometry exists and is worth exactly what batch 142 priced it at.** The copy-constructor row is retail's slot map, and tree-wide it is the predicted **+9 functions to 100** (`TEnemyAttachment::bind`, `TChuuHana::bind` and `attackToMario`, `TAmiNoko::bind`, `TKoopaJrSubmarine::bind`, `TCoasterEnemy::bind`, `TLimitKoopa::bind`, `TLiveActor::bind`, plus `TNerveSmallEnemyJump::execute` where 142 listed `TLeanMirror::loadAfter`) against **90 off 100**.
+- **The carrier is refuted by the map, not by taste.** MWCC mangles a defaulted parameter into the signature, and the map fixes the arity of every candidate: `__ct__Q29JGeometry8TVec3<f>FRCQ29JGeometry8TVec3<f>` (linked, weak, MarioCollision.cpp) and `sub__Q29JGeometry8TVec3<f>FRCQ29JGeometry8TVec3<f>` each take one argument, and there is no `subV` in the map at all. Applied, the copy-constructor argument takes the linked `__ct__` weak body from 100% to MISSING. `operator-`, `operator-=` and `operator=` cannot carry one at all — C++ fixes an operator's arity and MWCC rejects the extra parameter outright, so "which of those is expanded at the 130 `bl sub` sites" never becomes a question.
+- **Decomposed, the two halves price very differently.** The copy-constructor argument **alone** is +1/-89 (it is the 89, and needs the reshaped `operator-` to pay for any of the nine). The `operator-` reshape **alone** is +0/-2 and otherwise inert tree-wide — its whole cost is dropping the weak `__ami__` copy to MISSING. So batch 142's "(4, 4) half" is nearly free, and the one thing blocking it is a single weak emission.
+- **That blocker is a concrete lead, not a wall.** Retail calls `__ami__` out of line **twice inside `TYoshiTongue::movement`** (`build/GMSE01/asm/Player/Tongue.s` lines 582 and 726, the weak body at 0x80268168), so retail's `operator-=` is genuinely inline-refused there independently of `operator-`. Our build only gets the symbol for free because our by-value `operator-` routes through it. Restore those two sites in Tongue.cpp (82.27%) and the `(4, 4)` half becomes committable on its own.
+- **Research 211's naming knob does not reach this class.** Eleven caller spellings measured on both the stock and the `(4, 4)` header — `V n = m`, `V n(m)`, declare-then-assign, `n.set(m)`, a named `const V&` or `const V*` operand at either or both ends, a named `this`, a named result — are **byte-identical slot maps** in every case. Only an accessor moves anything, and it moves `below`: a `const V&` `getPosition()` at both ends is `(16, 8)`, a by-value one costs +6 instructions. This confirms and widens batch 142's "the whole caller side is inert".
+- **The `above` ladder, for whoever picks this up.** Base 4; the real 3-argument constructor on `nextPos` is +4 (the only legitimate, instruction-neutral rung found, and it is per site, so it costs nothing outside the nine `.cpp`s); a dead binding after the subtraction is +4 (padding); the defaulted class argument is +8 (refuted). Nothing measured lands the last +4 on top of the 3-argument constructor except one dead binding, so the shape is now **one** piece of padding away from retail instead of batch 142's two — still padding, still not committable.
+
+## JGadget application 213 (2026-09-19): MapObjTrap linked; the +4 rung is never alone
+
+- **Two same-typed pointer variables in sibling switch arms, the inner shadowing the outer, cost one callee-saved register**: retail's `addi rD, r3, 0` then `mr rD, r3` on the *same* register is one variable declared then reassigned (`TLampTrapSpike::control` 99.5 -> 100, `stmw r27` for our `stmw r26`).
+- **A named pointer local whose only use is one call argument can be +8 of dead frame at zero instruction cost** when its initialiser is an inlined accessor over a real `bl` (`MtxPtr mtx = getModel()->getBaseTRMtx();` ahead of `emitAndBindToMtxPtr`, `TLampTrapIron::receiveMessage` 99.9 -> 100): a cheaper and more honest +8 than a fabricated binder; try it before a TU-local `static inline`. The "pointer local that only feeds a call costs an `mr`" rule is about locals initialised from a plain load. **MapObjTrap linked (491st object).**
+- `TNerveRHGraphWander::execute` 99.8 -> 100: pool base 0xa0 vs 0x9c, one dead 4-byte inlined-accessor temp too many; any one of its three accessor reads spelled as the raw member lands it (ambiguity recorded).
+- **The +4 low-region rung of a member-read binder is +4 bottom and +4 top (+8 frame), never +4 alone** (`SDLModel::entry`, five configurations: a binder over `mSdlModelData` is +8 bottom/+0 top/+8 frame per site; a direct-return fork nested in it lands retail's groups but overshoots to 0xc0; turning the flag accessor into a fork pays the 8 back but re-opens gap 2, which is 4 only while both flag sites go through a binding level). The residue is one word that must move from the top region to gap 2 at constant frame, and no binder rung does that.
+- `TSeal::init`: the named receiver plus `group->push_back(this)` makes the whole slot map byte-exact (43 -> 41 markers) but the independent r30/r31 rotation costs 0.1 fuzzy; named `u8 maxHp`, a named `TMapCollisionManager*`, a split `mScaling.x` and a named spine do not turn it. `TRiccoHook::init`: a binder over `getSaveLoadParam()` or `mSpine` lands the frame but leaves the +4 spill; `THookParams* prm = getSaveLoadParam();` is -8. `TMirrorActor::init` needs +16/+8/+0 under the pool (not a translation); `createEnemies` with `add` removed breaks the body (90.2).
+
+## Closure 216 (2026-09-19): seal's rotation lever and PerformList's header-only grouping
+
+- `TSeal::init` with the named receiver has a byte-exact `push_back` pool (accepted -0.08 fuzzy, 43 -> 41 markers); two residues: the r30/r31 rotation and one 4-byte hole below the inlined `setUpUnk8TRS` Mtx. **The rotation has a measured lever**: one live caller-local pointer in the `createMActor` window (`MActor* actor = createMActor(...); mMActor = actor; actor->offMakeDL();`) puts the `.rodata` base in r31 and the `this`/group chain in r30 as retail does (6 markers, 99.3), but retail reloads `mMActor` (`stw`/`lwz 0x74`) and the local elides it; the same trick on the keeper or the collision manager does nothing, so retail's fourth callee-saved value is a local elsewhere in the body. `mSpine->`/`getMaxHitPoints()` written out each remove 4 under the Mtx *and* 4 at the top: the Mtx hole is an allocation-order difference in a pinned low region.
+- `TPerformList::perform`: research 211's receiver knob does not reach this pool (every caller spelling moves only the frame: a named `TSingleLinkList*`/`&` -0x10, a named `this` +8, `++it` -0x10, a `while` byte-identical, a named `end` +2 instructions). The only construct producing retail's grouping (`[4]+12 [5]+4 [2]+12 [2]` at 0xe8) is research 161's named result inside `TSingleNodeLinkList::begin()/end()`, which drops both `TPerformList::push_back` overloads: a header-round item with the lever-removal rule, not a unit item.
+
+## Research batch 215 (2026-09-19): the `ptr + index` add order is the statement form, not the index spelling
+
+- **A compound assignment `p += index` emits `add rD, rPtr, rIndex`; every single-expression address emits `add rD, rIndex, rPtr`.** Measured over ~60 spellings in a scratch TU reproducing `J3DSkinDeform::initMtxIndexArray`'s loop nest. Within one expression the constant decides the *instruction* order: a constant inside the index (`&dl[3+p]`, `dl+(p+3)`) is `add` then `addi 3`; a constant outside (`dl+p+3`, `&(dl+p)[3]`, `&dl[p]+3`, `((Hdr*)(dl+p))->data`, a `return p+n` helper) is `addi 3` then `add` and costs an extra `mr` wherever the product lives in r0. Supersedes closure 202's "no index spelling turns it round": the knob was never in the index.
+- `u8* base = dl; base += vtxSize * k; u8* vtx = base + 3;` gives retail's exact pair at 247 instructions and an exact frame, but retail builds the chain in one register (r4/r4) and a two-object chain takes r3 then r4 (2 differing operands against the single-expression form's 1; source kept as the latter). Inert for the register: declaration order and scope of both locals, a TU-local `p += n; return p;` binder, `(base += n) + 3`, the comma operator; `(vtx += n) += 3` spills; any one-object two-step form sinks the `+3` into the load displacements (+2 instructions).
+- `J3DDeformer::deform`'s residue is **one** missing word of low inline-temp pool below `pos[3]`, not two gaps: every named slot is 4 low and the `lfd`-aligned u16-to-f32 pair rounds that to the 8-byte frame gap (a first-declared `trash[4]` is +8 and fills it from the wrong end). Candidate: a +4 rung (a direct-return fork over a plain member read nested in a binder) on one of the raw `cluster->`/`vertex->` reads.
+
+## Header round 38 (2026-09-19): the JGadget base pair is priced per half
+
+- `TSingleNodeLinkList::begin()` and `end()` are independent levers: `TPerformList::push_back(TViewObj*, u32)`/`(const char*, u32)` expand only `end()`, so naming `begin()`'s result is free for them while naming `end()`'s adds one iterator temp and a second `bl __ct__(const iterator&)` to `Push_back`'s chain (100 -> 92.5/94.2); `perform` needs both named to reach retail's 0xe8. Eleven derived-layer repairs do not remove the extra temp: a named `end` in `Push_back` (93.7, frame 0x58 right, seven temps), a directly constructed iterator (63.5), derived `end()` named (85.5, perform 0x100), `Insert` by non-const ref (98.1) or const ref (93.5) both at 0x50, `Insert` without the base-ref cast (byte-identical to stock), `Insert` returning `void` (92.8, 0x58 but seven contiguous), `Push_back` calling the base `Insert` directly (68.3), a derived `Insert` on the base iterator (73.1), a named `TSingleLinkListNode**` (95.3), `const` on the named result (inert). Rejected, nothing committed.
+- **Correction to closure 216**: research 211's receiver knob does reach `TPerformList::perform`. A named `TSingleLinkList<TPerformLink,0>*` receiver merges our `[2]+4 [3]` into retail's contiguous `[5]+12` in every header configuration; with both base halves named the slot map is `0xd8 [2]+8 [2]+4 [5]+12` against retail's `0xe8 [2]+12 [2]+4 [5]+12`: one word of gap-1 (between the derived and base `operator!=`/`==` by-value parameter pairs) and 0x10 of frame from exact, gap-2 pinned. Base-pair naming steps gap-1 4 -> 8; a named derived `begin()` steps gap-2 instead (0xf0); deleting the derived `operator==` collapses the pool. The named receiver alone costs instructions (97.2): a probe, not a spelling. `singlelinklist.hpp` is included only through `PerformList.hpp` (MarDirector*, MarNameRefGen, PerformList), so its blast radius is small.
+
+## Closure 218 (2026-09-19): deform's word is an accessor temp; rsetup's pad is upstream of the call site
+
+- `J3DDeformer::deform` 99.68 -> 99.76, frame exact: the missing word is one 4-byte inline-accessor temp at the bottom of the dead low pool (the `lfd`-aligned save area rounds +4 to +8). Routing any single raw `cluster->` read through an in-class accessor lands it (`getNrmNum()`, `getPosNum()`, `getClusterVertexNum()`, `getFlags()` each alone: 0x118, 60 -> 18 markers; `getClusterVertex(i)` 37; two reads 40; the angle accessors overshoot to 0x120/0x128). Four members are byte-identical choices each read once tree-wide: the pick is undecidable, recorded. Residue: 18 volatile-register markers in the normal loop plus a swapped emission order of the two sign-index `rlwinm`s.
+- `initMtxIndexArray`: the `+3` sink is a **use** property, not a statement form: the same function's outer step `dl += vtxSize*vtxCount; dl += 3;` already compiles to retail's `add rD, rPtr, rIndex; addi rD, rD, 3` because `dl` has non-indexed uses. `vtx += vtxSize*k + 3`, `vtx += 3 + vtxSize*k`, `(3+vtxSize*k)+dl` all canonicalise to index-first; `vtx[3+off]` x3 and `vtx += 3` are +2; `dl+3` before the compound +1. The two-object form has retail's operand order and only the intermediate register wrong (r3 vs r4): a volatile-register knob.
+- `TSelectDir::rsetup` 99.6: the 0x38 is three pieces (+28 below the first pool slot, +20 of in-pool pad over the first five expansions only, +8 above the pool where a second temp block alternates 0x10/0x14 groups in retail). Retail's receiver at the `root` sites **is** a named local: every unnamed form (a per-site cast of `unk10`, a TU-local binder returning the cast, `insert()` at four or all sites, `root` reloaded after the store) costs instructions and keeps the pool `[48]`. Research 211's knob is the wrong dial here; the pad's cause is upstream of the call site. `direct()`'s carrier ladder is exhausted in its TODO.
+
+## Closure 219 (2026-09-19): the global-fork rung lands an off-grid frame; binder price tracks object size
+
+- **The global-fork rung (+4 per read) is the lever for a function sitting 4 off an 8-byte binder grid**: `TWalkerEnemy::behaveToFindMario` (99.89 -> 100) with a TU-local `static inline THitActor* WalkerEnemyMario() { return (THitActor*)gpMarioAddress; }` feeding `setGoalPath`; `setGoalPathMario()` and the spelled-out cast bracket retail (0x2c/0x50 vs 0x30/0x48 against 0x34/0x50). Try it wherever those two bracket retail.
+- **A binder over a large class member is priced by the bound object's size, not its return type**: on `TDrawSyncManager::mCallbacks` (`JGadget::TVector`, 0x18) a reference binder, a pointer binder, a direct-return fork and a member accessor are all +16 (`setCallback` 99.62, retail = the named-temporary form plus one 8-byte object below it).
+- **Ladder application**: `TDrawSyncManager::start`'s five-way rotation is one value moving rungs: MWCC coalesces the inlined `TFifo` ctor's `capacity` parameter with the caller's identically valued `param_2`, demoting it from the inlined-callee-parameters rung to the caller-parameters rung; retail keeps them distinct. A TU-local `MakeFifo(int)` level is worse (28 markers); the ctor with assignments instead of an initialiser list is inert. What keeps the two distinct closes the function.
+- `getSpine()` on an inlined `pushAfterCurrent` swaps the nerve/spine volatile registers (r4/r5): not a frame lever at inlined push sites. A named class local inside an inlined callee (`polarXZ`'s `TVec3 v`) is +16 frame but costs a real copy (-5.5). `setSeDistanceVolume`: naming the category index, or an anonymous shift (re-CSEd), inert.
+## Research batch 220 (2026-09-19): the volatile-GPR chain is an SSA-value count, and the `+ const` sink is block-local
+
+Two seeds in `J3DCluster`, both reduced to one mechanism: **retail keeps an address chain in a single volatile register where we spend a fresh one per step**, and the lever for that is not a spelling but how many SSA values the statement form creates.
+
+- **The `+ 3` sink in `J3DSkinDeform::initMtxIndexArray` is MWCC's address flattening, and it is *basic-block local*.**
+Inside one block, every `p[reg]` use of a pointer whose definition is a visible chain of adds is rewritten to `add rX, base, reg` plus a displacement load, so a separate `addi 3` survives only where the flattener cannot see the definition.
+Measured in a scratch TU carrying the loop nest (~40 spellings on top of research 215's ~60): the sink is insensitive to the **number** of uses (1, 2 and 3 indexed uses all sink), to an extra non-address use (`f(vtx)` sinks *and* pays its own `addi`), to a constant-0 index, to `++vtx` x3, `vtx = vtx + 3`, `vtx += sizeof(T)`, a `u8**` or `u8*&` helper, `do { } while (0)`, and a later `vtx - dl` use.
+It **is** blocked by retyping (`(Hdr3*)vtx + 1`), by `u32` arithmetic, and by a block boundary.
+- **A dead-on-arrival second value always takes the lowest free volatile; the long-lived one takes the first register free across its whole range.**
+`u8* vtx = dl; vtx += vtxSize * k;` on its own is `add r4, r25, r0` — retail's operand order *and* retail's register, because the single value is live across the `mr r3` of the upcoming call.
+Every form that keeps the `+ 3` alive introduces a second value, and that value dies in one instruction, so it takes r3: the two-object form, the `Hdr3` retype, `u32` arithmetic, an inlined `p += off; return p + 3;` helper, `register`, and both declaration scopes are all r3/r4 (2 markers) — worse than the stock single expression's one reversed `add`.
+- **The only construct that reproduces retail exactly is a phi.** `vtx += vtxSize * k; if (c) vtx += 3;` gives `add r4, dl, prod; addi r4, r4, 3` byte for byte: the flattener stops at the block edge and the merge forces both defs into one register. Retail's stream has no branch there, so the function is **unreachable from honest source** and stays at its single marker. Closed.
+- **`J3DDeformer::deform`'s 18 markers are the same phenomenon and the stock body is a local optimum.** Retail chains `add r7, r27, r7` -> `lwz r7, 4(r7)` -> `clrlslwi r7` in one register; we spend r7/r9/r6. The `rlwinm 20`/`rlwinm 21` pair is a pure **schedule** swap, not an allocation one: both sides put the y index in r7 and the z index in r6, only the two slots are exchanged. Worse, do not retry: reusing `flag` for the `src` index (20 markers +2 opcode), a named `u16* posFlag` (20/2), dropping the named `clusterKey` in the position loop (17 but 2 opcode diffs — retail's `add; lwz 4` becomes `addi 4; lwzx`, so the named local is right) or in the normal loop (18/2), swapping the declaration order of `flag` and `src` (21, so the stock order is the better one), `sign[(flag >> 15) & 1]` (27/4/5/5), naming the three shift results or the three `sign[]` values (41 each), three `f32` locals in place of the `Vec` (41), `posDstIdx[i]` in the `dst` expression (52), `cluster->mPosDstIdx[i]` in the zeroing loop (91).
+- **J3DCluster does not link**: `initMtxIndexArray` is closed as unreachable at 1 marker and `deform` is exhausted at 18, so the unit stays at two non-exact functions.
+
+## Research batch 221 (2026-09-19): named locals in the inlined callee are the ranking and the slot; DrawSyncManager 2/3
+
+- **What promotes a value to the top callee-saved rung is not keeping an inlined parameter distinct; it is how many *named locals* the inlined callee declares.**
+Closure 219 read `TDrawSyncManager::start`'s residue as MWCC coalescing the inlined `TFifo` constructor's `capacity` with the caller's `param_2`.
+Nothing that attacks the coalescing moves it: `TFifo(u32)` and `TFifo(const int&)` (a type change and a reference), an explicit `(int)` cast at the call site, an extra `init(capacity)` level inside the constructor, a named `TFifo*` result and a named `int cap` in the constructor are all byte-identical to stock or worse (28 markers).
+What lands it is **two named locals in the inlined `TDrawSyncManager` constructor** — `u8* stack = new u8[0x1000];` and `u8* buffer = new u8[0x50];` ahead of `OSCreateThread`/`OSInitMessageQueue` — which alone rotates the whole set to retail's r26 `param_1`, r27 `param_3`, r28 `this`, r29 `0`, r30 the `new` result, r31 `param_2`: **100.0%, 98.21 -> 100**.
+One named local (the stack alone) is inert; the value that moves to r31 is the one consumed by the *last* inline expansion in the body.
+- **The caller-side form of the same lever reaches the same ranking but mis-orders the prologue.** Copying two or three of `start`'s parameters into function-scope locals gives the identical registers (99.6, 3-5 markers) but emits the three `addi rN, r3/r4/r5, 0` copies in a compiler-chosen order instead of retail's parameter order, and all six declaration permutations are stuck at 3 markers. Parameters shuffled into their callee-saved homes are emitted in parameter order; locals initialised from them are not. One named local is inert here too.
+- **Named locals reserve stack even when they are dead; inlined-callee *parameters* never do.** On `setCallback` (99.62, the named-temporary form per closure 217) each dead named scalar declared **after** the named `TDrawSyncTokenRange` raises the object 4 bytes, and the first also raises the frame 8: 0x20/0x28 stock-named, 0x24/0x30 with one, **0x28/0x30 with two — retail byte-for-byte (100.0%)**. Two dead `u32`s inside the inlined `TDrawSyncTokenRange` constructor are the same 100.0%. Both are nonsensical temporaries, so **not committed**; the honest carrier would be a real two-word value the body computes and drops. Measured *free* (no slot): named pointer or reference binders over `mCallbacks.begin()` or the element, in either declaration order, singly or in pairs; the constructor with assignments instead of an initialiser list; a `setRange`/`set` helper called from the constructor (it also drops `drawSyncCallbackSub`). Two `u16` locals pack into one word (+4), one dead 8-byte object is +8 *and* +8 frame.
+- **`threadFunc` 99.85 -> 100**: its extra 4-byte local is not in `threadFunc` at all. `TFifo::read()` spelled with its index named (`int idx = getLoopIdx(mReadIdx + 1); return mData[idx];`) gives retail's 0x38 frame and `msg` at 0x20 with zero markers — a *live* named local in an inlined callee, so no fakematch. The same local in `size()` is 100.0% with 3 markers; in `push()` it is -3.6 and +1 instruction.
+- Unit: `start` and `threadFunc` closed, 19.27 -> 52.41 matched code, 8/10 functions. Left: `setCallback` (above) and the weak `JGadget::TVector<TDrawSyncTokenRange>::insert` (99.2, closure 152's shared-header item).
+
+## Closure 222 (2026-09-19): seal and riccohook pinned to the inter-group class
+
+- `TSeal::init`: `mSpine->initWith` for `getSpine()->` lands the inlined Mtx at retail's 0x6c with the whole pool exact (4 below the Mtx and 4 at the top), leaving one 4-byte dead word at 0xa0 (copies 0xa0/0xa4 vs 0xa4/0xa8) and the r30/r31 rotation. **The named `group` local and retail's `+0x10` converted-base binding are mutually exclusive**: the unnamed `search(...)->push_back(this)` reproduces retail's `addi rD, r3, 0x10` exactly (and THookTake's inlined ctor in riccohook proves `search(...)->getChildren().push_back(this)` is retail's spelling for that binding) but pads the second iterator group to 0x60/0x64. Group in an inner block is byte-identical; a named `TList_pointer*` adds a derived-to-base null test.
+- `TRiccoHook::init`: two independent residues, 8 bytes missing *between* JGadget group 1 (exact) and group 2 (0x84/0x88/0x8c vs 0x7c/0x80/0x84), plus the `&hookTake` spill 0xa4 vs 0xa8. A TU-local binder over `mSpine` puts its 8 at the pool bottom (frame 0xd8 and group 2 exact, group 1 then +8, spill +4). Every honest lever in THookTake's inlined ctor pads at the bottom or packs (`getChildren()` named group 19, `TList_pointer&` receiver 19, `->add` 22, `->insert` 23, a named pushed object +1 spill, a binder returning `&...->getChildren()` hoists the string base).
+- **The remaining one-function JGadget units share one open mechanism: dead words between two expansion groups** (riccohook 8, MirrorActor +16/+8/+0, SDLModel one word from top to gap 2, PerformList gap-1 word, seal's second-group pad when unnamed). Research 184 and 211 covered the stride *within* a group and the receiver's naming; the between-group gap is unexplained.
+
+## Application 223 (2026-09-19): the named-locals lever's priority and price
+
+- **Inside an inlined callee, "the value the last inline expansion consumes takes r31" overrides the parameter-vs-local rung**: on `setHeadAndBodyAnm`, `body` takes r31 whether it is the callee's named local or the caller's value, with `i` as a callee parameter either way (retail wants `i` above `body`), so the lever can rotate a set into retail's shape but cannot choose which value lands on top; it works only where the last-consumed value is the one retail ranks highest.
+- **A named local in an inlined callee is not uniformly +4**: +8 on `copyAnmMtx` (it splits the index from its `slwi` into two callee-saved values), +8 in a C TU, +8 for a reference binder in `registerPolluteTex`, +4 on `getLeafNum`. Research 221's "+4 per dead named local" is the floor. A C `static inline`'s named locals reserve frame but never re-rank (third confirmation, `AudioDecoderForOnMemory` 0x38 vs 0x30).
+- **The unnamed binding level is the cheaper lever**: on `copyAnmMtx` (96.1 -> 99.7, frame exact, instructions exact) a TU-local `EnemymanagerGetCurAnmFrameNo(p)` with no named local is frame-neutral and fixes a store-order pair no declaration permutation had moved; the named-local variant of the same helper is strictly worse. Residue: retail reuses one register for the index and its `slwi` (r27) with `wtf` in r28, we spend r29/r28/r27; `afStack_5C` 0x68 vs 0x64 with retail paying the 4 back as alignment pad under the 8-aligned conversion slot.
+- `TMapObjTree::initMapObj`'s tie needs a value ranked below a raw member read and no rung does that (a plain `getLeafNum()` moves it the wrong way, r27). `JPAEmitterManager`'s ctor is research 220's volatile-GPR class (retail spends r10/r9/r8/r7 on `addi` address temps in the unrolled zeroing loop), not a frame residue; `createEmitterBase`'s r29/r30 swap survives an inlined helper with two live named locals.
+
+## Closure 225 (2026-09-19): binder rungs are member-specific
+
+- **The raw-member binder and the same binder over the class's own accessor are different rungs** (+8 over `THitActor::mActorType` vs +16 over `getActorType()` or `mState`; `TLauncher::receiveMessage` 90.8 -> 100 with the real bug fixed: the water-hit particle and SE were emitted at the launcher's `mPosition` where retail uses `&sender->mPosition`). An `MActor*` binder **saturates at +0x28 regardless of site count** (1, 3, 5 sites identical). The +4 fork rung applied to **one of two** sites of a binder is a clean +4 (`TNerveBombHeiGenerate::execute` exact: `mMActorKeeper` binder at both sites, fork nested at one). A pure direct-return fork over a plain member read at a single site is +8 frame / +4 pool, instruction-neutral (`TBaseNPC::execUTurn`, frame and every offset exact; accepted -0.03 fuzzy).
+- Named-local rank: declare the `TVec3` before the `Mtx` and `set()` it after `MsMtxSetRotRPH` (`TCommonLauncher::stateLaunch` exact; the uninitialised declaration is free). `s32 launchPeriod = mLaunchPeriod;` hoists the load above `bl rand` (`TCommonLauncher::init` 98.2 -> 99.96; the JGadget iterator block 4 high is the per-expansion stride, not the receiver case: naming the searched object is -8 and 30 markers there). Reading two params via `mSLFoo.get()` instead of the `getSLFoo()` wrapper is one level shallower (`TNerveBombHeiThrown::execute` frame exact; residue a volatile-FPR rotation with `mSLThrownVY` loaded late).
+- Left with TODOs: `execUTurn` (retail materialises the struct-return slot address in r3 before the difference temp's in r4, forcing its `fmr f2, f0`), `execWalk` (two 12-byte copies), `execTurnToFirstState` (4 above `angle1`, every honest candidate refuted), `genEventCoin` (pool -8 plus a 16-byte hole above the `operator-` parameter copy).
+
+## Research batch 224 (2026-09-19): the between-group gap is the upper half of a level's price, not a third body
+
+- Twelve caller-side spellings measured on `TRiccoHook::init` against the base-iterator block (`g1`, 0x5c..0x70) and the derived-iterator block (`g2`, 0x7c/0x80/0x84). **An extra inline level costs 8 bytes and splits by position**: expanded before the JGadget expansion all 8 land below `g1` (both blocks +8, the gap invariant); expanded inside or after it the split is 4 below `g1` and 4 in the gap (`g1` +4, `g2` +8); a level in the receiver chain pays twice (+8/+8, frame +16). A binder over `getChildren()` lands `g2` exactly on retail's 0x84/0x88/0x8c at frame 0xd8 and is still rejected because `g1` comes with it. The gap can never grow without the bottom growing, so the +0/+8 that riccohook, MirrorActor, SDLModel, PerformList and seal all need is unreachable through levels: an allocation-order property of the two blocks themselves.
+- Refuted as causes of a between-group word: a `bl`, a `new` feeding the push, an inlined accessor read, a named local, a conditional, a dead 4-/8-byte non-trivial class local in the inlined ctor (its 8 lands above the pool), a bare direct-return fork after the push (free). Refuted as a model: research 184's standalone two-push TU has no second block; the two-block geometry exists only where retail keeps `TList<void*>::end()` and `TList_pointer<T>::iterator::iterator(iterator)` out of line.
+- **Census of all 54 one-`insert` sites** (20 exact / 34 differing, normalised slot sets; batch 224's scratch `pushback-census.txt`): the exact fully inlined shape is `0 4 | +4 | 12 16 | +8 | 28 32` (Butterfly, BeeHive, yunbo, TabePuku, Tongue, generator, bosspakkun) and every exact site names its receiver, while the differing ones are near-uniformly +4 on gap 1: a receiver-naming worklist beyond the five blocked units.
+
+## Closure 226 (2026-09-19): binder site counts, not site sets
+
+- **A raw-member binder used at three reads inside one block is +0x18 in one step**, where the same binder at one site is +8 and at two sites collapses to +0 (the pair-collapse and the triple-jump are one mechanism): `TMario::considerTake` exact with `MarioCollisionHeld(this)` at the three `mHeldObject` reads of the release block. Sweep site *counts*, not just site sets.
+- **Binder rungs are per member**: in `TMario::isUnUsualStageStart` a `gpMarDirector` binder is +0x10 per site while a `mWaterGun` binder is +8 per site (exact at 0x50 with two of the first and one of the second); `TMarioEffect::perform` exact with the `mWaterGun` binder at all five reads plus one on the case-0 `checkFlag` receiver (0x50 -> 0x80).
+- **A binder over a receiver that is already a function-scope named local is inert** (`removeCheckListData`, seven variants). Not on any ladder: `TMario::incHP` needs +0x20 and `SMSGetMSound()` binders give 0x10/0x18/0x28/0x30; `TDptMonteFence::touchPlayer` needs +8 and gets 0x10/0x18/0; `TYumbo::moveObject` is four calls with no bindable expression and size-exact callees. `TMapObjPlane::calcNrm` (76.6) is a structural rewrite (m2c-shaped; `h0N` used where the other three blocks use `unkFC`).
+
+## Receiver-naming sweep 227 (2026-09-19): the knob is two-sided and frame-signed
+
+- **Naming the searched object is worth -4 in gap 1 and -8 of frame** where `getChildren()` is the whole receiver chain (`TElecCarapace::loadInit` pool `0x40/0x44 | 0x54/0x58 | 0x68/0x6c` @0xb0 -> `0x44/0x48 | ...` @0xa8), so it lands only where our frame is +8 over retail *and* gap 1 is +4 (`TGCConsole2::entryHelpActor` and `TGessoPolluteObj::loadInit` exact; `TElecCarapace::loadInit` frame exact, `TFenceWater::initMapObj`, `TPakkunSeed::loadInit`, `TBossMantaManager::createEnemies`, `TCannon::init` lifted). Where the frame already matches it overshoots and is a net loss (`THauntLeg::init`, `TRoulette::initMapObj`, `TKoopaParts` ctor, `TAmiNoko::init`, `TBossManta::init`, `TAnimalBase::initNoLoad_`): **check the frame delta first, not the slot set**. Inert where another cause dominates the frame (Popo, PoiHana, HanaSambo, ModelGate, TinKoopa, FireWanwanTailHit, BEelTears `init`s).
+- **The reverse is real**: `TMapStaticObj::init` was the padded one in retail; consuming `getInstance()->search<TIdxGroupObj>(...)` in place took 21 -> 13 markers at the same frame. Reverse rejected on `TKukkuBall::init`, `initAndRegister`, `joinToGroup`, `TMareEventWallRock::load` (un-naming sinks the search into the loop, 99.7 -> 58.5).
+- **The receiver local counts against the inline budget**: removing the named `group` from `TTinKoopaPartsBase::initTinKoopaPartsBase` lifted it 99.84 -> 99.88 but dropped it under the 14-statement depth-1 limit, so `TTinKoopa::init` expanded it (93.1 -> 64.4). A one-line receiver change can flip a neighbouring function's call-vs-expand decision; run `changes_all` per unit.
+
+## Closure 229 (2026-09-19): FlagManager linked; the parameter fork rung
+
+- **FlagManager linked (492nd object)**: four of its six functions were one real bug (the `case 7`/`case 9` range guards were `< 0x70002`/`< 0x90001` where retail has `< 0x70003`/`< 0x90002`, making flags 0x70002 and 0x90001 unreachable through every entry point, so `correctOptFlag`'s mirror was a no-op); `start` needed `firstStart()` restored as the inline level holding its three shared statements (+8); `save` a named uninitialised `OSTime` declared first (+8 above every named local). `TFlagManager::end()` is 4 bytes against the map's 0x34 (UNUSED, dead-stripped, body unwritten).
+- **A direct-return fork over a *parameter* is +8 where the binding form is +0x10** (`TPollutionLayerWave::initJointModel` exact; `isPolluted(f32, f32, f32)` exact with a fork at the `y > 1.0f` test and a binding fork at the final call, each +8; binding an argument of either virtual accessor reaches the frame but hoists the receiver load).
+- `TLiveActor::setAnmSound`/`setCurAnmSound`: the `OSPanic` line is 0x386. `calcRideMomentum`'s residue is `fsubs` landing in `MsWrap`'s return register: `f32 d = alpha; d -= MsWrap(...);` in `MsAngleDiff` fixes it, but `MathUtil.hpp` is shared (a header item, measure all callers) and a TU-local copy is +8 with an `lfs`/`fadds` swap.
+- Open with diagnoses: spcinterp's `execadd`/`sub`/`mul`/`div` share one residue (the `TSpcSlice(v)` temp of the inlined `push(int)` at 0x20 vs 0x24: a consumed 4-byte binding retail has below it; forwarders and `else`/`return` neutral, `push(TSpcSlice(...))` -20); `TSpcInterp::TSpcInterp` re-reads `this` from `8(r1)` after the push loop's store; `TFenceWater::initMapObj` is one instruction from exact (`mr r31, r3` vs `addi r31, r3, 0` on the `this` save); PollutionLayer `initTexImage`/`cleaned`/`draw` are pure low-region gaps (+0x70/+0x30/+0x38); `stampModel` a two-load scheduling swap.
+
+## Closure 231 (2026-09-19): GCLogoDir is one TU-wide carrier; typeof() reads price 4
+
+- Real bug: `TGCLogoDir::direct_nlogo`'s `case 3` tested `mProgSelect->unkC.mValue` (the `TViewObj` flag word, 0xffff at construction, so state 3 advanced immediately); retail reads `TProgSelect::mHideTextBoxes` (`lbz 0x16`), the "user confirmed the progressive choice" flag (93.8 -> 95.4, structurally exact). The four `unkC.mValue` tests are `int`-typed (`(int)` cast; header lead: `JDrama::TFlagT<u16>::mValue`'s type or an `int` accessor). **All five GCLogoDir functions are now instruction-exact and differ only in frame, in multiples of 8**: `~TGCLogoDir` +8, `setup` +0x28, `direct` +0x30, `direct_dolby` +0x30, `direct_nlogo` +0xb0, i.e. 1/5/6/6/22 expansions of one 8-byte-per-site carrier used TU-wide; the dtor is a single statement (`mGamePad->offFlag(0x1)`), which bounds the carrier hard. One lever closes the unit.
+- `TFenceWater::initMapObj`'s last instruction is located: `mr r31, r3` vs our `addi r31, r3, 0` is caused solely by `group->getChildren().push_back(mMessenger)`; `push_back` takes `THitActor* const&` while `mMessenger` is `TMapObjMessenger*`, so binding `&this->mMessenger` carries an offset-0 pointer conversion that makes r31 address-typed; retail's argument is already the list's element type (a type fix, not a spelling). TU-wide: 8 of 18 `this` saves are `addi`, exactly the ones that pass an address of a member of `this` out of the function.
+- spcinterp `exec*`: **each inlined `typeof()` accessor read is worth exactly 4 bytes of pool below the else arm's temp** (raw `mType` reads at both operands move every slot down 8, frame 0x68); the missing +4 is one more zero-instruction accessor-style read in the condition or the float arm (named `int`/`f32` results ~10 markers, casts -20, a TU-local `int` binder +0x10, a `push(result)` forwarder neutral).
+- coasterkiller `moveCoaster`: **no component-pairing bug** (closure 228's reading withdrawn): both builds evaluate `getZDir` exactly; the residues are register pressure (retail saves r31 + f21-f31, we r28-r31 + f20-f31: three extra callee-saved GPRs = too many named locals) and the 0x58 frame; `indexToPoint`'s index argument is a named `int` local in retail. `Manager::loadAfter`'s carrier is the `ASSERT_TEST` (24 bytes of dead low region, the sizeof 20-24 -> +24 rung).
+
+## Research batch 233 (2026-09-19): GCLogoDir has no single carrier; callee probes need a non-trivial class
+
+- Closure 231's "one 8-byte-per-site carrier used TU-wide" is **withdrawn**: `~TGCLogoDir`'s only inlined callees are `TMarioGamePad::offFlag` and the implicit `~TDirector`, and `direct_dolby` calls neither, so 1/5/6/6/22 cannot be one callee. The five gaps are all dead low region (retail's int-to-float temp and `JUTRect` temp sit at the same distance below the saved registers as ours) and additive over independent inline levels: an 8-byte `~S(){}` local in `offFlag` closes the dtor to 100.0 (4 bytes is worth 0 there, so the object is 5-8 bytes); `isFullyFadedIn`, `isSomethingPushed` and `TFlagT::check` are one slot per site; `TFlagT::on` is 0 (the constant argument folds it to a bare `sth`); `TFlagT::set` two slots for four sites in `nlogo`.
+- **`direct_dolby` is exactly six accessor levels**: a seven-level probe (`isFullyFadedIn`, `getFadeStatus()` x2, `isFullyFadedOut`, `isSomethingPushed`, `getPortNum()`, `TFlagT::check`) overshoots by exactly one, naming `TSMSFader::getFadeStatus()` as a real level under both `isFullyFaded*` and refuting `getPortNum()` inside `isSomethingPushed` (retail reads `mPortNum` raw).
+- **A `volatile char trash[]` is not a valid probe inside an inlined callee**: a trivial POD prices 0 there while the same array in the caller's own body prices its size; callee-side measurements must use a class with a user-declared destructor. None of `offFlag`, `isSomethingPushed`, `isFullyFaded*`, `getPortNum` or any `TFlagT` member has an out-of-line map symbol, so all are legal carriers; nothing committed because no real 4- or 8-byte type in those headers is a plausible dead local. `setup`'s deltas are interleaved (0x14 at the bottom rising to 0x28), so it needs per-site levers; `direct_nlogo`'s 0x108 of dead low region wants ~20 zero-instruction levels (untested reading: every `mProgSelect->unkC` read/write is a two-level `get()`/`operator=` pair).
+
+## Closure 235 (2026-09-19): the fork over a file-local static, and a throw built from the wrong vector
+
+- Real bug: `TNervePoihanaThrow::execute` built the throw matrix from `mPosition` (0x10) instead of `mRotation` (0x30), so the tossed Mario flew in an arbitrary direction (99.97 -> 100).
+- **A direct-return fork over a file-local static is the +4-bottom/+4-top (+8 frame) rung; the binder form over the same read is +0x10** (`JPADragField::affect` exact). The consumed reference binding is +4 out of line and +8 in the inlined expansion of the same body (`TMap::isTouchedOneWallAndMoveXZ` exact, `isTouchedOneWall` frame exact with the record 4 low: the +4 rung inside the inlined body only).
+- Declaration order among function-scope named locals is retail's `roof, ground, floorY` in `TMario::checkGroundAtWalking` (exact). Naming the `TMsRange<int>` temporary as a local declared before `point` ranks its block above `point` (`THauntLegManager::initSetEnemies` 99.74 -> 99.79; naming the `rand()` index instead is +8).
+- Refuted: `MtxToQuat`'s trailing `+ 1.0f` canonicalises regardless of spelling; a TU-local `static inline` with a `const` receiver does **not** break MWCC's CSE of four flag reads (`calcFieldFadeScale`), so "a const accessor restores per-use re-reads" does not generalise to that shape. Recorded: `TMultiMtxEffect::setup` binds two stack addresses in retail (r19/r18) where we bind one; `HauntLegCallback` binds one stack address for two sites; `JPAAirField::affect` loads the subtrahend first in `diff.sub(a, b)`.
+
+## Header round 40 (2026-09-19): a carrier may have a matching out-of-line copy; crTimeAry is a depth-5 refusal
+
+- **A dead non-trivial local is free in the carrier's own out-of-line copy**: "The carrier has to be a callee with no matching out-of-line copy" is disproved on `TMapEventSink::rising()` (global, 156 B, frame 0x8): a 20-byte non-trivial local leaves the out-of-line copy byte-exact while adding +0x18 to every inlined expansion (`TMapEventSinkShadowMario::rising` and `TMapEventSinkBianco::rising` 99.9 -> 100.0). MWCC drops the unused local when compiling the body standalone and reserves for it only when expanding, so only an *instruction*-visible change rules a callee out. The MapEventSink TU wants a 17-24-byte object in `rising`, `load`, both `watch`es, `initBuriedBuilding` (one each), `TMapEventSinkInPollution::loadAfter` (three) and `...Reset::loadAfter` (six): the compiled-out-assert shape (`ASSERT_TEST` in coasterkiller); no plausible type in the headers (`J3DTransformInfo` is 0x20 -> +32, `TVec3` 12 -> +16). Not committed.
+- **`TTimeRec::crTimeAry`'s weak copy is a depth-5 refusal and depth 4 is not enough**: an in-class one-statement body reached at depth 4 still inlines; at depth 5 it is refused and the weak body assembles to retail's exact six instructions (`gameLoop` 97.2 -> 99.0). Retail emits it from the second of `startTimerTwice`'s two appends, so the reconstruction needs three real forwarding levels there. `unk4` is already `TTimeArray[2][2]` (`sizeof` 0x204; the `mulli 0x408` is the row stride): closure 242's declaration reading is withdrawn.
+- Tongue's two `(a - b) * k` sites decode to `bl __ct__`, `bl __ami__`, `bl __ct__`, an inline copy, `bl scale`: both the by-value copy ctor and `operator-=` are refused, which needs depth >= 4 at the site, not one level (the `operator-` (4, 4) half stays blocked).
+
+## GCConsole2 ladder 266 (2026-09-19): the elided centre vector
+
+- **`JGeometry::TVec3<f32> v; v.set(a, b, c); dst.set(v);` compiles to exactly the instructions of `dst.set(a, b, c)`** (MWCC forwards the three stores into the destination) and leaves the 12-byte slot reserved: **+0x10 of frame at zero instruction cost, filling a hole at the bottom of the named-local block that no binder reaches** (binders land below the pool). The whole residue of `TGCConsole2::processAppearCoin` and `processDownCoin` (both exact with fork-nested binders +0xc each and the named `center`). Grep `mGlobalTranslation.set(...)`/`setEmitterToPaneCenter` sites for the shape.
+- `checkChangeTelopArray` exact with five binder sites (`TFlagManager::smInstance` x3, `unkC4`, `unk570` at its first read only); `TPauseMenu2::loadAfter` exact (`PauseMenuItem(mMenuItems, i)` at two sites +8/+0x10 in the loop, `PauseBackground` with a nested fork +0xc). **The fork-nesting price is per binder body, not per site**: +4 with one or two expansions, +0x10 with three; binder placement in `-inline deferred` TUs follows reverse source order in the pool. `getWidth()` vs `x2 - x1` on a frame rect is free when an accessor temp already sits above it. A binder on `mPauseLetters[i]` breaks instructions where the identical one on `mMenuItems[i]` is clean.
+- Open with measurements: `setTimer` (+0x40 of dead low region below three accessor temps that must be spaced 8 apart, plus a `getWhite()` reload order); `processMoveNozzle` (+0x40 below nine `JUTPoint` temps, +8 above), the same shape as `TTalk2D2::checkBoardControler` (+0x3c below three `JUTPoint`s): `setPanePosition(n, JUTPoint, JUTPoint, JUTPoint)` functions with a dead block under the point pool that nothing inside the function reaches.
+
+## Elided-vector sweep 268 (2026-09-19): the lever prices +0x18 in the wild
+
+- Five functions exact with the elided vector (`TWaterGun::getEmitPosDirSpeed` on `dir->set(0, 0, 1)`, `TSmallEnemy::changeByJuice`, `TBossTelesa::damageRecover` with `bindPosition(actor)` binders +0x10 each, `TBathtubKiller::resetBathtubKiller`, `TRoulette::moveObject` with a `bindMActor` pointer binder +8): **it priced +0x18 every time**, at function scope and inside a nested block alike (GCConsole2's +0x10 was frame-alignment-specific: measure the rung). `TVec3 v; v.set(src); dst.set(v);` collapses the same way as the three-argument form, so the lever is available wherever a vector is copied.
+- **A binder returning a member address (`&actor->mPosition`) is +0x10; one returning a member pointer (`obj->mMActor`) is +8**: the practical 8-vs-16 knob. Over a function-local `static` array, binder sites cost +0x10, +0x10, then +8; a `self`-returning binder over `this` is +0x18; a named reference or pointer local over an inline `const TVec3&` accessor is +0.
+- Real bug: `TRoulette::moveObject` incremented `mRotation.x`; retail's 0x34 is `mRotation.y`.
+- Census (scratch `grpfh/strict.txt`): of 1068 functions at 99.0-99.99 in units with a sub-99.5 low, 300 are strictly frame-only (every `~` line differs only in an `r1` displacement or the frame immediate), 252 a uniform shift; deltas +8 x121, +0x18 x110, +0x10 x77, +0x20 x71, +0x28 x58. `--clusters` marker counts alone are not a frame-only test. Left with measurements: `makeObjDefault` (`this` live in r3 across the copy), `TPollutionLayer::cleaned` (0x30 vs rungs 0x18/0x10), `TMuddyBoat::control` (`scale` temp 4 high at 99.97), `appearing` and `marioHipAttack` (+8 with no +8 rung).
+
+## Frame ladder 270 (2026-09-19): 25 functions, the two-local binder, non-additive sites
+
+- **A two-local binder is +0x10 where the one-local binder is +8**, identical instructions (`J3DModel* m = p->getModel(); MtxPtr mtx = m->getAnmMtx(0); return mtx;`: `TMapObjBase::setRootMtxRotZ`/`Y` 0x30 -> 0x38, `TCoin::appearWithoutSound` 0x28): the missing rung between the +8 binder and the +0x18 two-site pair.
+- **Binder sites are not additive at 8**: one site +8 and two +0x18 in `TWaterGun::getPressureMax` regardless of which site or whether two distinct binders; `TBiancoGateKeeper::controlCollision` 2 sites +0x10, 3 sites +0x18; sites cost 8/0x10/8 by pool alignment, so measure each rung. A fork nested in a one-site binder body adds 0 (closure 264's +4 needs at least two expansions).
+- **The `spine->getBody()` binder is the cheapest bulk lever in the enemy nerve files** (nine nerves exact: Koopa Fall/Stagger/GetShowered, GessoStay, LimitKoopaJrYahoo, SmallEnemy Change/Jump, FireWanwanFreeze) but not free everywhere (bosspakkun changes instructions, `TNerveKoopaTumble` adds two): re-check instructions after every site. Also exact: `TTelesaManager::createEnemies`, `TKoopa::reset` (`getParam()` binder), `TWaterGun::isPressureOn`/`setAmountToRate`/`getPressureMax` (two `getCurrentNozzle()` sites +0x18 and the sibling `TNozzleTrigger*` cast local, which *lowered* the frame by 8), `TMapObjBase::marioHipAttack` (`SMS_GetMarioGrPlane()` +8), `TSandBase::withering`, `TBaseNPC::execMotionBlend_` and `calcRootMatrix` (two `mInbetweenCtrl` sites), `TYoshi::ride`, `TMarDirector::fireGetBlueCoin`, `TResetFruit::touchPollution`, `TMapObjChangeStageHipDrop::touchPlayer`.
+- Unpriced: `TWaterGun::getPressure` (+0x10, rungs 8/0x18), `TManhole::makeManholeUnuseful` (+8, every binder +0x10), `TResetFruit::touchWaterSurface`/`TDptMonteFence::touchPlayer` (+8 wanted, binder +0x10), `TCoin::appear`/`TShine::appearSimple` (+0x10, two MSound sites +0x18), `TAmenbo::attackToMario`/`doKeepDistance` (an `isAttacking()` binder collapses both), `TCoasterKillerManager::loadAfter` (the compiled-out-assert shape).
+
+## Frame ladder 273 (2026-09-19): 11 functions, the raw-global rung, stacking binders
+
+- **A binder over a raw global is +8; over the global's inline accessor it is +0x10.** `MSound* s = gpMSound; return s;` lands `TMario::startVoice`/`startVoiceIfNoVoice`; spelled `SMSGetMSound()` it overshoots by 8. This is the +8 rung for singleton call sites (`TMarioParticleManager::emit`/`emitAndBindToPosPtr` likewise, one site each).
+- **An array-element binder (`p->arr[0]`) is +0x10, not +8**; a member-pointer binder stays +8 (`TBossTelesa::slotFall` still unpriced: `mSlot` binder +8 but breaks a CSE).
+- **The two-local binder is not always +0x10**: it priced +8 in `TNerveBossTelesaSpit::execute`, where one-local sites priced {+8, +0x18}; stacking it on a `spine->getBody()` binder reached the +0x10 the function needed. **Stacking two different binders is the way onto an unreachable rung.**
+- **Price a lever across the whole inlining family**: a binder inside a callee is priced separately in the callee and in each inlining caller and the two can disagree (`MActor::calcAnm` exact costs `perform` 8; `TDirectionCalc::makeDirection` exact costs `TKoopaJrSubmarine::makeRelativeAngle`). `changes_all` catches the second-order loss; a per-function check does not.
+- **Binder source position moves the pool**: relocating an unchanged `static inline` binder above an earlier function un-matched `MActor::calc`. Define a new binder at the point of use; never hoist an existing one.
+- `TNerveBossTelesaSlotStart::execute` joins the `getBody()`-binder exception list (bosspakkun, `TNerveKoopaTumble`): +0x10 and two instructions change.
+- Also exact: `MActor::updateIn`/`updateOut`/`perform` (binder on `mAnmByType[type]`), `MActor::calc` (one level shallower), `TKoopaJr::reset`. The rebuilt strict list (`scratchpad/grpfh/strict_frame_271.txt`) holds 409 functions: 54 are zero-delta, i.e. slot-ordering residues needing the allocation-order rule, not a rung; +8 x66, +0x18 x56, +0x10 x49, +0x20 x36, -8 x33, +0x28 x29.
+- Unpriced: `MActor::calcAnm` (+8, every lever propagates to `perform`), `MSound::pauseOff`/`talkModeIn`/`talkModeOut` (+8 uniform, `unk0` binder prices 0), `TBossTelesa::forceAllItemKill` (+8 lands but rotates `this` r28->r30).
+
+## Frame ladder 275 (2026-09-19): 15 functions, the scalar-in-binder +8 knob
+
+- **A scalar (`int`/`f32`) local inside a binder body adds +8 on top of the pointer chain**: `MapEventSinkRaisingPos` +0x10 -> +0x18 by adding `int idx`; `LimitKoopaWaitSpeed` and `IgaigaGroundNormalY` +8 -> +0x10 by ending in `f32 v = p->...get()`. This is the knob between the +8 and +0x10 rungs and is cheaper than stacking two binders.
+- **A member-address binder used at two sites is +0x18**, one site +0x10 (`TMapObjBase::makeRootMtxRotX/Y/Z`).
+- **A named local in the caller can be -8**: `J3DModel* model = getModel(); f(model->getAnmMtx(0));` is 8 below the chained `f(getModel()->getAnmMtx(0))`, which kept `setRootMtxRotY/Z` at 100 once the callee gained +0x18. Price across the family.
+- `getParam()` site ladder (`TNerveLimitKoopaGetDown`): 1 site +8, 2 +0x18, 3 +0x20, no +0x10 rung; the +0x10 came from a `getAnmIndex()` int binder stacked on one `getParam()` site. `TLimitKoopa::reset`: `getParam()` +8, `mSpine` +8, both +0x18; only the two-local binder gave +0x10.
+- Exceptions: `spine->getBody()` binder changes instructions in `TLimitKoopa` too (list: bosspakkun, `TNerveKoopaTumble`, `TNerveBossTelesaSlotStart`, `TNerveLimitKoopaGetDown`). The `SMSGetMSound()` accessor binder priced +8 in `TIgaiga::boundSE`, not ladder 273's +0x10: the accessor-vs-raw-global spread is not universal.
+- Also exact: `TMapEventSinkInPollution::watch` (raw-global `gpPollution` binder +0x10 plus a named struct-pointer local +8), `TMapEventSinkBianco::watch`/`rising` and `initBuriedBuilding` (route the second loop through `getPollutionObj(i)`, +0x18; joint binder stacked with an int binder), `TMapEventSinkShadowMario::rising` (three-local array binder +0x18), `evAppearReadyGo` (two stacked binders +0x10), `evStartTimer` (director binder at one of two sites +8), `TLimitKoopa::init` (`getMActor()->getAnmBck()` binder at the `if` only), `TIgaiga::boundSE`, `TGorogoro::rollSE`.
+- `evGameOver`/`evRegisterMovie`/`evInsertTimer`/`evInvalidatePad` now have the right frame and a uniform 4-byte shift of the `TSpcSlice` push temps: allocation-order work, not a rung.
+
+## Closure 277 (2026-09-19): one-function units re-passed with the ladder rungs, none closed
+
+- 17 one-function-from-link units re-passed with the rungs of ladders 270-275: no link. Ten were already-documented blockers (trial tables in their `.cpp`); five re-classified as non-rung classes (MapObjCloud `TRideCloud::control` opposite colouring of adjacent loads; JKRExpHeap `allocFromHead` `nor` mask in the dead r4; launcher `TCommonLauncher::init` JGadget stride +4; THPAudioDecode pool-vs-local group swap in a C TU; liveinterp `linGetSRT` +0x20 with a non-uniform low-region reshuffle).
+- `TSunModel::perform` 97.61 -> 99.99: **one named f32 for an inbetween's computed argument** (`f32 rate = 0.5f * (2.0f - distSq) * unk194;`) fixes schedule and FPR colouring where operand reordering cannot, provided the intermediate it replaces is folded away; naming a second f32 costs +8. Residue is the `Mtx` slot (0x70 vs 0x78); a binder placed after the `Mtx` in the same callee grows the frame instead of moving the `Mtx`, so research 207's "later expansion stacks below" does not raise an inlined callee's own aggregate.
+- `JAIBasic::initDriver` (+8) priced: a **one-local `u32` binder in argument position is +8** where the same over a pointer is +0x10 and over a `u8` global +0, but the bound argument is then evaluated first (swaps retail's `addi r3`/`addi r4` pair), so it only works on argument 1 or where retail materialises that argument first. The carrier must sit ahead of argument 1.
+## Frame ladder 279 (2026-09-19): 6 functions, the collider-loop pair, binder composition
+
+- **The `mCollisions[i]->isActorType(...)` loop carries two independent binders**: an array-element binder over `mCollisions[i]` is +8 here (not ladder 273's +0x10), a `bool` result local inside that same binder adds another +8, and a separate `mColCount` binder over the loop bound stacks a third +8. All three together are +0x18 (`TBossEelCollision::perform`, `TBossEelTearsRecoverCollision::perform`); array binder without the bool, plus a raw-global `gpMarioPos` binder, is +0x20 (`TBossEelAwaCollision::perform`). The loop bound and the loop body are the cheapest pair of stackable rungs found so far, and they apply to every `THitActor` subclass that scans its collider list.
+- **A pointer local added to an existing binder body does not stack**: adding `THitActor** collisions = collider->mCollisions;` above the element read left the frame unchanged. Only a *scalar* local or a *second* binder buys the next 8.
+- **A raw-global binder that ends in a scalar member read prices the same as one that returns the pointer** (`gpMarioPos` -> `pos->y` and `gpMarioPos` -> `pos` were both +0x10 at one site, +0x18 at two), so ladder 273's raw-global +8 is a one-site-only figure; the composition, not the spelling, sets the rung.
+- Also exact: `TFireHamuKuri::reset` (an `int` local for the save-param hit points, +8 -- the `TSpineEnemyParams*` binder instead breaks the ternary's CSE and costs 11%), `TLimitKoopaJr::reset` (param-pointer plus `int` two-local binder, +0x10, the same rung ladder 275 found for `TLimitKoopa::reset`), `CPolarSubCamera::isMarioAimWithGun_` (its own copy of the `unk120` binder the sibling `isMarioCrabWalk_` already uses; a *new* inline at the point of use, since hoisting the existing one moves the pool).
+- Unpriced: `TNerveTobiPukuBound::execute` (the `spine->getBody()` binder lands the frame exactly but flips the two `TVec3` slots -- retail puts the function-scope vector above the nested-scope one and we get the reverse, so this is the allocation-order rule, not a rung), `TDangoHamuKuriManager::createModelDataArray` (the `getModelDataKeeper()` binder makes it instruction-exact and 8 short; the `unk28` scalar reorders the two stores instead of paying), `TChuuHanaManager::TChuuHanaManager` (+0x10, a pure member-store ctor with no chain to bind).
+
+
+## Frame ladder 280 (2026-09-19, Sonnet trial): 4 functions, the wrapper fork over a raw global
+
+- Exact: `TBiancoWatermillVertical::setGroundCollision` (named `J3DModel* model = getModel();` -8 plus a `getMapCollisionManager()` binder -8), `TBiancoWatermill::control` (a TU-local **fork over the raw global**, `static inline MSound* f() { return gpMSound; }`, +8), `TBathtub::getNumKillerLaunchable` (the `search<TKoopa>` result bound to a local inside `isKillerLaunchable`, +8), `TMapEventSinkInPollutionReset::makeBuildingRecovered` (route `gpPollution` through the existing pollution binder at two sites +0x18, plus an `Unk60Struct*` local +0x10).
+- Measured: the wrapper fork over a raw global is +8 where a plain in-body local (`MSound* s = gpMSound;`) is 0, so the rung needs the inlining boundary, not the name; the same wrapper over a singleton accessor call (`SMSGetMSound()`, `TFlagManager::getInstance()`) gave 0 on three functions (`TGoalFlag::touchActor`, `TMapObjBillboard::swing`), so the accessor rung is 0 more often than ladder 273 priced it. `TWaterGun::getPressure` two-local binder recomputes the chain (instructions change); `TBiancoBell::touchWater`/`touchPlayer` need +0x18 and the fork gives +8; `TMapEventSinkInPollution::loadAfter` +0x10 of +0x28 taken. Ctor-only bodies and callbacks with no binder-eligible site (`SMS_CalcMatAnmAndMakeDL`, `ReviveSunflowerCallBack`) have no rung.
+
+## Research batch 282 (2026-09-19): the `a = b - c` residue reproduced to within one rung, nothing committed
+
+- Retail's slot geometry (pool bytes below/above the live 12-byte `bl sub` temporary: `TLiveActor::bind` (4, 16), `TCoasterEnemy::bind` (4, 12)) is reproduced byte-exact by a three-level `operator-`: `TVec3 r; *(Vec*)&r = *(const Vec*)&fst; r.subB_(snd); return r;` where `subB_` is a void forwarder with a defaulted never-read <=4-byte class argument and `subA_` a void forwarder to `sub`. The defaulted dummy is batch 209's refused construct (padding), so the shape is **not** in the tree. Tree-wide it would put 10 functions to 100 against 3 dropped and one weak `TVec3` copy MISSING (matched_code 56.86 -> 56.98).
+- Mechanism: (1) a by-value class parameter returned by reference is a research-208 block object ranked under the caller's locals (our 0x20); the same parameter **consumed inside** the callee is a low-pool temporary at floor+4 (retail's 0x10). (2) The live temporary is otherwise allocated last in our low pool, so every level, binder, dead object or accessor on the caller side lands **below** it: the caller side is inert for this class. (3) The raw `Vec` copy (`*(Vec*)&r = *(const Vec*)&a`, not `operator=` and not the copy ctor) is what buys `below = 4`; with it alone the `above` value tracks retail's per-function variation exactly, uniformly 8 short (57 distinct residues collapsed to one constant rung). Retail's `operator-` therefore almost certainly copies through `Vec`.
+- Refuted for the last 8: function and class templates, defaulted pointer/`int`/`TVec3` arguments, extra consumed reference returns (all +8 below), outer reference wrappers (+4/+4), a 3-argument ctor on the left operand (+8 above but +4 instructions). Census: 130 sites in 57 units, 47 functions >= 99.3% carry the cluster (`scratchpad/grpfh`).
+- Next: a construct that reserves 8 bytes **above** the temporary at zero instruction cost and +0 below: a genuinely used second class-object local inside `operator-`, a `TUtil<f32>`-parameterised `TVec3` member the map can justify, or the raw-`Vec` half alone paired with batch 214's `__ami__` lead in Tongue.cpp.
+
+## Header round 47 (2026-09-19): the `a = b - c` reshape family refuted by the map
+
+- **`operator-`'s left operand is by value and the body routes through `operator-=`, exactly as the stock header has it.** Proof: retail calls `__ami__` out of line twice inside `TYoshiTongue::movement` (0x80267cbc, 0x80267eec); our build emits those two `bl`s only with the by-value left operand, and any `const TVec3&` spelling takes `Tongue.o`'s reloc count 2 -> 0 and `__ami__` MISSING. Batch 214's reading of those sites as independent `-=` statements was wrong: they are the `a = b - c` expansions. Batches 116/142/214/282's `(4,4)`/`(4,12)` reshapes are therefore closed, and the residue is caller-side: what puts 8 more 8-aligned bytes above the temporary at 130 sites.
+- Ladder on `TCoasterEnemy::bind` (retail (0,12) frame 0x40, 55 instructions): stock (8,4); const-ref plus raw `Vec` copy plus `-=` (8,4) with the temp 4 lower (member or by-value return identical); copy ctor +4 everywhere; `operator=` frame 0x48; `r.sub(fst, snd)` respelled (0,4) at retail's slot but frame 0x38 and tree-wide 56.92 -> 56.85 (`CameraMarioData` unlinks, `TBathtub::hipdrop` 100 -> 35). `r.sub(snd)` at depth 1 inlines `sub` and loses all 130 `bl sub` (fuzzy 97.88 -> 97.70): the middle level is mandatory. The raw `Vec` copy alone tree-wide: +1 (`TMario::soundTorocco`), -6 including `__ami__` MISSING; reverted.
+- **Weak `TVec3<f>` census: all 21 bodies the map lists are emitted by our header in the map's TU at the map's size at 100%** (`__ami__` 0x34 Tongue, `sub` 0x34 BeeHive, 2-arg `sub` 0x34 limitkoopa, `__ct__(const&)` 0x1c MarioCollision, `__ct__()` 4 bytes CameraBGCheck, `__as__`, `__amu__`, `add`, `div`, `negate`, `scale` x2, `scaleAdd`, `setLength`, `setMin`/`setMax`, `set(const Vec&)`, `set<f>` x2, `set<i>`, `__ct<f>`). No missing copy is left to pay for a reshape; any reshape that drops one is a loss. The ladder is recorded above `operator-` in JGVec3.hpp.
+
+## Frame ladder 286 (2026-09-19, Sonnet slice a): 13 functions, per-site binder mixing
+
+- **Binder site count is tunable per call site**: applying a binder at only a subset of an accessor's textual sites (2 of 3, or only the else-branch of mutually exclusive branches) hits +0x18/+0x20/+0x28 exactly where the all-sites ladder skips a rung (`TBaseNPC::loadAfter` +0x20 at 2 of 3 sites; `SMSMountAramArchive` two-local at 2 of 3, +0x20, which also closed `SMSSwitch2DArchive`; `TCoin::appear` one site only, +0x10). Two independent one-local binders over different globals at disjoint sites add roughly additively.
+- **A named local in the caller is inert; the binder must be its own function** (confirmed again across the slice). A binder over a member pointer as a function (not a plain local) is +8 (`~TGCLogoDir`).
+- A **`self = p` alias inside a binder body is a nonsensical temporary and is refused**: it was used in five functions, four were respelled with real chain steps (`getFludd()` as a genuine second step in `TMario::canSquat`; a named member read in `TMapObjGeneral::appearing`; a two-step `mMapObjData -> mSink` chain plus a zero-local fork in `recovering`; the chain's final result in `calcVelocity`) at identical bytes, and `TTelesaManager::telesaForceKill` was dropped (no honest +8: naming `getObj(0)` or hoisting the loop bound changes instructions).
+- Also exact: `TMarDirector::fireRideYoshi` (binder over `TFlagManager::smInstance` at 2 sites, +0x10), `TMapObjGeneral::touchGround` (two chain binders), `TNozzleBox::touchPlayer` (two-local `getConsole()` at 2 sites, +0x20), `TShine::appearSimple` (two stacked forks, +0x10). Unpriced (in `scratchpad/ladder_tried.txt`): `MActorAnmData` ctor, `TRiccoWatermill` ctor, `TFruitSwitch::receiveMessage` (frame too big), `TCraneRotY::control`, `TMapObjBase::checkOnManhole` (bracketed +0x18/+0x28, needs +0x20), `getSlideStickMult`, `setTo`/`moveTo`/`calcGraphDirection` (40-72 bytes), `TNervePakkunHide::execute`.
+
+## Frame ladder 287 (2026-09-19, Sonnet slice b): 3 honest closures, 27 padding closures refused
+
+- Honest: `TDirectionCalc::makeDirection` and the by-value `TDirectionCalc(TVec3)` ctor (member-address binder `TVec3<f32>* pDir = &dir`, +8; `TKoopaJrSubmarine::makeRelativeAngle` 95.04 -> 95.02 is the known family trade), `TNerveSmallEnemyFreeze::execute` (two-local `getSaveParams()` binder, **-8** against the chained call: the two-local rung can carry either sign).
+- **Refused: an unused named local as a frame carrier.** 27 functions reached exact bytes with a dead `int` (+8), `TVec3` (+0x10) or `Mtx` (+0x30), stacking to +0x18/+0x20/+0x28. That is stack padding under another name and is a fakematch; their measured frame needs are in `scratchpad/ladder_tried.txt` (all instructions exact, honest carrier unknown), which is the useful residue of the pass: it prices the carrier each of those bodies is missing, e.g. plain member-store ctors (`TChuuHanaManager`, `TBiancoWatermillVertical`, `TSwingBoard`) want a `TVec3`- or `Mtx`-sized block, and `TMapObjBase::makeObjDefault`/`changeObjMtx` want three `TVec3`s.
+- Unpriced with levers refuted: `TManhole::calc` (retail re-calls `getFrameCtrl` four times, binding it drops to 66%), `TMapObjBall::rebound`/`TBigWatermelon::rebound` (shared inlined callee, fixing one breaks the other), `TMammaMirrorMapOperator` ctor (-8), `mod<f32>::mod` (needs `JGUtil.hpp`).
+
+## Research batch 292 (2026-09-19): two honest zero-instruction frame carriers, and how to price a hole
+
+- **A fully unrolled `for` loop is +0x10 of frame at zero instruction cost**: a ctor of plain member stores is 0x18, the same body with `for (int i = 0; i < 3; ++i) e[i] = 0;` is 0x28 with byte-identical instructions. Ladder: 1 loop +0x10, 2 loops +0x18, 3 loops +0x28; a 12-iteration loop only +8; a nested loop is not unrolled. Corroborated by `TItemSlotDrum`'s ctor (matched at retail's 0x28 with 0x10 of dead frame). Closed `TChuuHanaManager::TChuuHanaManager` (99.79 -> 100): `unk64/65/66` are one `u8 unk64[3]` (the manager hands `&unk64[i]` to each `TChuuHana` in `initSetEnemies`), cleared in a loop.
+- **An inlined reference-returning accessor (`SMatrix34C<f32>::ref(i,j)`) reserves about 4 pool bytes per call site, rounded to 8, at zero instruction cost**: 1-2 sites +8, 3-4 +0x10, 5 +0x18, 12 +0x30, instructions identical to the raw `m[i][j]` spelling. Corroborated by `TLeanBlock::TLeanBlock` (matched at retail's 0x48 with the 12-`ref()` identity idiom). Closed `TSwingBoard::TSwingBoard` (99.88 -> 100, +0x30): `Mtx mBaseMtx` is `JGeometry::SMatrix34C<f32>` written through `ref()`, store order identical to `TLeanBlock`'s; `TSwingBoard::load` 98.22 -> 99.70 from the same respelling (`mBaseMtx[i][j]` does not go through the conversion operator, `MTXConcat(mBaseMtx, ...)` still converts).
+- **Method: to price an unexplained hole, scan for functions we match 100% that save only r31 and never touch `r1` in the body** (legitimate dead frame; `scratchpad/grpfg/dead.txt`, 305 at >= 0x28), find one at the same frame shape and read its source. Both levers fell out of it.
+- Negative: a TU-local reference accessor whose result is address-taken for a call argument (`&PosRef(this)`) lands the frame but materialises the address into its own callee-saved register (`TResetFruit::touchWaterSurface` 99.8 -> 92.3); the reference is free only consumed as an assignment LHS in the same statement. `TShellCup::initMapObj`: a `TPinnaShell& shell = mShells[i]` for all eight uses overshoots (try one or two `getShell(i)` sites). `TMapObjBase::changeObjMtx`: the map fixes the parameter as `f32(*)[4]`, so no `ref()`; `makeObjDefault`/`makeObjDead`/`perform`/`startAnim` short in the same TU point at one shared inlined helper (the `if (mMActor) { calcRootMatrix(); getModel()->calc(); }` body). `TBiancoWatermillVertical` ctor (+0x10): six semantically distinct members, neither rung justifiable.
+
+## Frame ladder 290 (2026-09-19, Sonnet slice a round 2): 6 functions, no padding
+
+- Exact: `TSamboHead::setAfterDeadEffect` (particle-manager fork at 3 sites +0x18 plus an MSound fork at 1 site +8), `TNerveHanaSamboAttack::execute` (MSound fork +8 plus a genuinely read `s32 attackingTime` +8), `TBossTelesa::slotFall` (the `mSlot` binder at 1 of 4 sites, +8; all 4 break a CSE, ladder 273), `TBossTelesa::rouletteFall` (MSound fork at 3 sites, +0x20), `TElecNokonoko::setMeltAnm` (named `J3DModel* model` in the caller, -8), `TBossHanachan::TBossHanachan` (named `f32 rand = MsRandF();` inside the inlined `setRandomWeakBodyIndex()`, +8).
+- Raw-global forks stack per site (3 sites +0x18 or +0x20); a partial-site binder avoids a CSE break the full-site binder causes. Unpriced: `TNerveSamboHeadHitWall::execute` (+0x18 of +0x28), `~TMovieDirector` (+8 of +0x10), `TSpineBase::update` (body in `Strategic/Spine.hpp`), `TPoiHanaManager::initSetEnemies`, `TSamboFlower::receiveMessage`, `checkHitObject`, `writeRegDirect`, `clipEnemies`, `behaveToFindMario`, `TSamboFlowerManager::loadAfter`.
+
+## Frame ladder 294 (2026-09-19, Sonnet slice b round 2): 1 function; the ladder list's recipe tier is spent
+
+- `TBathtub::TBathtub` exact: naming the `new` result before the member store (`TBathtubParams* params = new TBathtubParams; unk16C = params;`) is +8 at a ctor's top level; the same respelling inside a loop body (`TNameKuriManager::initSetEnemies`) is 0.
+- Nesting a short-circuit `if (!a() && !b())` as `if (!a()) { if (!b()) ... }` with a named local per call binds a subset of the operands and buys a further +8 with identical instructions (`TConductor::init`, +8 -> +0x10, still 8 short): binding a subset of short-circuit operands is the operand analogue of per-site binder mixing.
+- A raw-global fork at exactly two sites can be 0 (`TNameKuri::setMeltAnm`); the fork's yield is shape-dependent, not site-count-dependent. `TIgaigaManager::initSetEnemies` (+0x78) joins `TPoiHanaManager::initSetEnemies` (+0xa0) and the `TCoasterKillerManager` pair in the disproportionate pure-frame family.
+- 17 functions recorded unpriced in `scratchpad/ladder_tried.txt`. After five ladder passes (about 200 functions tried, 122 in the tried list) the remaining strict-frame functions are research, not recipe.
+
+## Research batch 293 (2026-09-19): 9 priced bodies closed honestly
+
+- (b) +8 inside an inlined predicate: `TAmenbo::doKeepDistance`/`attackToMario` carry the +8 inside `isAttacking()` as a named `const TNerveBase<TLiveActor>* nerve = mSpine->getLatestNerve();` (the UNUSED out-of-line copy keeps its 0xc8); `attackToMario` also names `bool attacking = isAttacking();`. `TGoalFlag::touchActor`: a `TFlagManager::smInstance` binder at 1 of 2 sites (+8; both +0x10 with a register reshuffle). `TResetFruit::touchWaterSurface`: a named-local `gpMSound` binder at its one sound site.
+- (c) +0x10: `TResetFruit::receiveMessage` routes all six `isState()` through the unit's `MapObjBallIsState` binder (+8 per block); `TChangeStageMerrygoround::touchPlayer` names `gpMSound` at both sites.
+- (e) `TBigWatermelon::appearing` (+0x18): a fork over `getModel()` plus a second fork **nesting** it for `getAnmMtx`: a binder nested inside another binder buys +8 where a sibling binder buys 0. `TShiningStone::putOnLight` (+0x18): a `gpMarioParticleManager` binder at 3 of 4 emitter sites. `TLeanMirror::control` (+0x20): named `gpMSound` at 2 sites (+0x18) plus a plain `gpMarDirector` fork at 2 sites (+8).
+- Pricing: a fork identical to an existing accessor (`SMSGetMSound()`) collapses to +0; the same fork with a named local inside is +8 per site; a raw-global plain fork is about +4 per site rounded (3 sites +0x10), a named-local binder about +8 to +0xd per site (3 sites +0x28).
+- Refused or negative: `TDptMonteFence::touchPlayer` is byte-exact with the binder at 1 of 2 identical calls but `TTurboNozzleDoor::touchPlayer` in the same file is 100% with the plain pair, so the split is arbitrary and not committed; `TManhole::makeManholeUnuseful` has no +8 rung on `getModel()->getAnmMtx(0)` (binders +0x10, forks and caller locals 0); `TShellCup::initMapObj`'s `getShell(i)` binder perturbs address arithmetic; `TDangoHamuKuriManager::createModelDataArray`'s `gpConductor` binder costs an `addi`; `ReviveSunflowerCallBack`'s MSound binder is 0 and a `startSoundNpcActor` wrapper -8 (`void` return, no named-result form).
+- (d) MapObjBase (unit `MoveBG/MapObjBase`, not MapObjLib): not one shared helper. `changeObjMtx` +0x28, `makeObjDefault` +0x28, `makeObjDead` +0x30, `perform` +0x30, `startAnim` +0x10, `setGroundCollision` +0x28, `makeObjAppeared` +0x20 while 24 siblings are 100%; `calcRootMatrix` is virtual and `getModel()` out-of-line, so the `if (mMActor)` body is no boundary; `makeObjDead` and `startAnim` share the `getFrameCtrl(t)->setRate/setFrame; getUnk28(t)->unk0 = -1; unkFE = 0xffff;` block, the better candidate.
+
+## Research batch 296 (2026-09-19): MapObjBase's frame-short family is per-function accessor pool
+
+- The seven `TMapObjBase` methods are in `src/MoveBG/MapObjBase.cpp`. Their holes are pure dead pool with no `r1` use in the body (`changeObjMtx`/`makeObjDefault` +0x28, `makeObjDead`/`perform` +0x30, `startAnim` +0x10), `setGroundCollision`'s +0x28 sits wholly below its one named local, and `makeObjAppeared` is not frame-only (it carries the `TMapCollisionBase::setMtx` `bl` vs `PSMTXCopy` blocker, RULES "Header round 39"). Not one construct: per-function accumulation of inlined-accessor pool, as in the 100% exemplars `TBaseNPC::isInBodyTurnSearchRange` (0x40, five `.get()` reads) and `THangingBridgeBoard::setGroundCollision` (0x40, five `SMS_GetYoshi()` and four `getTranslation()`).
+- **An UNUSED helper restored to its exact map size is a frame lever at every call site**: `stopAnim` (map 0xc4, was `{ }`) is the `getFrameCtrl(t)->setRate/setFrame; getUnk28(t)->unk0 = -1; unkFE = 0xffff;` block; spelled as an early-return chain with named `anim`/`data` locals it is 196 bytes exactly (the `&&` chain is 192), and calling it gives `makeObjDead` +0x30 -> +0x28 and `startAnim` +0x10 -> +8, both still instruction-exact. Restoring it forced `startAnim`'s own named `anim` local out (else r3/r5 rotate).
+- Rungs measured: `getObjCollisionHeightOffset()` for a raw `mYOffset` read is +8 per read at zero instructions (`changeObjMtx`, `makeObjDefault`, `setGroundCollision` one read each); an honest inline level inside `removeMapCollision` (TU-local, replacing the `volatile` fakematch there) is +0x18 in both `changeObjMtx` and `makeObjDead`, the biggest lever, but MWCC CSEs the receiver and loses retail's `lwz r3,8(r3)` reload of `unk8`: retail keeps the CSE'd `cmplwi` test but reloads the value (shared-header need: a `TMapCollisionManager` `removeCollision()`-style inline). `startAnim`'s last +8: model/model-data binders +0x10, forks and 4-byte caller locals +0. Refuted: an `MActor* actor = mMActor` binder inside `stopAnim` (deletes three reloads).
+
+## Research batch 298 (2026-09-19): EventWatcher's nil-slice slot is decided in the push chain
+
+- **`interp->push()` and `interp->push(TSpcSlice())` are one 4-byte pool slot apart at identical frame size**: the zero-argument overload builds the `TSpcSlice` temporary one inlining level down, the call-site temporary sits 4 bytes higher. `evGameOver` (99.90 -> 100): `SMSGetMarDirector()` binder (+8) plus `push(TSpcSlice())` puts the slice at retail's 0x24. Corroborated by exact siblings from opposite spellings (`evOnNeutralMarioKey`, `evManiCoinDown`), the zero-carrier floor (`evStartMiss`, `evStartMarioTalking`, `evStartMontemanFanfare`, `evGetPollutionLevel`) and the one-binder rung (`evForceCloseTalk`). `push(0)`/`push(TSpcSlice(0))` alias the two forms; `interp->mProcessStack.push(TSpcSlice())` is the depth-0 alias.
+- **The rule does not generalise from the caller side**: in most of the 36 nonmatching `ev*` retail's slice slot sits between the two values the overloads give (`evInvalidatePad` 0x38 vs 0x34/0x40, `evAppear8RedCoinsAndTimer` 0x54 vs 0x4c/0x60, `evLaunchEventClearDemo` 0x20 vs 0x18/0x1c) and every caller-side spelling was swept. **Shared-header need: a third inlining depth between the two overloads in `include/Strategic/spcinterp.hpp`'s `push`/`TSpcStack::push` chain**, the single blocker for about ten callbacks.
+- Frame rungs: `EventWatcherGetMarDirector()` at all three trailing sites of `evAppear8RedCoinsAndTimer` is worth the whole 24 bytes (one or two sites +8 each; a `getConsole()` binder overshoots), 99.87 -> 99.97; a TU-local `EventWatcherMSound()` binder over `SMSGetMSound()` lands `evStartEventSE`'s 0x58 (99.80 -> 99.89) but is a loss at `evStartSE`/`evStartMontemanBGM`. Open: `evSetTimeLimit`/`evSetPollutionIncreaseCount`/`evSetAttentionTime` (0x58 vs 0x70, nothing to bind), four callbacks 8 over, `evGetTalkNPC`/`evGetTalkNPCName` and `evIsNearActors`/`evIsNearSameActors` (structural).
+
+## Header round 48 (2026-09-19): the push-chain depth refuted
+
+- Inline depth in `TSpcInterp::push` only moves the nil slice **down** (`evInvalidatePad` retail 0x38: depth 0 0x40, depth 1 0x34, depth 2 0x30; `evLaunchEventClearDemo` retail 0x20 sits above both), so research 298's missing third depth does not exist. `TSpcStack<T>::push` is `FRC9TSpcSlice` in the map (weak 0x68 in NpcEvent, emitted at 100%), so by-value is refuted by the mangling; no `TSpcSlice` copy ctor or `operator=` exists in the map, so nothing hides a level. Zero-effect spellings: a named slice in `push()`, `push(0)`, `push(TSpcSlice(0))`, a caller-side `TSpcSlice nil`, and making `push(f32)` symmetric with `push(int)` (leave the asymmetry). `pop()`'s single-expression return is correct (a named result drops about 30 functions).
+- The one lever measured: a value-returning accessor inside `TSpcStack::push` (`size()` at one site) lifts every slice temporary by 4 at zero instructions tree-wide: +8 EventWatcher callbacks exact, -109 elsewhere (EventWatcher, NpcEvent, liveinterp, spcinterp). Not taken. A `getProcessStack()` reference accessor costs an `addi`.
+- Reading: the remaining `ev*` residue is which side of the slice the function's dead accessor pool lands on (`evLaunchEventClearDemo` retail 16 below/0 above, ours 8/8; `evManiCoinDown` exact at the same frame with 8 above): research 296's per-function class, caller-side work. Closed as refuted; do not retry the chain.
+
+## Frame ladder 300 (2026-09-19, Opus): 11 functions, declaration position against a stack array
+
+- **A named scalar declared before a stack array lands above it (+8, 4 bytes plus pad); declared after it, below in the low pool (+4, shifting the array)**: `TGraphWeb::getNeighborNodeIndexByFlag` needed `int index` before the candidate array. This is the knob between an 8-byte hole above an array and a 4-byte shift below it.
+- **The named-local `SMSGetMSound()` fork is +8 per site, linearly** (`TViking::roll`, `TFruitBasket::countFruit`: 2 of 6 sites +0x18, 3 +0x20, 6 +0x48); ladder 280's "accessor fork is usually 0" describes the plain fork, the named-local form is the lever. A named-local fork over a raw global can still be 0 where the plain fork is +8 (`gpCameraShake` in `TNerveHino2Squat` the other way round): measure both forms.
+- **Binders only add below a caller-level block object**: when the hole is above a `TVec3`/`setGoalPath` temp block, binders reach the frame but push the block 4-0xc higher (`TNerveNKFollowMario`, `TNerveKageMarioModokiWait`); wrong family there. In `TNerveNKFollowMario` every single rung is +8 and any pair +0x18 (no +0x10). `TNerveBossEelAppear` is frame-insensitive to every binder (saturated low pool).
+- `spine->getBody()` exceptions grow: `TNerveCannonObject` (adds a reload before a virtual call), `TNerveBossEelOutWait`/`Appear` (deletes retail's `addi r31,r4,0`); list now bosspakkun, `TNerveKoopaTumble`, `TNerveBossTelesaSlotStart`, `TLimitKoopa`, these three.
+- Also exact: `TLightDrawBuffer` ctor (first `new` result named), `TNerveHino2Squat` (two-local `getSaveParam` f32 binder +0x10, named `gpCameraShake` fork +8, `getMActor` binder +8), `TNerveBossEelSleepOnBottom` (two-local `getBody`), `TNerveChuuHanaWalkOnPanel` (`getBody` +8, `mGroundPlane->getActor()` at 1 of 2 sites +0x10), `TNerveCannonObject` (named `gpMSound` fork +8, `getFrameCtrl(0)` binder +0x10), `TNervePopoExplosion`, `TNerveBEelTearsWaterHit` (`getBody` plus a two-local params binder), `TNerveKoopaGetDown` (`getParam()` at 2 of 3 sites +0x20). 19 tried, 8 unpriced (`ladder_tried.txt`, 128 lines).
+
+## Research batch 302 (2026-09-19): an inlined callee's accessor levels are its callers' frame carrier
+
+- **The disproportionate pure-frame gaps are inlined-accessor pool inside the inlined callee, not a compiled-out assert.** `TGraphTracer::setTo` and `moveTo` (both +0x48, instruction-exact) share the inlined `setParamFromGraph()`; respelling its two arms from raw member chains (`unk0->unk0[mCurrIdx].unk0->mPitch`) to the header's existing accessors (`getCurrent().getRailNode()->mPitch`, three inline levels per arm) lands retail's 0x60 exactly with no instruction change, and the UNUSED out-of-line copy keeps its map size 0xa0. Nine accessor levels = +0x48. Free to try wherever a small helper is inlined into frame-short siblings: use the accessors the header already declares.
+- The family is per-function accessor pool, not a shared construct: `TGessoManager::initSetEnemies` +0xc8, `TIgaigaManager` +0x78, `TGorogoroManager` +0x18 with the same `new TXPolluteModelManager(name); ->init(...)` pair. Refuted for all of it: the compiled-out assert; research 297's discarded `getActiveObjNum()` costs the orphan compare, so it is wrong for any instruction-exact body.
+- Measured, open: `TGraphWeb::calcGraphDirection` 0x40 -> 0x60 of 0x68 (`getGraphNode(n).getRailNode()` +0x10, `getGraphNode(conn).getUnk4()` +8, one named `f32` addend +8; two named f32 do not stack; `getUnk8` via `getGraphNode(n)` breaks a CSE), not committed; `TPoiHanaManager::initSetEnemies` 0x58 of 0xe0 (`(TPoiHana*)getObj(i)` +0x10, `getObjNum()` +8, named `J3DModel*` +8); `TIgaigaManager::initSetEnemies` 0x30 of 0x98 (named `new` result +8, `init(getObj(0))` +8; a default ctor argument -18%); `TMapEventSinkInPollution::loadAfter` now +0x18.
+
+## Frame ladder 303 (2026-09-19, Opus): 8 functions, accessor tie-breaks and nested forks
+
+- **A raw member read through its existing header accessor breaks a tie between two identically compiling arms**: `TNerveBPDie::execute` has `if (t == 0) X; else X;`; spelling the first arm through `getModBgm()` and the second as the raw `unk98` is +0x10 and lands retail's 0x50. The honest source for the "both arms compile to the same call" TODO family.
+- **A raw-global fork nested inside a second fork is +0x10 where the flat named-local fork is +8** (`gpMarioOriginal` in `TTinKoopa::resetTinKoopa`, with the named `search()` result +8: +0x18 exact). Step size depends on the caller pool.
+- **Caller-level named locals are not universally inert** (narrows ladder 286): a named `MActor* actor = boss->getMActor()` (+8, `TNerveBPBreakSleep`), a named `bool inArea` (+8, `TNerveBPWaitL`) and a named `f32 length = toMario.length()` after the `TVec3` block (+8, `TBossPakkun::rumblePad`) all pay, while a named save-params pointer is 0 or -8. Measure per local.
+- **Named chain steps inside an UNUSED helper the caller expands are a frame lever at the call site**: `getLightIndex`/`getAmbIndex` with three named steps each give +8/+8/+8 across all four `makeDrawBuffer` bodies, instruction-exact, UNUSED sizes unchanged (extends research 296/302); `TMapObjectLightWithDBSet`/`TIndirectLightWithDBSet::makeDrawBuffer` exact with an `mLight` binder at the `loadAfter` site (+8), which is +0x10 in `TPlayer`/`TObject` (binder price is caller-pool specific).
+- `TMario::checkEnforceJump` exact: `mGroundPlane` binder at 2 of 5 sites (+0x18). `TPopo::possessedIn` frame exact (named `gpMSound` fork +8, `getMActor` binder at 1 of 5 sites +8), residue `mr` vs `addi`. Check inlining callers before binding in a tiny method: `MActor::calcAnm` reaches 100 with an `mModel` binder but `perform` inlines it and drops. `TNerveBPTumble::execute` is not frame-only: retail passes `boss + 8` (the address of `JDrama::TNameRef::mKeyCode`) as the owner argument, a shared-header accessor need. 18 tried, 7 unpriced (`ladder_tried.txt`, 146 lines).
+
+## Accessor sweep 304 (2026-09-19): 5 functions, a second witness for the inlined-helper rule
+
+- Census: 641 frame-only functions in unlinked game units at 99.0-99.99, 238 with delta >= 0x18 across 96 units (`scratchpad/grpfh/frameonly.tsv`, `work.txt`); biggest sibling groups MarioMove, WaterGun (10 each), bosseel (9), hinokuri2 (8), enemy (7).
+- **A shared UNUSED guard respelt through accessors pays every caller at once and keeps its map size**: MarioDraw's `CheckMarioFootPosCtrl` (map 0x80) from five `gpMarioForCallBack->mStatus` reads to `getStatus()` x2 plus `!isSleeping()` is +0x18 at both `MarioFootPosR/LCtrl` (exact with a TU-local `mJointIdChnFootR/L` accessor, +8). Second witness for research 302.
+- **A TU-local accessor over a raw member is +8 and nests**: `WaterGunNozzleSpeedY(WaterGunWaterGun(p))` is +0x18 where either alone is +8 to +0x10; `RotateCtrl`, `WaterGunDivingCtrlL/R` exact (`WaterGunWaterGun(gpMarioForCallBack)` +0x10 each plus per-member accessors +8; `RotateCtrl`'s last 4 bytes from declaring `Mtx mtx` before the scalars: ladder 300's knob runs both ways).
+- `TGraphTracer::getGraph()` over `unk0` is a reliable +8 per read across `enemy.cpp` and `NpcAnm.cpp`, and `getTracer()` inside the shared `setGoalPathFromGraph` +8 to every caller, but the `TSpineEnemy` graph family (7 siblings, 0x18-0xa8) keeps 0x20-0x90 of residue after every accessor rung: structural, not pool. 8 short after all rungs: `TRollEnemy`/`TGorogoro::flagJump` (`getTracer()` +8, a `TGraphTracer::unkC` accessor +0x10), `TBaseNPC::npcWaitIn` (`getTracer()->getGraph()->isDummy()` +8); `npcTalkIn` 0x10 short. hinokuri2 nerves: only `getPosition()` pays (+8). Shared-header needs parked TU-locally: accessors for `TWaterGun::unk1CC8/unk1CCC/unk1CD0`, `TMario::mJointIdChnFootR/L`, `TGraphTracer::unkC`.
+
+## Frame ladder 305 (2026-09-19, Opus): 10 functions, the `TParamT::get()` reference temporary
+
+- **`TParamT::get()` returns `const T&`, and the reference temporary is 8 bytes of frame at the call site; reading `params->mSLFoo.value` raw removes it.** Measured: a `getSLFoo()` wrapper = `.value` + 8; `.get()` spelled directly = `.value` + 0x10; an extra `getSaveParams()` level another +8. Integer `TParamRT` reads reserve it too (`mSLSinkTime`, `mSLFreezeWait`; narrows the `ParamInst.hpp` note). It can be -0x10 at one site (`TRollEnemy::behaveToWater`) and is not additive across two (igaiga -8 and -0x10 singly, -0x18 together). Closed `TPopo::getGravityY`, `THinokuri2::changeBck` (plus raw `mMActor` at 1 of 3 sites), `TBossPakkun::changeBck`, `TNerveTamaNokoSink`, `TNerveMameGessoJitabata` (with a raw `getPoint()` and a named `s32 freezeWait`), `TRollEnemy::behaveToWater`, `TNozzleDeform::movement`. This is the frame-too-long bucket's rung and applies to any long body with a parameter read.
+- A **TU-local `getPoint()` reading `node.unk0->mPosition` raw** (header round 27's parked lever) is -8 in `TFireWanwan::isMissMario`, -0x10 in `TNerveMameGessoJitabata`/`TNerveHamuKuriGoForSearchActor`, 0 in `TNerveBPTouchDown`, a loss in `THamuKuri::isResignationAttack`: caller-pool specific. `TEnemyMario::tryTake`: raw `mCollisions[i]` for `getCollision(i)` -8. `TYumbo::moveObject`: named-local particle-manager fork at both emitter sites +0x10 (a hoisted caller local breaks the body).
+- New family, **"frame exact, every temporary 4 bytes low"** (`TPakkun::onShootLiner`, `TNerveBGTug::execute` after the `.value` fix): the 4-byte sibling of the 8-byte reference temporary; a `const f32&` binding, a named `TPathNode` and reordering the read fail. `TNerveTobiPukuBound`: `v.set(other)` hits the frame but swaps word copies for fp copies; `TWireBell`/`TCogwheel::initDraw` keep the `GXColor color = {...}; TColor(color)` form (every alternative -0x10 to -0x18). 24 tried, 11 unpriced (`ladder_tried.txt`, 175 lines).
+
+## Accessor sweep 306 (2026-09-19): 8 functions, the fork over an accessor, the 4-bytes-high residue
+
+- **A fork whose body calls the header accessor (`u32 s = p->getStatus(); return s;`) is a rung above the plain accessor**: +8 at one site, +0x10 at two; the plain fork over the raw member is +0 in the same pools (the level must sit on top of the accessor). Closed `TMario::checkGraffitoElec`/`Fire` with `getStatus()` x2, named MSound forks, a `checkFlag` binder and a particle-manager fork.
+- **The `mGroundPlane` binder scales at +0x10 per site**: all 8 sites of `TMario::thinkSituation` +0x50 instruction-exact (site-sensitive: it adds an instruction at `gpPoolManager->getWaterLevel(mGroundPlane)`). `thinkWaterSurface` exact with the ground binder at `isWetGround` +0x10, `checkFlag`/`checkStatusType` binders, `getStatus()` x2 and the MSound fork at 3 of 6 sites (+0x20). MarioMove 27.91 -> 42.28.
+- bosseel: a TU-local `mEyes[i]` accessor +8 per site (x5 = +0x38 in `updateTearsCnt`, plus a nested `mPairedEye` accessor +0x10 and a named `gpMarioPos` fork); `forceShedTears` (x3, a nested fork at 1 site, `mTearEyeToggle` at 1 of 2: a +0 lever pays +8 once a nested fork is in); `ExecBackNerve_Sub` (named MSound fork, `getBossEelParams()`, two-local `getBody`, nested `getMActor()->getFrameCtrl()` +0x10). `TBossEelEye::perform` 99.99 with `getMActor` at 3 of 9 sites (its TODO refuted).
+- **Residue class, five witnesses: after the accessor pool is full, the named block sits exactly 4 bytes high** (`checkWet` floor 0x54 vs 0x50, `checkRideMovement` `ridingMtx` 0x7c vs 0x80, `checkGraffito` `pos`, `playerControl` a JMASSin temp, `TBossEelEye::perform` `eyeMtx`); ladder 300's declaration-position knob is the right shape but every honest spelling changed the schedule. Same family as ladder 305's "every temp 4 bytes low": research item. TU-local accessors must be defined above first use; `getMActor()` is non-const. Not reached: bosseel `TNerveBossEelEat`/`Die`, bosspakkun/Item/MapObjBall groups.
+
+## Param-value sweep 307 (2026-09-19): 10 functions, every reference-returning accessor is the same lever
+
+- **Any accessor returning `const T&` reserves the 8-byte reference temporary at its call site, not only `TParamT::get()`**: `JDrama::TActor::getRotation()`/`TPlacement::getPosition()` (raw `mRotation.x/y/z` at one `MsMtxSetXYZRPH` call -0x10 in `TTelesa::calcRootMatrix`; raw `mPosition` -8), `J3DModelData::getVertexData()` returning `J3DVertexData&` (-0xc per expansion; the existing `getVtxPosArray()`/`getVtxNormArray()`/`getVtxNum()` wrappers remove it: `TTrembleModelEffect::init` -0x30 exact, `TMirrorModel::initPlaneInfo` -0x30 of -0x48, `movement`, `reset`; per site: inside `tremble`/`clash` the same rung costs `clash`, so those keep the long spelling). Pointer accessors (`getMActor()`, `getModel()`, `getFirstNode()`) are inert as frame levers.
+- **The TU-local raw `getPoint()` (`node.unk0->mPosition`) is -0x10 across the whole `isReachedToGoal`/`isReachedToGoalXZ` family**: seven for seven (Telesa, TamaNoko, TobiPuku, RollEnemy, Igaiga, HaneHamuKuri, HaneHamuKuri2), -0x10 in `TSpineEnemy::doShortCut` (one of two sites) and `TBoidLeader::calcForces`; two stale "0x10 of low region" TODOs removed.
+- Also exact: `TBPPolDrop::perform` (`.value` -8 plus the scale chain `scale.z = scale.y = scale.x = v`, retail stores ascending), `TNerveMantaAppearDemo::execute` (`.value` at one site -0x10). Frame exact with residue: `TBossEelTooth` ctor (raw `mOwner->mSaveParams->`, -0x40), `TMirrorModelObj::setPlane`, `TGesso::setPolluteGoal`, `TTelesa::calcRootMatrix`, `doShortCut`, `calcForces`; three more witnesses of "every temp 4 bytes low" and a 0x10-high sibling (`doShortCut`).
+- **Shared-header need, measured**: a `J3DModelData::getVtxAttrFmtList()` wrapper beside the existing `getVtxPosArray()` takes `TMirrorModel::initPlaneInfo` to 100 (-0xf0); a TU-local wrapper is +8 instead, so it cannot be parked (TODO in MapMirror.cpp). 21 tried, 11 unpriced (`ladder_tried.txt`, 196 lines).
+
+## Accessor sweep 308 (2026-09-19): 3 byte-exact, the search-result and `getActorType()` rungs
+
+- **Naming a `TNameRefGen::search<T>()` result before the call it feeds is +8** (`TRedCoinSwitch::loadAfter`, `TShine::appearWithDemo`); distinct from naming a `new` result (0 in `TRiccoHook::init`) or an array element (0 or a regression).
+- **`->mActorType` read through `getActorType()` is +8 per read** (`THauntLeg::isCollidMove` byte-exact with two reads); `mMActor` through `getMActor()` +8 (`THanaSambo::createPollen`). Free candidates wherever a frame-short body reads the raw member.
+- `TBEelTearsDrop` ctor: a TU-local accessor over `TBEelTears::mTearsParams` at all four `initHitActor` argument sites +0x30, frame exact; residue the `push_back` iterator block 4 bytes high (the open class, now seven witnesses).
+- Signs: the two-local `getBody()` binder is per-function (gatekeeper: only `TNerveBGKSleep` pays; bosseel: Eat +8, Die 0); named-global forks can be negative (`SMSGetMSound()`+`SMSGetMarDirector()` in `TNerveBossEelDie` -8, named `gpItemManager` in `TItem::calc` -8, named `gpConductor` in `TBubble::appendEnemy` destroys the body). `TBossPakkun` stays insensitive to every accessor rung except `mHeadHit` (+8).
+- Open family, six functions for one edit: `MActorAnmDataEach<T>::loadAnmPtrArray` (six instances, each 8 short below the two `char[256]` arrays: low pool, not accessor pool; template in `include/M3DUtil/MActorData.hpp`). `TNameRefAryT<T,U>::load` (`NameRefAry.tpp`) gates three MarNameRefGen functions at 8. 29 entries added to `ladder_tried.txt` (248 lines).
+
+## Header round 49 and param-value sweep 309 (2026-09-19): `getVtxAttrFmtList()`, the `SMS_GetMarioPos()` pool
+
+- `J3DModelData::getVtxAttrFmtList()` added beside its sibling wrappers in `J3DModel.hpp`; tree-wide it moved exactly one function, `TMirrorModel::initPlaneInfo` 99.83 -> 100 (MapMirror 40.54 -> 48.49). The `getVertexData()` reference temporary is only a lever once a body's frame is otherwise tight: in `TBathWaterMeshRenderer::prerender` (87.6) the wrapper is exactly zero.
+- **`SMS_GetMarioPos()` is the same 8-byte reference lever as `TParamT::get()`, with 214 call sites tree-wide**: `*gpMarioPos` raw is -8 per site (`TPoiHana::genEventCoin` -8, `TNerveGessoFall` -0x10 at three of four sites; at `TGraphWeb::getEscapeDirLimited` it costs 0.02). Not uniform: measure per site.
+- **Two `TVec3` temporaries built from the same literals in sibling blocks do not share a slot; one named local shared between them is -0xc per collapsed copy** (`TTamaNoko::calcRootMatrix` -0x18 exact); when they already share (MareWallRock) naming is inert. `THangingBridgeBoard::calcDefaultMtx` exact: `mDefaultMtx.set(rotY)` raw for the `SMatrix34C&`-returning `getDefaultMtx()` (-8).
+- A `getSLFoo()` wrapper is not always -8 over `.get()`: at `TNerveKillerExplosion` and `TNerveTamaNokoDown` only `.value` moves the frame (ladder 305's "wrapper = `.value` + 8" is a tendency). Residue witnesses: killer (frame exact, both vectors 8 low), gesso (temporaries 0x34 low). Kukku `RecoverGraph`: each `.value` -0x10 singly, -0x20 together, no -8. 8 unpriced (`ladder_tried.txt`, 217 lines).
+
+## Reference-temporary sweep 311 (2026-09-19): the frame-too-long population is spent
+
+- 46 frame-too-long functions use a reference-returning accessor; only 4 were new against `param_value.txt`, so the two lists are one population, now 17 more tried (`ladder_tried.txt`, 279 lines). Exact: `TNerveTabePukuGraphWander::execute` (`mMarchSpeed.value`, -0x10). Frame-exact lifts: `TNerveTabePukuDive`/`Attack`, `THauntLeg::getTakingMtx` (named `J3DModel*` at the `MTXCopy` site only, -8; at both sites -0x20 and the instructions change), `TNerveElecNokonokoTurn` (`mPosition.x` for `getCarapace()->getPosition().x`).
+- **The `TParamT` ladder has a third rung, unit-specific in order**: in TabePuku the wrapper is `.value + 0x10` and the member's own `p->mFoo.get()` is `.value + 8`, a usable -8 step between them; ladder 305's ordering is not universal.
+- **Two `TVec3` locals declared in sibling statement blocks do not share slots**: one pair hoisted to function scope is -0x18 (`TNerveFruitsBoatGraphWander`, 8 left), while two `f32` locals in the same body already share (size- or type-specific). Naming a `J3DModel*` is per site (inert or a loss in `TCannonDom::perform`, the `TBathtubGrip` ctor).
+- Research witnesses: `TNerveBGRoll::execute` has 0xb0 of extra frame with byte-identical instructions across eight inlined `TBossGesso::changeBck` sites (about 0x16 per site), a zero-instruction carrier at a scale no rung explains; `TLimitKoopaJr::calcTargetDirection` is a shared 8-byte carrier below the `TDirectionCalc` for the Run and Wait nerves. Refuted: `wall->mNormal` for `getNormal()`, dropping `dirCopy` in `TMario::getOnWirePosAngle`, `mPosition.set()` in `TTinKoopaFlame::perform`.
+
+## Tail sweep 310 (2026-09-19): 5 functions, zero-priced rungs compose
+
+- **Rungs compose non-additively and a 0-rung can be the missing half of a +0x10**: in gatekeeper the two-local `getBody()` alone is 0 and a `getMActor()` binder alone +8, together +0x10, which closed `TNerveBGKSleepDamage` and `TNerveBGKDive`; `getMActor` (+8) with a `getSaveParams` binder (+8) is +0x18; nesting a binder two deep jumps 8 -> 0x18. Try 0-priced rungs in combination before declaring a function unpriced.
+- **`THitActor::mActorType` is `int` but `getActorType()` returns `u32`**: a raw range compare through the accessor turns `cmpw` into `cmplw`; a TU-local `static inline int` reader keeps the signed compare and is a different rung (+8 at 1 site, +0x18 at 2) from `getActorType()` (+8 for 2 sites). `TBaseNPC::npcWetIn` exact with one of each. Shared-header need: a signed actor-type reader.
+- `SMS_GetMarioPos()` (+8) pairs with `getPosition()` (+8) for the `TVec3 d(mPosition.x - gpMarioPos->x, 0, ...)` family: `TFireHamuKuri::behaveToWater` exact; the identical `TPopo::behaveToWater` lands frame-exact but 4 low. `TMario::surfing` exact (`MarioRunGetNormal(mWallPlane)` binder at 2 sites +8, named MSound fork +8).
+- The "4 low" class gained six witnesses (`TMario::doSliding`, `TBee::receiveMessage`, `TMapEventSinkBianco::startControl`, `TNerveFruitsBoatBckTrace`, `TPopo::behaveToWater`, `TPoiHana::isCollidMove`), about thirteen in all. Refuted: naming the `search<T>()` result in `TMapObjBase::joinToGroup` (+8 frame but 99.63 -> 99.0: not universal), `getRotation()` x3 in `TChuuHana::setGoal` (0), `getMActor()` x4 in `TTelesa::init` (saturates at +8), `MActorAnmDataEach<T>::loadAnmPtrArray` (naming the `new` result 0; not accessor pool). Shared-header needs parked: a `TLiveActor` reader for `mLinearVelocity`.
+
+## Research batch 312 (2026-09-19): the 4-byte slot residue is one consumed 4-byte inline level
+
+- **Frame law: frame = align8(top of the named block) + 8**, so a 4-byte change in the pool below the block moves the block without moving the frame. "Block 4 high" = one extra 4-byte pool word below it in ours; "4 low" = one missing. (Slot maps: `TMirrorModelObj::setPlane` retail pool 0xc-0x40 then `local_18` at 0x40, ours pool to 0x44; `THauntLeg::getTakingMtx` pool 0x38 vs 0x3c; `TShine::appearWithDemo` `TFlagT<u16>` temp 0x38 vs 0x34.)
+- **The 4-byte rung is one inline level whose temporary is 4 bytes wide and consumed by the statement it sits in**: a by-value scalar or pointer accessor read, or one extra level around an assignment. Adding a level is +4 of pool, removing one -4; every other knob in the same functions (raw vs accessor on a chain, binders, forks, `.get()`/wrapper) prices in 8s. Closed `THauntLeg::getTakingMtx` (`J3DModel* model = mMActor->getModel();` raw at that one site, -4; declaring `J3DModel* model;` before the `TPosition3f` and assigning after is the +4 declaration-position form and also exact), `TShine::appearWithDemo` (`tool->getDemoLengthFrames()`, the header's by-value `int` accessor, for the raw member, +4), `TMario::checkWet` (one more level around `emitInfo->mPos.value = mPosition`, -4, keeping the word copy; parked as a TU-local setter: **shared-header need `void TParamT<T>::set(const T&)` beside `get()` in `ParamInst.hpp`**; `value.set(v)` converts the copy to `lfs/stfs`, a reinterpret cast was refused).
+- Not closed: `TMirrorModelObj::setPlane` (needs -4, fourteen spellings all 8-granular), `TMario::checkGraffito` (no level site), `TPakkun::onShootLiner` (dropping the `speed` local lands every slot but costs 2 instructions), the `TBEelTearsDrop`/`TBossEelTooth` ctors (JGadget stride, opposite signs in one TU: per-function pool). `ladder_tried.txt` 309 lines.
+
+## Frame ladder 313 (2026-09-19, Opus IX): `getVelocity()` and chained `>>`
+
+- **`TLiveActor::getVelocity()` is the next `const T&` reference-temporary lever, +8 per site** (`TSamboHead::behaveToWater` with the `getPosition()`+`SMS_GetMarioPos()` pair, `TMapObjElasticCode::control` with three reference reads +0x18, `TRailFence::control` frame-exact); `setVelocity(v)` for `mVelocity = v` is 0 everywhere. No `getLinearVelocity()` exists (shared-header need).
+- **Chained `stream >> a >> b >> c` in a `load` body is +8 per continuation** (`TGoalWatermelon::load`, two continuations +0x10, instructions identical).
+- A by-value TU-local position accessor (`return request.mPosition;`) moves a `TVec3` copy out of the named block into the low temporaries at zero frame cost (`TMBindShadowManager::forceRequest`): a shape lever. Rung grids can skip the target (`isHitWallInBound` needs 0xa8, rungs give 0x98/0xa0/0xb0). New 4-byte witnesses both directions (`TMapObjGeneral::bind` 4 high, `TRailFence::control` 4 high). Refuted: `getMActor()` at 2-3 sites in `TPakkun::init` (0), named particle fork costs an `mr` in `TFruitLauncher::fireObj`, `getRotation()` at an `emitAndSRT` site breaks `TMuddyBoat::control`. 13 tried, 8 unpriced (`ladder_tried.txt`, 310 lines).
+
+## Frame ladder 315 (2026-09-19, Opus X): 5 functions, pointer-member chains through accessors at every site
+
+- **The dominant rung on the remaining frame-short list is a pointer-member chain read through its accessor (header or TU-local) at every site: +8 per site, saturating, not monotone in site count** (`TMapObjGeneral::checkWallCollision` +0x18 at 2 of 3 sites, +0x20 at 3: try subsets before calling an overshoot unpriced). Paying header accessors: `getSpine()` (`TBossHanachanPartsBase::entryCircleShadow_` x2, `TFireWanwan::reset` x2 plus TU-local accessors), `getSettingsParams()` (`TEnemyMario::emReplay` x4, +0x18), `getSaveParam2()` composed with a TU-local `mOwner` accessor x3 (`TTelesaSlot::forceStopSlot`), `getOwner()`, `getModel()`, `getFludd()`, `getHolder()`, `getTracer()`.
+- Scalar accessor reads saturate early and independently (`TShine::movingCircle` stops at 0x10 of 0x18). A rung can hit the frame and still be the wrong spelling (`getPosition()` x3 in `TLeanMirror::controlGoTarget` lands -0x98 but drops to 98.1; `getSpine()` x6 in `TChuuHana::checkStretchType` to 98.8): check the match, not only the frame. Frame-exact lifts: `TTelesa::bind` (residue the `a = b - c` temporary), `MActor::setModel` (JGadget iterator pair 8 low).
+- Inert (0) per function: `getMActor()` x2 (`TCasinoPanelGate::moveObject`) and x20 (`TBossWanwan::emitEffects`), `getHead()` x9 (`THinokuri2::init`), `getOwner()` x4 (`TPinnaShell::control`), `getHolder()` x2 (`TRealoidActor::calcRootMatrix`), `getRotation()` x3 (`throwObjToFrontFromPoint`, `TSandLeafBase::grow`), `getInitialPosition()` x2. The six `TSpineEnemy` graph-node functions need 0x38-0xa8 because `setGoalPathFromGraph` is inlined on both sides: research, not ladder. `TMario::rocketing` is 8 short after `getFludd()` x13 (+0x30). 27 tried, 20 unpriced (`ladder_tried.txt`, 337 lines).
+
+## Frame ladder 317 (2026-09-19, Opus XI): 9 functions, `changes_all` is not a frame probe
+
+- **Method: `ninja changes_all` is not a frame probe.** A frame move that keeps the instruction count reports no change (the fuzzy percentage is unchanged); four levers first scored 0 were +0x30, +8, +8, +8. Measure every rung with `decomp-diff.py --clusters` and its `frame: target/ours` line; `changes_all` only confirms the landing and the absence of regressions.
+- **A direct-return fork nested inside an existing TU-local binder expanded at two sites is +8** (`TBWPicket::receiveMessage`; re-pass 172's +4 was one expansion). Non-monotone subsets confirmed on global forks: `gpMarDirector` +8/+0x20/+0x20/+0x30 at 1/2/3/4 sites (`TEnemyMario::emDownAnimation`), `mInitialRotation.y` reader +8/+0x18/+0x20/+0x30 (`TRevolvingFenceInner::controlWall`). `getMActor()` saturates at 3 of 5 sites (`TBiancoGateKeeper::perform`). A named `bool` for an inlined predicate's result is +8 in some pools (`isPeachTired()` in `TBaseNPC::npcTalkIn`), 0 in others.
+- Exact: `TEggYoshi::perform` (`unk148` binder x2 +0x18), `TRevolvingFenceInner::receiveMessage` (named `gpMSound` fork x4 +0x30, a `mIsWall` reader x2 +8) and `controlWall`, `TBaseNPC::npcTalkIn` (signed `mActorType` reader x2 +0x10 where `getActorType()` x2 is 0) and `npcWaitIn`, `TBossWanwan::receiveMessage` (MSound fork x4 +0x30), `TEnemyMario::emDownAnimation`, `TBiancoGateKeeper::perform`. `TBaseNPC::npcMadding` frame-exact: retail ranks its three `TVec3`s the other way (`axis` lowest), so `axis` is an inlined callee's object. Refuted: `&getPosition()` for `&mPosition` at a `startSoundActor` site adds an instruction; naming `getRotYFromAxisZ()`'s result lands -0x58 exactly but drops to 98.9. 14 tried, 5 unpriced (`ladder_tried.txt`, 351 lines).
+
+## Frame ladder 318 (2026-09-19, Opus XII): 4 functions, the 4-byte rung has a spelling
+
+- **The 4-byte rung's source form: a TU-local fork returning a by-value scalar through an existing header accessor** (`u16 f(J2DPane* p) { return p->getAlpha(); }`) moves the block +4 per site (`TEndingString::perform` exact at 1 site, 2 sites overshoot by 4 at the same frame). Research 312's "one consumed 4-byte level" now has a reliable lever. A fork identical in shape to the existing accessor stays 0 (`poihanaActorType`, `MapWarpGetMarioAngleY`); the value category (by-value scalar, not a chain step) is what pays.
+- **Fork site counts are tuned downward too**: `MapMirrorGetManager()` at all 4 sites was +4 too much; dropping the `getUnk20()` site closed `TMirrorModel::init` and `TMirrorModelObj::init` (with a TU-local `MActor* unk4` reader x3 +8). `TMapEventSink::load` exact (`gpMarDirector` fork x2 +8, then `getCurrentMap()` on top of the fork x2 +0x10). A TU-local global fork can renumber registers (`MarDirectorEventGetCamera()` moved a binder r30 -> r29): check markers.
+- Correction: `TLiveActor::getLinearVelocity()` exists (`LiveActor.hpp:187`, added in header round 50); raw `mLinearVelocity` for it is -8 and costs 7 markers in `TPoiHana::isCollidMove`. `TMapEventSinkInPollutionReset::loadAfter` is a clean specimen of the unexplained dead-frame class: every instruction matches, the body touches no stack, retail's frame is exactly 0x40 (one `char[64]`) larger. `TMapWarp::watchToWarp` frame-exact (residue named-block ranking). 11 tried, 6 unpriced (`ladder_tried.txt`, 381 lines).
+
+## bossgesso ladder 319 (2026-09-19): 4 functions, the narrow-scalar +4 fork
+
+- **A TU-local by-value `int` fork over a narrow scalar member (`static inline int f(const T* p) { return p->unk195; }`, an `s8`) is the +4 rung** where pointer forks over the same class price 8 or 0x10 (`TNerveBGPolDrop::execute` exact after the save-param binder left `delta` 4 low). Second spelling of the +4 lever after ladder 318's by-value scalar accessor fork.
+- **A retail second `Vec` copied from a first immediately before a `const Vec&` call is a by-value TU-local returning the vector** (`BossgessoMarioEarPos()` for `SMS_GetMarioPos()` plus `y += 75.0f`, six instructions restored in `TNerveBGBeakDamage`): closure 238 on a returned value. Two `return true` sharing one `li r3,1` are an `if`/`else if`, not a nested `if` with an early return. A retail `bne <true-arm>` on a `BOOL` accessor with both arms' string relocs flagged is a negated test with the arms swapped (`TNerveBGDie`).
+- `getSpine()` pays per site: the `reset()` site is free (+8), the `setNext`/`pushAfterCurrent` sites reorder registers (`stopIfRoll`, `changeAttackMode` exact at the right sites). `TNerveBGEyeDamage` exact (nested `mBeakHolder` binder +0x18, named particle fork x2 +0x10, a `getModel()` fork x2 +0x18). Prices: `getModel()` fork +8/+0x18/+0x28/+0x30 at 1-4 sites; particle fork +0x10 at 2, +0x30 at 6; `gpMarDirector` fork +0x10 at 1, +0x60 at 8. Unit 27.61 -> 36.05, 66 of 88 exact. Open: `TNerveBGDie` (0x18 of dead pool between the call temporaries and the named block), `TNerveBGRoll` (0xb0 **over**: over-inlining, research), `TNerveBGPollute`/`BeakDamage` frame-exact.
+
+## Witness sweep 320 (2026-09-19): the +4 fork must feed a named scalar
+
+- **The +4 lever needs the fork's result in a named scalar local**: `f32 frame = FruitsBoatTrackFrame(mBckTrackCtrl);` (a TU-local fork over `J3DFrameCtrl::getFrame()`) closed `TNerveFruitsBoatBckTrace::execute`; passing the fork straight into `setFrame()` is 0. **Pointer value category does not pay the 4**: forks over `getMesh()`, `getMActor()` or a raw global are 0 (research 312's "scalar or pointer" reads scalar only). A named `u32` copy from a `getActorType()` fork refolds the `==`-chain. Of 21 live 4-byte witnesses, most have no by-value scalar accessor site at all.
+- Frame-exact lifts: `TMareWallRock::movement` (`SMSRumbleMgr` binder x2 +0x10, `gpCameraShake` binder +8), `TLiveActor::init` (`mMActorKeeper` binder x2 plus `mManager` binder +0x18). Rung grids skipping the target from both sides: `TNameKuri::init` (+0x28 wanted: `getMActor()` +0x20 at 2-3 sites, +0x30 at 4), `TRiccoWatermill::control` (+0x28: the named MSound fork saturates at +0x20 for 2-3 sites, +0x30 at 4; ladder 300's "linear" holds only in some pools). `ladder_tried.txt` 392 lines.
+
+## hamukuri ladder 321 (2026-09-19): 3 functions, the reference-returning product fork
+
+- **A `const TVec3&`-returning TU-local product fork is the honest local form of the refuted `operator*` reference return** (header round 25 lost about 15 functions tree-wide): `HamukuriScaled` for `v = v * k` restored twelve instructions in `THamuKuri::forceRoll` (90.23 -> 99.89, instruction-exact; residue two `scale` temps 0x2c low in a right-sized pool). Retail makes two copies at `v = v * k`; `JGVec3.hpp`'s by-value `operator*` makes three.
+- **Paired inline-expansion accounting**: a lever inside a body that is also pasted into a derived override must be repaid inside the override's own statements (`*gpMarioPos` -4 in `THamuKuri::behaveToWater` exact, and a `u8` fork over `getHitPoints()` +4 kept `TFireHamuKuri::behaveToWater` exact). `THamuKuri::isCollidMove` exact: `isAirborne()` raw for the TU-local binder (-4), then `TVec3 vel;` declared before the pointer and assigned after (+4; research 312's declaration-position form, inert when the pointer lives in an enclosing block).
+- A `.get()` -> raw `.value` read is -8 in one pool and -0x10 in another within one TU; a by-value fork over a narrow member must keep it narrow when retail reads it narrow (a `u8` fork 0, its named-local form +8, an `int` form breaks an instruction). `TNerveHamuKuriWallDie` is a new-class specimen: the pool total is right and only the split across an inlined callee's `TVec3` block is wrong. Unit 64.14 -> 68.04, 199 of 226 exact; 9 unpriced (`ladder_tried.txt`, 411 lines).
+
+## fireWanwan ladder 322 (2026-09-19): 3 functions, nested forks and the CSE-blocking scalar fork
+
+- **Nesting one TU-local fork inside another is +8 over the outer fork alone** (`Params(p) { return Owner(p)->getSaveParam2(); }` +0x18 at 5 sites where the flat fork is +0x10; `FireWanwanGetBody2` calling `FireWanwanGetBody` a clean +0x10): closed `TFireWanwanTailHit::movementBody` (with an `unkA4` fork at 8 of 9 sites: all 9 renumbers r27/r28) and `TNerveFireWanwanRecover::execute`. A hoisted named local is the wrong shape where the fork is right (retail re-calls at each site; hoisting dropped `movementBody` to 86.7).
+- **A by-value TU-local scalar fork blocks MWCC's CSE of a member guard**: retail's second `lwz` of `mPolluteTimer` between `cmpwi 0; beq` and `subi 1` is reproduced only by reading the guard through `static inline int f(const T*)` (`TFireWanwan::updatePollute` 96.28 -> 97.25): the operand sibling of the +4 frame rung. `getTracer()` for raw `unk124` collapsed 11 of 16 markers in `TNerveFireWanwanTurn` (an accessor rung that fixed register allocation) and, with `getGraph()` x2 and declaration order p2, p3, p1, made `initEscapeNextGraphNode` frame-exact.
+- Real bugs: `TFireWanwanTailHit::receiveMessage` (exact) calls `moveRequest(param_1->mPosition)`, the taker's position; `moveRequest` translates by `mPosition`, not `next`. Shared-header blockers reported: `TGraphTracer::popCurr`'s `int& prev = mPrevIdx;` forces an `addi`/`stw` pair in the wrong register (holds `TNerveFireWanwanTurn` at 99.78); `ArrayWrapper<T>` lacks the const `operator[]`/`size` overloads the map lists. `TFireWanwan::behaveToWater` joins the unexplained dead-frame class (0x50, every instruction matching); `init` is a 4-high witness with no removable level. Unit 31.95 -> 37.76, 66 of 96 exact; 6 unpriced (`ladder_tried.txt`, 410 lines).
+
+## bosseel ladder 324 (2026-09-19): 3 functions, a pasted helper fixes register allocation
+
+- **A size-exact UNUSED helper pasted into a loop body fixes the caller's register allocation as well as its frame**: `TBEelTearsDrop::generate(TVec3&)` was an empty stub; moving the per-drop work into it and calling it from `splitTears`'s loop swapped `r26/r27` into retail's `r27/r28` at zero instruction change and sized `generate` at its map 0x12c (`TBEelTearsManager::splitTears` 96.65 -> 100 with nested forks owner -> params -> scale range +8 each plus a named local inside the params fork +8). Check UNUSED helpers on the callee class when a loop body's block objects rank the wrong way round.
+- **A discarded inlined value that feeds nothing: retail emits only the `bl`**; spell the dead statement as the bare library call (`rand();` beside the still-constructed `TMsRange`), since `x.rand();` leaves the int->float conversion's stores. Dropping one derived-class `getObj` level (`TLiveManager::getObj` for `TEnemyManager::getObj`) is -8 of pool at a call site (`createEnemies` frame-exact).
+- `TBossEelBarrierCollision`/`TBossEelAwaCollision::behaveToMario` exact (`SMS_GetMarioPos()` for `*gpMarioPos` at the `add()` site, +8; in Awa the reference temporary sits below the vector, so the old "4 low" reading was wrong). Unsolved and shared by two functions: the `setHitParams(attackRadius * scale, ...)` int->float temporary permutation (`TBEelTears::moveObject`, `TOilBall::moveObject`; declaration order, inlined `.get()`, an `f32` first local and a separate statement all refuted): research. Unit 48.72 -> 50.63, 122 of 144 exact; 6 unpriced (`ladder_tried.txt`).
+
+## bosswanwan ladder 323 (2026-09-19): 7 functions, the table-element fork and FPR knobs
+
+- **A TU-local fork returning a global table element** (`static inline const char* f(int i) { return table[i]; }`) defers the table's `@ha` load past the int-to-float `0x4330` constant: one instruction, zero frame, per expansion (closed `TNerveBWShake`/`TNerveBWBark::execute`, made a third instruction-exact where a named `f32` divisor and every reordering failed; one named, outweighed drop in `TNerveBWGraphWander` 88.56 -> 88.47).
+- **`(f32)i / 4.0f` versus `* 0.25f` is an FPR knob**: the division form keeps the dividend as the first `fmadds` operand and rotates the literal (extends "division keeps the dividend left" to fused multiply-add); **`x = a * b` -> `x *= b` lands the product in the named local's FPR without an `fmr`** (the `/=` rule holds for `*=`). Both in `TBWLeashNode::perform`, exact with `mLeash->mOwner`/`mRope`/`mMActor` binders composing linearly to +0x60 (the same three cap at +0x28 in `calcMatrix`).
+- **Raw pointer-member reads are not uniformly -8 within one pool**: in `TNerveBWFall` `getTracer()` -> `unk124` is -8 per site while `getPicket()` -> `mPicket` is -4, so the 4-byte rung has a raw-member pointer form (witness sweep 320's "pointer does not pay the 4" holds for forks, not for dropping an accessor). **A retail reload across a `bl` separates a named reference from a respelled expression**: retail binds `&mPicket->mPosition` for the first argument and reloads `mPicket` for the second. `TNerveBWJumpAway` exact (raw `unk124` at both sites -0x10), `TBossWanwan::emitEffects` (named MSound fork x4 +0x30, particle fork +8).
+- Real bug: `TBWHit::perform` sends the chain hit's message from `mOwner`, not `this` (retail kept `mOwner` in r4 across the loop: the volatile-GPR liveness rule reads out real arguments). New open-class specimens: `TNerveBWRoll` (0xc8 of dead frame, the `loadAfter` class), `TNerveBWWakeup` (0x10 too long, nothing left to remove), `TBWLeash` ctor (JGadget iterator block 8 low), `calcMatrix` (`0xc` folded into the index where retail keeps a load displacement). Unit 22.86 -> 35.81, 58 of 79 exact; 9 unpriced (`ladder_tried.txt`).
+
+## bosspakkun ladder 325 (2026-09-19): rungs inside a restored UNUSED helper
+
+- Replacing a spelled-out body with a call to the UNUSED `resetWaterMark` helper is neutral, and rungs placed **inside** the helper pay every caller: a `gpModelWaterManager` binder (+8) and a nested `mWaterEmitInfo` fork (+8) at the `.value` site closed `TNerveBPStompReact` and `TNerveBPPreDie` (+0x18) together. A named local for the reloaded member inside the helper costs an instruction where the fork keeps retail's reload; bind the receiver only (a fork on the `emitRequest(*info)` argument too swaps the load order).
+- **A binder whose body calls a direct-return fork of the same member is +8 over the flat binder**, where two identical global forks collapse to 0: the parameter stops the collapse. A fork over an accessor chain with a named local inside is +8 on top of the direct-return form (`getFrameCtrl(BCK)->getFrame()`, 8-granular here). Unit 44.02 -> 46.95, 108 of 129 exact; 9 unpriced (`ladder_tried.txt`, 457 lines).
+
+## WaterGun ladder 326 (2026-09-19): 8 functions, an inlined callee's `Mtx` below the caller's
+
+- **Two caller `Mtx` locals that retail places 4 apart are one caller local plus one inlined callee's own local**: moving the rotation `Mtx` into a TU-local inline put it below the caller's named `Mtx` and its 8-byte boundary supplied the 4-byte gap (`TWaterGun::setBaseTRMtx` exact; the whole model-fetch accessor ladder 8/12/20/24 could never give 16). A fork over a virtual accessor is +0 (`getGunAngle()`): the +4 scalar-fork rung needs a non-virtual accessor.
+- Exact: `emit` (named MSound fork x4 +0x30 plus a second fork nested over it at 3 of 4 sites +0x20), `suck` (nozzle binder at both `getCurrentNozzle()` sites +0x18, flat MSound fork +0x10), `isEmitting` (nozzle binder x3, named `gpMarDirector` fork x3, `getCurrentWater()` +8; the pre-existing `const TWaterGun* self = this;` alias removed), `getEmitMtx` (`&nozzleBmdData` fork at both table sites plus a `getCurrentNozzle` binder +0x30), `changeNozzle` (`mNozzleList[mCurrentNozzle]` binder x3, `mMario` binder, one nested site +8). Residue: `TNozzleBase::emitCommon` needs 8 above the named block; `calcGunAngle` saturates 0x28 short. Unit 18.44 -> 28.02, 28 of 44 exact.
+
+## bossManta ladder 327 (2026-09-19): 4 functions, the global-accessor level is the pointer +4
+
+- **Dropping `SMSGetMSound()` for raw `gpMSound` is -4**: the pointer-returning global accessor level is the +4 rung in pointer form (witness sweep 320's "pointers do not pay the 4" holds for forks, not for dropping an existing accessor). Three functions in this unit (`TNerveMantaSpawn`, `TNerveMantaHitWater`, `TMantaBattleState::update`); `SMSGetMarDirector()` is not a bare return and swapping it costs two instructions.
+- **A named scalar local holding a call argument can be the wrong shape**: passing `table[gen]` straight to the inlined `startSoundActor` instead of through `u32 snd` promotes it from inner-block local to inlined-callee parameter, one rank up the callee-saved ladder (r26 -> r27); per site (the sibling keeps its local). **`int i;` declared before a `bool` flag** (not `for (int i = ...)`) gives the flag the higher volatile, as retail does. `TBossManta::initNthGeneration` exact with `getSpine()` at 6 of 7 sites (+0x18; 7 overshoots by 4) plus the `getManager()` binder (+8).
+- **Rule 213 priced**: spelling a `const int[6]` out at both of its sites lands the frame but emits the literal twice and renumbers the pool: unit `matched_data` 100 -> 18.24. Two identical `const T[]` locals stay one TU-local inline; measure `matched_data` whenever a const array moves. Lifts: `collidedWithWater` 99.91 (a `BossMantaGeneration(this)` fork restores the single `mGeneration` load), `calcRootMatrix` 99.03 (every slot exact, FPR colouring of literals left), `TMantaMessageState::update` 99.86. Open: `setupEfbAlpha` wants its `GXColor` pair above the `Mtx44`/`Mtx` locals. Unit 24.43 -> 41.15, 34 of 50 exact; 6 unpriced (`ladder_tried.txt`, 478 lines).
+
+## hanasambo ladder 329 (2026-09-19): 10 functions
+
+- `(THitActor*)gpMarioAddress` feeding `TPathNode`'s ctor through a parameterless global fork is a +4 pool rung (`THanaSambo::load`/`TSamboHead::load` exact at 3 of 4 sites; `TSamboHead::init` stays raw): second witness for "4 off the 8-byte binder grid". A nested TU-local fork inside a params binder is +8 over the flat binder (confirmed again); `head->getGroundHeight()` (by-value non-virtual scalar) +8 per read, non-monotone; a binder placed inside a size-exact UNUSED helper is per-site tunable in the caller (`SamboHeadCrashPos` at 1 of `setCrashAnm`'s 2 sites +8, both +0x10, the direct-return form 0). Exact also: `TNerveSamboHeadAppear` (particle fork x2, raw `mFlower` fork at 2 of 3), `TNerveSamboHeadHitWall` (named `manager` +8, particle fork x2 +0x10, two binders). Open: `TSamboHead::attackToMario` needs 0x10 above the named block (an inlined callee's class object); `TNerveSamboHeadHitWater` frame-exact with six scheduling instructions (retail issues the vtable load before the receiver copy). Unit 49.50 -> 67.95, 84 of 96 exact; 3 unpriced (`ladder_tried.txt`, 491 lines).
+
+## MapObjBall ladder 330 (2026-09-19): 9 functions, a pasted body pays both callers
+
+- **Rungs placed inside a body a derived override pastes close both copies at once when both need the same delta**: a named MSound binder at the three `startSoundActorWithInfo` sites (+0x20) and `getGroundPlane()` at the two `mNormal.y` reads (+8) inside `TMapObjBall::rebound` closed it and `TBigWatermelon::rebound` together (ladder 287 had found fixing one broke the other; hamukuri 321's "repay inside the override" applies only when the deltas differ).
+- **A by-value pointer fork over an existing non-virtual accessor (`getModel()`) is the +4 pool rung at unchanged frame** (`TResetFruit::appearing` exact), and a by-value scalar fork over a member feeding a named scalar is +4 bottom / +4 top. Also exact: `TResetFruit::waitingToAppear` (model fork x2, MSound binder +0x18, `gpMarDirector` binder +8, a member accessor +8), `perform` (director binder, `MapObjBallIsState` x2, `gpCubeArea` binder), `checkGroundCollision` (`gpMap` binder x3 +0x18, director binder +0x10, `getGroundPlane()` +8), `breaking` (MSound binder +8 paired with the model fork, 0 alone). **Open class (three witnesses)**: retail parks a `TVec3 vel(mVelocity)` object at the bottom of the low pool with its derived copies far above (`boundByActor`, `kicked`, `control`); a named local can never go below the pool, so it wants a by-value TU-local parameter shape. Unit 45.01 -> 63.52, 60 of 72 exact; 7 unpriced (`ladder_tried.txt`, 512 lines).
+
+## chuuhana ladder 332 (2026-09-19): 4 functions, rungs inside a pasted helper pay five callers
+
+- **Rungs inside an UNUSED helper pay every caller that pastes it, and a caller that spells the body out is unaffected**: `setSafeGoal`'s graph-web two-local binder, node-address binder and node-count fork are +0x40 at `reset`, `willFall`, `isCollidMove`, `KeepBalance` and `ForceJumped` at once; nesting both forks in per-actor wrappers with named locals inside is a further +0x10 (the direct-return nested form alone +0x10, the named local the other +8) and landed two nerves together. `setSafeGoal` stays 316 bytes, its map size.
+- The 4-byte rung in the negative direction: dropping one `getMActor()` level at a single site is -4 (`TNerveChuuHanaJumpPrepare` exact) where the same accessor at a sibling site is 0; a by-value `int` fork over an `s16` member is +8 when read at two sites (`checkStretchType` exact with a params binder at the ReverseHeight reads +0x10), refining the +4 to a per-site ladder. `TChuuHanaManager::perform` exact (`SMSGetMarDirector()->getConsole()` binder at 2 of 4 sites +0x18); `initSetEnemies` exact (`TMsRange<int>` declared before the `TVec3`, retail's block order: **block-object declaration order is readable off the ascending slots, the reverse of declaration**; then an address binder +0x10, `getTracer()` +8, a `gpConductor` binder +8, a by-value node-count fork +4).
+- **Open class, three witnesses: a 0xc-sized zero-instruction pool item** (`setGoal` needs exactly 0xc below the implicit `TPathNode` temporary, `ChuuHanaBodyCallback` 0x18); every 8-granular rung prices 0 and a by-value `TVec3` TU-local parameter lands the frame but costs the copy. `getSaveParam2()` forwards to a virtual here, so a raw-member binder is the rung. Unit 37.78 -> 49.09, 43 of 57 exact; 10 unpriced (`ladder_tried.txt`).
+
+## MapObjMare ladder 334 (2026-09-20): 5 functions
+
+- Exact: `TMapObjPuncher::control` (two-local `MActor* -> getFrameCtrl(BCK)` binder +0x10; one-local +8, direct-return fork 0), `TMuddyBoat::kill` (by-value pointer fork over `getModel()` at 1 of 2 `MTXCopy` sites +4, both +8), `TCogwheelScale::touchPlayer` (`CogwheelSpeed` fork at 3 sites, `gpMarioPos` binder, `getObjCollisionHeightOffset()`, `gpMarioSpeedY` binder). Open 4-byte class witnesses: `TCogwheel::initDraw`/`TWireBell::initDraw` (8 dead bytes above the `JUTTexture` local with every slot at retail's), `TWireBell::control` (`Mtx` 4 high, no level to drop), `TMuddyBoat::control` (every +8 rung is +0xc of pool; a +4 below a call-argument `TVec3` temporary is wanted and no catalogued +4 spelling gives it). Unit 41.35 -> 49.71, 54 of 67 exact; 5 unpriced (`ladder_tried.txt`).
+
+## cannon ladder 335 (2026-09-20): 6 functions, `fp_contract` on a member-literal product
+
+- **`fp_contract` fuses `member + literal * member` too** (no locals involved) when it is the expression's last product; a TU-local `static inline` returning the product unfuses it at no frame cost at either caller (`TCannon::bombScaleUp`, closing `TNerveCannonForceBombShoot::execute` with an MActor binder x6 +0x48, a chorobei binder x2 +0x10 and a frame-control binder nested over the MActor binder +0x10, and lifting `TNerveCannonShoot` to 99.96).
+- **A `TMsRange<f32>(a,b).rand()` temporary at function scope becomes a +4 block object when named; at block scope naming it is inert** (`TCannonDom::TCannonDom` exact; `setKillerGoalPoint` did not move). `TCannon::perform` exact with `mMarioParts->getMActor()` binder at 2 of 4 sites (+0x18; 1/3/4 sites 0x178/0x190/0x1a0); a named-local particle-manager fork at 3 of 6 sites landed the frame but rotated r29/r31 (global forks can pay the frame and still be the wrong spelling). `TNerveCannonClose` exact (`getBody` binder, chorobei binder at 2 of 3, then `hideDist *= 3.0f; hideDist *= hideDist;` for the FPR colouring); `TNerveCannonDamageDemo` exact. The nested `J3DFrameCtrl*`-over-MActor binder is +0x10 in one nerve and 0 in its structurally identical sibling: per function. Open class: `setKillerGoalPoint` and `init` show retail 8-aligning each block object (holes at 0x44/0x54/0x70, 4 bytes between two `TPathNode`s) where ours pack 4-aligned. Unit 23.97 -> 40.02, 41 of 55 exact; 8 unpriced (`ladder_tried.txt`).
+
+## koopajr ladder 336 (2026-09-20): 4 functions, dropping a header wrapper at one site is -8
+
+- **Dropping a header accessor wrapper at one site is -8** (`getSaveParams()` -> `(T*)getSaveParam()` at one of three sites closed `TKoopaJr::init`'s 0xe8-vs-0xe0 gap that the -0x10-granular `.value` rung skipped): the negative counterpart of ladder 315's "+8 per site through the accessor".
+- **Raw `mSpine` vs `getSpine()` at a `pushNerve` site is a GPR-ranking lever**: the raw member ranks above the nerve address and swaps the inlined `pushNerve`'s two scratch registers; `getSpine()` is the only spelling that fixes it (a named `TSpineBase*` lands the frame but breaks the body), and its frame cost is site-superadditive (site 1 alone 0, site 2 alone +8, both +0x10). `TKoopaJr::checkNerveKillerHit` exact (with the named `TBathtubKiller*` dropped, -8).
+- **A named result inside a TU-local `f32` wrap helper is +8 per expansion and stacks through a forwarding helper** (`TDirectionCalc::absDirection` exact: `WrapDirection` +0x10, `WrapRadian` +8, a named `fabsf` result +8); naming an intermediate `t - l` also pays +8 but flips the `fadds` operands, naming the CSE'd `r - l` pays 0. **A by-value scalar fork over a member is also an `fmr`-ordering lever for argument registers**: `sinf(Fork(this))` gives `lfs f0; fmr f1,f0` where `sinf(mDirection)` loads straight into f1 (`calcDirectionVector` 87.2 -> 100 with a named local inside the fork +0x10).
+- Open: `TKoopaJrSubmarine::updateTimers` is 0x1c in the map (7 instructions) against our 6, and `perform` wants `addi r4,this,0x150` before the member load (every foldable `s32&`/`s32*` form folds back); `TKoopaJrSubmarineParams` ctor's two extra `lfs` are a whole-TU pool effect (retail shares `PARAM_INIT` literals with earlier functions); `appearShineKiller` is an r30/r31 swap. Shared-header need still open: `JGeometry::TUtil<f32>::mod` 8 short (`JGUtil.hpp`). Unit 33.62 -> 39.28, 60 of 81 exact; 6 unpriced (`ladder_tried.txt`).
+
+## MapObjBianco ladder 337 (2026-09-20): 6 functions, the setter-level +4 and a hand-written identity
+
+- **A TU-local `static inline` setter around a scalar assignment is the +4 rung** (`TLampSeesaw::load` exact; the by-value fork over the header accessor at the same site is +8): research 312's "one extra level around an assignment" with a concrete spelling. Raw `mPosition.x` at 1 of 3 `getPosition()` sites -4 (`TLeafBoat::calc` exact). A frame-control two-local binder inside the pasted UNUSED `ringSingle()` at sites {1,5} (+0x18; {1} +8, all five +0x40) closed `TBiancoBell::touchPlayer` and `touchWater` together. `TWoodLog::control` exact (two-local `getModel()->getAnmMtx(0)` binder x2 +0x18, raw `gpMarioPos` fork at 1 of 3 sites +8).
+- **`a = b = c = v` chains reconstruct a hand-written `MTXIdentity`**: retail's scattered store order decodes column-wise (`m[0][3]=m[1][3]=m[2][3]=0; m[0][2]=m[1][2]=0; m[0][1]=m[2][1]=0; m[1][0]=m[2][0]=0; m[0][0]=m[1][1]=m[2][2]=1`), each chain storing right to left; twelve separate assignments never match (`TBiancoMiniWindmill::calc` markers 41 -> 0, though the fuzzy score fell 90.5 -> 89.7 on five `@sda21` loads still scheduled after the store run: accepted, named). **Dropping a named `f32` local can be the FPR-colouring rung**: `f32 speed = unk158;` put the load in f2; reading the member directly (CSE'd across the branch) gives retail's f1/f2 (`TBellWatermill::touchWater` exact), the inverse of hanasambo 329.
+- Open: `TLampSeesawMain::loadAfter` (retail holds 12 bytes above the `char[64]`), `TBiancoMiniWindmill::touchWater` (0x10 above the block-scope `TVec3`), `TLeafBoat::touchWall` (MapObjBall 330's `TVec3 vel(mVelocity)` class at scale), the `TBiancoWatermillVertical` ctor (+0x10, no binder-eligible site). `getName()` raw is -4 per site but the frame moves only at the third. Unit 51.63 -> 60.43, 63 of 74 exact; 5 unpriced (`ladder_tried.txt`).
+
+## enemy ladder 339 (2026-09-20): the helper/caller region split
+
+- **Rungs inside a pasted helper add frame above the helper's class-object block; rungs in the caller's own pre-paste statements add below it.** A family whose block sits low needs caller-side rungs; helper rungs make the split worse even while the total frame improves (`TSpineEnemy` graph family, eight functions). `setGoalPathFromGraph` itself exact (a TU-local `getNodePoint(const TGraphNode&, TVec3*)` forwarder +8, `getTracer()->getGraph()->getGraphNode(getTracer()->getCurGraphIndex())` with `getCurrent()` written out one level deeper +0x10, `setGoalPath(TPathNode(local))` for the fabricated fork).
+- **Accessor reads must match on both sides of a paste or the CSE breaks**: the helper reading `getTracer()->getCurGraphIndex()` against the caller's raw `unk124->mCurrIdx` stops MWCC sharing the index (`goToShortest` 99.7 -> 92.7); respelling the caller to the same expression restores it and is the frame rung. Reading the tracer through `getTracer()`/`getGraph()`/`getCurGraphIndex()`/`getPrevIndex()` at every caller read site, receivers of `setTo`/`moveTo` left raw, lands `goToShortest`/`goToRandomNext`/`goToRandomEscape`/`goToDirLimited` exactly and the other two within 8-0x10; the residue is the block 0xc-0x20 low in all six (the +N-below rung exists: a forwarder around `setTo`/`moveTo` is +0x10 below at pinned frame but gives `addi r4,r3,0` for `mr r4,r3`; a wrapper of a whole if/else arm +0xc below but promotes the tracer to r30: spelling open).
+- `turnToCurPathNode`: `const TPathNode& node = getUnkF4();` plus a `getPoint` fork with a named `owner = node.unk0` is instruction-exact (121/121) with the frame pinned at 0x50 of 0x58 (reverted, pinned-low-region case). **`TSpineEnemy::goToShortestNextGraphNode` sits under a load-bearing `#pragma dont_inline`** (without it `reset()` inlines the body and drops 100 -> 0; retail's body is 15+ statements to our 12): a named live fakematch for the pragma sweep. Unit 29.17 -> 30.66, 24 of 40 exact; 7 unpriced (`ladder_tried.txt`, 615 lines).
+
+## MarioRun ladder 340 (2026-09-20): `getInput()` is a +4 level, the 2:1 binder ladder
+
+- **`getInput()` is a clean +4 level on `TMario`**, and an odd count of +4 levels shifts the named block down 4 at constant frame: `TMario::turnEnd` exact reading `mInput` raw at the slip test (two accessor reads were two levels where retail has one). **The `getNormal()` binder ladder is 2:1**: each `MarioRunGetNormal(p)` site is +4 low pool / +8 named block, a fork calling that fork +0x10 / +0x10; mixing them lands a frame whose two regions need unequal growth (`slopeProcess` 99.96, frame exact). A +4 named-block level is still missing: `slopeProcess`, `doSliding` and `walkEnd` all sit 4 off in the named block at an exact frame.
+- **`x / 4.0f` vs `0.25f * x` is a load-order knob**: it reorders the two `lfs` feeding the `fmuls`, which operand swapping does not (`walkEnd` 99.13 -> 99.99, also the +8 the frame needed). `slideProcess` 99.97: retail accumulates into the `baseAcc` parameter, not a fresh local. Open, three sites: `gpPollution->stamp(1, mPosition.x, y, z, size)` evaluates strictly right to left with the receiver last (`oilSlip`, `oilRun`, `moveMain`; every accessor spelling refuted). `getSlideStickMult`: two ground-fork sites land the frame but break retail's single `lhz` CSE. Unit 35.10 -> 38.19, 20 of 33 exact; 5 unpriced (`ladder_tried.txt`).
+
+## tobiPuku ladder 342 (2026-09-20): 7 functions, a named `MtxPtr` blocks the displacement fold
+
+- **A named `MtxPtr` local blocks the `addi base,0x30` fold that retail folds into three `lfs` displacements**; deleting it (spelling `getMActor()->getModel()->getAnmMtx(1)[i][3]` per component) is -0x30 of frame plus one instruction (`TTobiPuku::calcRootMatrix` and the pasting `TMoePuku::calcRootMatrix` exact with `getPosition().x` at the `MsMtxSetXYZRPH` site +8); the same spelling matches with the local in `TMoePuku::hitWater`, so it is per call site.
+- **The `spine->getBody()` binder is a per-nerve +4/+8 knob**: swapping an existing one-local binder elsewhere in the body for it is +4 (`TNerveTobiPukuAttack`/`Die` exact), adding it on top +8 (`HitWater` exact with `mPosition.y += 5.0f` reusing the literal's FPR). A named `dir` local that is really an unnamed `TVec3(mVelocity)` call temporary reorders the block (`Fly` exact with `getVelocity()` -8 and a setter level +4). **Dropping a named local can re-inline the whole function into its caller** (`hitWall` fell to 13 statements and was pasted into `moveObject`, 100 -> 0; splitting `f32 dot` off `f32 bounce` is the honest repayment). A symmetric dot product's term order reads off which product becomes the `fmuls` (the right operand of the first `+`). `TTobiPuku::forceKill` exact: `isJumpBck()` returns `bool` (retail `clrlwi.` after the vtable call). `TNerveTobiPukuBound`: a function-scope `TVec3 now;` before the `if` fixes the slot order and frame but every slot stays 4 low in an 8-granular pool. `Land` (54.8) still holds the data at 96.71, not reached. Unit 59.20 -> 74.66, 111 of 120 exact; 5 unpriced (`ladder_tried.txt`).
+
+## bgtentacle ladder 344 (2026-09-20): 6 functions, indexed-member accessors read raw
+
+- **Reading an indexed-member accessor raw is a cheap large negative rung where a frame is too long**: `getFirstNode()`/`getLastNode()` (`return &mNodes[k]`) are about -4 per site, saturating (7 sites -0x20, 2 more -8), landing `TBGTentacle::changeStateAndFixNodes` 0xa8 -> 0x80 in one step; `decideOwnState` exact on one site (-4 at equal frame). Its inverse, a by-value `int` accessor read over a member (`getState()`), is +4 of low pool per read and the 4-granular rung this TU needs everywhere (8 reads +0x20 in `TNode::calcPosition`, 3 = +0x10 in `perform`, exact with `getPosition()` +8 and `getUnk2C()` x3 +8, the last inert at the old base and live at the new one).
+- Real bugs: `calcAtkParticleAndSE` had `PSMTXCopy` backwards (retail reads joint 3 into `unk50`: `MTXCopy(getAnmMtx(3), unk50)`; **`MTXCopy(x->getAnmMtx(i), m)` vs `x->setAnmMtx(i, m)` differ only in the r3/r4 pair at the `bl`, so read the direction off which register carries the joint chain**); `TNode::calcVelocity` moved `this->mPosition` where retail moves `param_2->mPosition` and had its length test reversed. Data: the 380-byte `gap_07_803BBF44_data` is eight weak vtables MWLD zero-filled (the losing-duplicate class); `.data` is at its ceiling and the lead is closed. `setAttackTarget`, `TBGTakeHit::perform`, `TBGAttackHit::perform` are blocked by `TVec3::cross()`'s store order (shared header). Unit 19.75 -> 39.69, 30 of 40 exact; 7 unpriced (`ladder_tried.txt`).
+
+## tinkoopa ladder 345 (2026-09-20): 2 functions, the 12-byte `getModel()` binder
+
+- **The `getModel()` named-local binder is 12 bytes per site in a long accessor-pool frame**, linear (18 sites = +0xd8) and freely subset-tunable: 10 of 18 sites landed `TTinKoopa::emitTinKoopaEffects` (3076 bytes) at 0x2b8 exactly, 99.99 -> 100.
+- **A named receiver plus a named `int` argument declared after it moves an int-to-float conversion constant from a callee-saved register to `r0` after the `bl`** (reverses the right-to-left argument rule for `recv->f((f32)i)`: -8 of frame and one GPR; `TTinKoopaPartsBase::emitPartsDisappearEffects` 92.8 -> 100). **A symmetric `A + B` of two out-of-line calls evaluates right to left**; naming the left operand restores retail's order and the whole callee-saved assignment (`stmw r27` -> four `stw`; `checkTinKoopaKillerApproachingMessage` 88.6 -> 99.8).
+- Refuted (source TODOs): an empty TU-local static does not keep an empty else-if arm's compare; an explicit `else` does not unfuse a `bcc; b epilogue` early return; a reassigned pointer local folds back to base+displacement like the pointer parameter (`updateTimers`); a by-value `int` fork over a member is 0 in `initTinKoopaPartsBase` (the +4 int rung is not universal). `emitFlameEffects`: `f32 a = e; f32 b = a;` gives retail's shape but the first-declared takes f31, the wrong way round. `TTinKoopa::init` (92.9) is a `.data` layout problem: retail addresses three tables and the nerve link node as displacements off one `.data` base. Unit 33.90 -> 53.88, 39 of 54 exact; 9 unpriced (`ladder_tried.txt`).
+
+## enemyMario ladder 348 (2026-09-20): the two-level distance helper, `consider()` owns the data
+
+- **Where `TVec3::distance`'s repeated-subexpression body mis-schedules, the retail shape is an outer `sqrt(inner(a,b))` plus an inner helper holding named `dx/dy/dz` and named squares** (the attested `CameraNoticeSquaredDist` shape): it fixes the load schedule and the r28/r29/r30 ranking (`TEnemyMario::checkReturn` 91.2 -> 99.8, `emWaitingToInviteMario` 96.0 -> 99.9 with `getSettingsParams()->mSearchDist` +8). One level is -8 and mis-schedules the `fsubs`; a scalar-parameter inner is +0x18; `f32 sum = ...; return sum;` is +8 over `return sqX+sqY+sqZ;`. `matan(b, a)` on two raw differences evaluates right to left; naming both deltas (`f32 dx` then `f32 dz`) restores retail's x-first load order at zero cost.
+- **The unit's data deficit is one jump table**: `@4667` belongs to `TEnemyMario::consider()` (97.3), and the 12- and 256-byte gaps after it are unreferenced dtk split fillers (linked 100%-data units carry identical gaps): `consider()` exact means unit data 100. Its two residues: retail `bl`s `TVec3::sub` then `dot` where our `operator-` copies the temporary first, and two `bl TGraphTracer::getGraph()` in the `emReplayWaiting` arm need inline depth 5 (the chain `consider -> emReplayWaiting -> emReplayWaitingToReplayJumpToNearestNode -> canJumpToNode` is one level too shallow; `canJumpToNode`'s UNUSED body is 0x70 against the map's 0x6c, corroborating a missing level inside it). Unit fuzzy 98.21 -> 98.47, 38 of 54 exact; 8 unpriced (`ladder_tried.txt`).
+
+## Item ladder 349 (2026-09-20): 6 functions, a reference accessor on an argument re-ranks the GPRs
+
+- **A reference-returning accessor on a call argument can re-rank the whole GPR assignment**: `getDistanceXZ(getInitialPosition())` for the raw member fixed a cyclic `this`/parameter rotation and the r3/r4 argument order in `TShine::appearWithTime` (86.2 -> 99.9 in one step, then a flag-manager fork +8, an MSound fork +0x10, `getPosition()` at all three reads +8, exact). Try it before any frame lever when a 99-band function shows a cyclic register rotation with no structural diff.
+- **A by-value `int` fork over the state member feeding a `switch` is +4 at the bottom of the low region** (`TEggYoshi::control` exact), shifting every inline temporary up: the cheapest +4 for a frame that is right with the temp block 4 low. **Naming a `new` result before storing it to a member is a +4 named-block lever** (`TCoin::loadAfter` exact) where the forks priced 0 or -4. `TItem::calc` exact (`getModel()` fork at both sites +0x18, `getPosition()` at one of three reads +8), `TShine::movingCircle` (by-value `int` fork over `unk168` at two of three reads +0x18), `TEggYoshi::load` (any two TU-local pointer forks +0x18). Site counts stay non-monotone everywhere (`getPosition()` 1 = +8 / 3 = +0x10 in one body, 1 = 0 / 3 = +8 in another; pointer forks 1/2/3 = +8/+0x18/+0x20). **Warning**: the two `(void)0;` placeholders at the top of `TShine::movingCircle` are load-bearing for the `.sdata2` literal pool (removing them drops `TShine::control` to 79 and 82% of the unit's data); the "hack, remove" comment above them is misleading. Unit 63.57 -> 77.23, 90 of 97 exact; 4 unpriced (`ladder_tried.txt`).
+
+## pakkun ladder 352 (2026-09-20): 4 functions, the unnamed copy-ctor temporary
+
+- **A `TVec3` built only to bind a `const TVec3&` argument is an unnamed copy-ctor temporary** (`MsGetRotFromZaxis(TVec3<f32>(getVelocity()))`), a low-pool call temporary; a by-value TU-local fork returning the vector reaches the low pool but sits 4 high (one level too many). `TPakkunSeed::moveObject` exact. **`1.0f / member` vs `f32 s = 1.0f; s /= member;`**: the split form puts the literal in the quotient's own register (retail's `fdivs f0,f0,f2`); the reciprocal sibling of the `x /= k` rule (`PakkunRootCallback2` 98.1 -> 98.7). A by-value pointer fork over `getMActor()->getModel()` is the +4 rung in the joint callbacks where a binder over the same is +0x10 (the fork/binder split picks the granularity; `PakkunRootCallback` exact with a `gpCurPakkun` binder at 3 of 5 sites +0x28). A nested by-value scalar fork is +0x20, plus a named local inside +0x28. `TNervePakkunHide` exact (`getBody()` +0x10, `mSeed` binder at one site +8, `getPosition()` +8); `TNervePakkunGenerate` exact on two bugs (`dist *= dist;` before the compare; the named `TPakkunSeed* seed` dropped).
+- **Shared-header need, measured (`Enemy/PathNode.hpp`)**: `TStayPakkun::load` is retail's only caller of `TVec3::set<f>(0,0,0)` in the unit (its one MISSING symbol), emitted from the inlined `TPathNode(THitActor*)` ctor at depth 4 while the exact `TPakkun::load` expands the zeros: the ctor's three zero stores as `unk4.set(0.0f, 0.0f, 0.0f)` was the proposed fix; **header round 52 refuted it**: the site is at inline depth 3 (`setGoalPath` takes the node by `const TPathNode&`), so `set` stays expanded tree-wide, and buying a level deepens every `TPathNode(THitActor*)` site (header round 19's regression). Unit 55.92 -> 64.08, 66 of 78 exact; 5 unpriced (`ladder_tried.txt`).
+
+## NpcEvent ladder 353 (2026-09-20): 4 functions, the named local is the whole +4/+8 difference
+
+- **A named local inside a TU-local fork is the whole difference between +4 and +8**: `return TNpcEvent::mDownSunflowerNum;` is +4, `int num = ...; return num;` is +8 (`TNpcEvent::reviveOneSunflower` exact on the +4). **The slice-slot rule generalises to the value overloads**: `push(TSpcSlice(v))` at the call site vs `push(v)` is +4 on the pushed slice's rank at equal frame (`evIsGameModeNormal`/`evIsDemoMode` exact), but not monotone against a named-local change in the same body. `ReviveSunflowerCallBack` exact: a `SMSGetMSound()` binder with a named local is +0x10 in one rung.
+- **A pointer declared before a `char[N]` buffer and assigned after moves the buffer -4; a scalar declared there moves nothing** (it never leaves a register). **The `gpMarDirector` binder is +0x20 at three sites, not 3 x 8**, and the plain `SMSGetMarDirector()` at one of the three is -8: super-additive, measure at the full site count (`ev__ForceStartTalk` 99.92, both frames exact). Open: `evGetFruitNum`/`evSetFruitType` (+8 with only the `fctiwz`/`stfd` conversion temp misplaced against a byte-identical exact sibling); `evCheckCurNerve4Npc`/`evCheckLatestNerve4Npc` need +0x10 from a lever that does not free a register (a `NerveGetByIndex` binder lands the frame but drops the r28 save). Unit 49.71 -> 58.37, 17 of 25 exact; 5 unpriced (`ladder_tried.txt`).
+
+## MarioDraw ladder 355 (2026-09-20): 3 functions, a viewport buffer one float short
+
+- **Real bug**: `f32 wpsave[5]` must be `f32 wpsave[6]` (`GXGetViewportv` writes six floats); that one word was the 4-byte hole between `wpsave` and `psave` and the +8 of frame in `TMario::boxDrawPrepare` (exact; the old TODO misread it as two dead slots). `addCallBack` exact (912 bytes): a TU-local binder over `modelData->getJointNodePointer(i)` at all ten sites is +8 per site, linear (the longest linear ladder measured), plus a by-value `u8` fork over an indexed global table member (`gMarioAnimeData[id].unk6`) +8, not +4. `addUpper` exact with a `getM3UModel()` binder at 4 of 7 sites (+0x30; only k = 4 lands). `getMaterialNum()` binder 1/2/3 sites +8/+0x10/+0x18, `getMaterialNodePointer(i)` +0x10/+0x18/+0x28, not additive with the model binder. `MarioWaistCtrl` 99.63: the two `MsMtxSetRotRPH` angle arguments are built at the call site, not through named `s16` locals; retail shares one function-scope `Mtx` across all three sites with 0x60 of low region below it.
+- **Parked, then refuted by header round 52**: `marioAnimeFiles`' 199 flag words are byte-identical to both retail copies; the 18% residue is `.rodata` pool order (retail places six other strings ahead of the table's), a `@NNNN` generation-order item on `MarioDraw.cpp`, not a header fix. Applied (and real): `include/Player/Mario.hpp` has `mJointIdChnChest` (0x3C5) and `mJointIdChest` (0x3C6) swapped relative to retail (`initModel` stores `chn_chest` at 0x3C6). Process caution: a scripted whole-file rewrite silently dropped a zero-code UNUSED stub; `changes_all` and the DOL did not catch it, only `validate-symbol-order.py` did. Unit 24.80 -> 33.36, 36 of 48 exact; 3 unpriced (`ladder_tried.txt`).
+
+## gatekeeper ladder 367 (2026-09-20): 9 functions, which sites carry a fork matters
+
+- **A raw-global fork is non-monotone in which sites carry it**: at 4 emit sites the last two are +0x10 and clean while the first two rotate the call's argument registers (`TBiancoGateKeeper::emitParticles` exact). **`SMS_GetMarioPos()` bound to a `const TVec3&` operand is +4 of low pool** when the frame is short (`getRumblePow` exact on raw `*gpMarioPos`), and `getSpine()` over raw `mSpine` is a natural +4 rung (`launchNamekuri` exact, with `mVelocity` as three component assignments not `set`, a real bug, and `getPosition()`/`getRotation()` +0x10). A `getSLFoo()` params wrapper is +0; the +8 lives in the named step inside it (`{ s32 t = mSLDiveTimer.get(); return t; }`; `TNerveBGKWait` exact), confirming header round 50 for `TParamRT`. **A map-UNUSED helper is a free lowering site**: dropping `getActorKeeper()` inside `TBGKMtxCalc::setAnm`/`joinAnm` is -0x18 in the pasting caller at no cost (`changeBck` exact).
+- **`f32 t = a / b; t = 1.0f - t;` forces the whole ratio before a following `bl`** where `f32 t = 1.0f - a / b;` lets MWCC sink the arithmetic past the call (`TNerveBGKDie` 93.9 -> 100, with a by-value fork over an `s8` guard reproducing retail's reload, fireWanwan 322 confirmed on a narrow member). Also exact: `TNerveBGKSleep` (two-local `getBody()` +8, `getMActor()` at 2 of 3 sites +0x18), `TNerveBGKAppear` (director fork at both sites plus a particle fork +0x20; binders overshoot), `TNerveBGKWait2`. Open: `TBGKMtxCalc::calc` (frame exact, `Mtx rot` 20 bytes low, the item is inside the `MsWrap`/`MsAngleDiff`/`std::min` expansion), `init` (+0x50 and `this` r28 vs r30). Unit 46.18 -> 83.88, 53 of 55 exact.
+
+## MActorData ladder 372
+
+Six exact (`MActorAnmDataEach<T>::loadAnmPtrArray`, all instances) from one rung; unit 21.12% -> 48.27% matched code.
+
+- A named step inside a header reader (`int n = mAnmNum; return n;`) is +8 of low pool below two `char[256]` buffers, but only when its result is consumed directly by the statement (`new J3DAnmBase*[reader()]`).
+Wrapping the whole `new[]` in a helper that contains the same step prices 0.
+The reader's name is fabricated and carries a `// TODO:`.
+- Which class hosts the step is a collateral question: in `MActorAnmDataBase::getAnmNum()` it lands all six identically but breaks nine functions that read the count through the bare accessor (`MActor::checkCurAnm`, `checkAnmFileExist`, six `MActorAnmEach<T>::setAnm`, `TFruitsBoat::setBckTrack`).
+Shadowing it in the derived template narrows the damage to `setBckTrack`; that function (fruitsboat.cpp:78) most likely reads `bcks->mAnmNum` raw in retail, an untested cross-unit lead.
+- This pool carries 4 bytes of slack: a probe of 2 or 4 bytes after the buffers moved nothing, 8 moved +8, so only an 8-byte item is a rung.
+- The non-trivial-class frame probe is not always per expansion: in `addFileTable` (six `getSimpleName` expansions) a `struct S { ~S(){} u32 a[N]; }` stepped 0x18 per word from a 0x20 base, so +0x60 is unreachable that way.
+`addFileTable` needs +0x60 of dead pool with no stack references plus an r28/r29 swap inside the expansions; `init` needs +0xc and retail ranks the parameter above the two locals (r30 `additional_files`); the default ctor needs +8 below a 1-byte `TAllocator` temp.
+
+## hamukuri ladder 373
+
+Four exact and one lift in `Enemy/hamukuri` (68.04% -> 70.01%, 199 -> 202 of 226 exact), one real bug (`TDangoHamuKuri::receiveMessage` emits the water-hit particle at the sender's position, not `this`).
+
+- A by-value `u8` fork over a narrow member feeding an index argument is a clean +4 of pool where `getRotation()` and named-pointer forms are +8 or 0 (`TDangoHamuKuri::getTakingMtx`); same family as bossgesso 319's `s8`/`s16` `int` fork.
+- `getRotation()` on a component read is +4 of pool below an inlined callee's pointer temp but +0 above it: at the `set()` site it moved only the pool floor, at the assignment site the whole named block; two such sites compose linearly (`THamuKuriLauncher::stateLaunch`, whose two uninitialised `TVec3`s also had to move above the `Mtx`).
+- A dead `int` local holding a division was a +4-below/+4-above carrier; removing it drops the frame 8, and two accessor rungs are the honest replacement.
+- `TParamRT<T>::get()` vs raw `.value` is a callee-saved ranking knob, not only a frame one: raw `.value` reordered r27/r28 to retail's at -0x10 (`THamuKuriManager::requestSerialKill`, repaid by `getObj(i)` over `unk18[i]`).
+The `params` local there is the 15th statement that keeps `TFireHamuKuri::isHitValid` from inlining the body.
+- A named local hoisted from a for-body to function scope moves above `this` in the callee-saved ladder at zero instruction cost (`TFireHamuKuriManager::initSetEnemies`, 98.56 -> 99.60; residue: `this` must outrank the for-init counter).
+- `TNerveHamuKuriBoundFreeze::execute`: two sibling `TVec3` block objects are first-declared-highest in ours and later-declared-highest in retail at an exact frame, so retail declares them inside an inlined callee (block-object order class).
+- `THaneHamuKuri::bind` and `TDangoHamuKuri::behaveToWater` are the `operator-` by-value temp allocation-order class; `THamuKuri::getTakingMtx` is instruction-exact with the pool 0x50 short below the `Mtx`.
+
+## bosstelesa ladder 375
+
+Three exact and five frame landings in `Enemy/bosstelesa` (36.33% -> 39.91%, 96 -> 99 of 118 exact); accepted named fuzzy drop `TTelesaSlot::moveObject` 99.87 -> 99.80 (frame now exact at 0xd0 from 0xa8; the residue is a pre-existing r26/r27 rank that scores lower once the frame agrees).
+
+- A named `u8` local for a clamped `int` expression splits the value across two GPRs: `u8 a = base + k * n; m = MsClamp<u8>(a, 0, 254);` keeps the wide sum in r3 and narrows into r0, so the clamp arms and the `stb` use r3; clamping the expression in place narrows once in r0 (`TNerveBossTelesaFreeze::execute`, `TNerveBossTelesaPrepareSlot::execute`).
+- `(int)((f32)x / 2.0f)` and `* 0.5f` both emit `fmuls` by 0.5, but the division puts the converted value first (retail), the int-conversion form of MapObjPinna 350.
+- `m *= k` on a float member loads the member first into the `fmuls`; `m = m * k` loads the constant first (`TNerveBossTelesaSlotStart::execute`), the member form of MapObjCorona 358's rule.
+- A TU-local `getMActor()` binder is +8 per site and stays linear to five sites (+0x48 in `PrepareSlot`) where in a short frame one site is +0x10; `getSaveParam2()` over raw `mParams` is +4 per site (four sites +0x10, five +0x18, and all five overshoot in `TNerveBubbleLive::execute`).
+- Rungs inside a pasted map-UNUSED helper are separately tunable: in `TTelesaSlot::moveObject` the same owner binder is +0x10 at the caller's params read and +8 inside the pasted `fanfale()` body, and the two compose.
+- `TelesaSlotGetOwner`'s bare fork is +0 where its binding form is +0x10 at the same site (the NpcEvent 353 pair).
+- A named `THitActor* collision` local is retail's extra `addi r4, r3, 0` (`TBossTelesaKillSmallEnemy::checkHit`, then `SMS_GetMarioPos()` over raw `*gpMarioPos` for the last +8).
+- `include/Enemy/BossTelesaObj.hpp` is shared with the two `MarNameRefGen_*` units; `TTelesaSlot::mOwner`'s accessor is parked as a TU-local.
+
+## bossgesso ladder 377
+
+Three exact and one lift in `Enemy/bossgesso` (36.05% -> 41.48%, 66 -> 69 of 88 exact), no regressions.
+
+- A bare-return TU-local fork over `getModel()` is the +4 pool rung where the same TU's named-local binder over it is +8 (`TNerveBGPollute::execute` at its one emit site, `TNerveBGTug::execute` at the first of three).
+It does not generalise: a bare fork over `getMActor()` at 1 or 5 sites is 0 (`TNerveBGDie`), and a bare fork over the raw member `mMActor` is 0, so the +4 needs the fork body to call an accessor, not read a member (Frame ladder 273's +0 and NpcEvent 353's +4 reconciled).
+- `SMS_GetMarioPos()` -> raw `*gpMarioPos` is -4 in a short frame and -8 in a long one within one TU (`rumblePad` 0x40 exact, `doAttackShoot` 0x98 -> 0x90).
+- `len *= len;` before the compare is the float-member sibling of hanasambo 329's `d *= d;`: the product takes the loaded value's FPR where `len * len` inside the compare takes a fresh one (`doAttackShoot`, 99.73 -> 99.96).
+- `TBossGesso::inSightAngle`'s UNUSED body is 168 bytes short of the map while `inSight` is 8 long; retail's `bl SMS_GetMarioPos()` inside the pasted `doAttackGuard -> inSightAngle -> inSight` chain in `moveObject` shows that chain is one inline level deeper than ours.
+That level is the shared blocker behind `moveObject` (+8), `doAttackSingle` (51 missing instructions) and `doAttackShoot`'s last 4 bytes.
+- `tipPos.length()` for `squared()` plus `TUtil<f32>::sqrt` is instruction-identical and +4 in `lenFromToeToMario` but drops the pasting `TBossGesso::perform` 98.29 -> 82.22; this TU's `length()`/`squared()` split is caller-visible.
+- `TNerveBGWait` needs -0x30, none of it reachable from the nerve's own body; it sits below three pasted `changeBck` expansions, whose rung is shared with eight callers of disagreeing sign.
+
+## hinokuri2 ladder 376
+
+Seven exact and four lifts in `Enemy/hinokuri2` (44.05% -> 65.57%, 55 -> 62 of 72 exact), zero regressions; three real bugs (`TNerveHino2PrePol::execute` had an inverted wait compare; `THino2MtxCalc::calc` blends on `unk78`, not `mTwo[0]`, and declares its two blend `J3DTransformInfo`s in the reverse order).
+
+- A caller-level named local and a TU-local binder are both +8 but land in different regions: `TLiveActor* body = spine->getBody();` in the nerve body is +8 of named block, the same step inside a `static inline` fork is +8 of pool (`TNerveHino2Pollute::execute` needed the caller form; the binder form hit the frame but left a buffer 8 high).
+- A per-site `((THino2Params*)getSaveParam())->` cast blocks the `TParamRT` displacement fold; a TU-local binder returning the cast pointer restores retail's single `lwz 0x180(r3)`, prices +8/+0x10 per site, and fixes load order (retail loads the param before the member it is subtracted from).
+linking.md's "spell the cast out per site" note was about the virtual `getSaveParam2()` wrapper, not a TU-local binder.
+- `getCurrentBck()`/`getHitPoints()` by-value `int` accessors saturate at +0x10: one or two sites +8, three or more +0x10.
+- NpcEvent 353's -4 rule generalises off `char[N]`: `J3DJoint* joint;` declared before a `J3DTransformInfo` and assigned inside the `else` moved that buffer -4.
+- Site-count non-monotonicity again: five mask binder sites +0x38 but four +0x30; a params binder +0x10 at one site and +0x18 at two.
+- Inert or refused: a named `TWaterEmitInfo*` (breaks a CSE); a self binder that copies r31 to r28; two-local self/tracer binders (saturate); a named `params` inside the header's `calcHitPoints` (hoists the virtual call out of the switch).
+- Open: `TNerveHino2GraphWander` is 0x20 short with the pool saturated (retail keeps 0x18 between two block objects, so more vectors are declared there); `THino2MtxCalc::calc`'s four else-branch buffers are uniformly 4 low; `THino2Mask::perform` needs two buffer addresses bound into r26/r27 across two `Mtx` blocks.
+
+## Research batch cc12 (2026-09-22): frame-only census and three pricing facts
+
+Census (`frame_only_census.py`, kept in the cc12 scratchpad; rule: equal instruction count, equal mnemonics, every differing operand a signed immediate of an `r1`-based instruction) over the 232 unlinked units with code: 457 frame-or-slot-only functions (434 game, 23 library).
+176 have retail's frame larger (133,300 bytes of code), 48 smaller, 233 equal-frame slot shuffles.
+Deltas: +8 x37, +16 x25, +24 x16, +32 x13, +40 x16, +48 x15, +56 x7, +64 x9, +72..+200 x38; -8 x35, -16 x7, -24 x3, -32, -48, -176.
+22 units have nothing but such functions left (list in the batch report; the `gap_*` and pool-label data rows they show are not blockers).
+
+Measured in scratch TUs with the game flags (MWCC 1.2.5):
+
+- **Inline temporaries are all-or-nothing per function.**
+  A function with no callee-saved register and no stack local keeps the bare 0x8 frame however many inlined value-returning calls it expands (four `int getMV() const { int t = m; return t; }` expansions: 0x8).
+  Add one callee-saved register or one address-taken local and every expansion materialises (0x8 -> 0x48 for the same four), at a per-expansion price independent of register pressure (one to ten extra live callee-saved values move the four-expansion step by exactly 0 bytes), so the dead region is not a spill artefact.
+- **No slot sharing between expansions in exclusive branches.**
+  `if/else`, `else if` chains, `switch` cases, early `return` and `do { ... break; } while (0)` all price N expansions exactly like N sequential ones.
+  "Stack colouring across inlined scopes" is refuted as a lever in either direction.
+- **Compiler-generated temporaries sit above the whole inline pool, not at their source position.**
+  The `new`-result spill (`stw rN, X(r1)` feeding the inlined constructor's `this`) is placed after every inline temporary of the function: adding a dead `getObj(0);` *after* the `new` statement in `TGessoManager::initSetEnemies` moved the spill from 0xc to 0x18.
+  So such a spill's offset minus 0xc reads off the function's total inline-pool size, and the distance from it to the save area is the named/block region.
+- **Inline calls whose result is discarded, or whose guard only folds to false after inlining (`if (isPos(0))`), are zero-instruction carriers**; a literal `if (0)` is removed before inlining and costs nothing.
+
+Invisible-carrier evidence (do not ladder these):
+
+- `TGessoManager::initSetEnemies` and `TIgaigaManager::initSetEnemies` are the same two statements with the same 47 instructions, yet retail pools 0x5c/0x3c below the `new` spill and frames 0xe8/0x98; `TGorogoroManager::initSetEnemies` in `igaiga.cpp` runs the same `new` expression plus a graph loop and pools only 0x18.
+  The dead frame is therefore not produced by the visible code of either function (our ctor chain prices 0).
+- `changeBck`'s expansion costs ~36 bytes in the exact `TNerveBGTug::execute` (0x50 -> 0x78 -> 0xa0 -> 0xc0 over its three sites) and ~10 in retail's `TNerveBGRoll::execute` (eight expansions in 0xa8), same TU, identical expansion code.
+  Our BGRoll is 0xb0 over; the joinAnm chain's `getActorKeeper()`/`getUnk2C()` rungs are 12 per expansion each (raw both gives 0x98) but are pinned by five exact nerves (BGEyeDamage, BGTug, BGPollute, BGPolDrop go red), so the difference lives in how BGRoll reaches `changeBck`, not in the header.
+
+## Research batch cc23 (2026-09-22): retail's `operator-` returns by value; the `a = b - c` class is a header migration, not a lever
+
+Measured in scratch TUs with the game flags (a `TCoasterEnemy::bind` model compared byte for byte against retail) and tree-wide with `ninja changes_all`.
+Nothing committed: the migration closes 16 functions but regresses 70.
+
+- **Retail's `operator-` returns `TVec3` by value and copies its left operand into a local.**
+  `TYoshiTongue::movement`'s `(tpos - mTipPos) * k` is `bl __ct__(0x98 <- tpos); bl __ami__(0x98); bl __ct__(0x17c <- 0x98)`, then an inline copy 0x17c -> 0xb8 into `operator*`'s by-value parameter: the third call is `operator-`'s return copy, which no reference-returning shape produces.
+  The eleven `TMario::wire*` functions show the same return copy as `bl sub ; bl __ct__`.
+- **Batch 142's "+6 for a by-value return" is the copy constructor, not the return.**
+  MWCC builds the returned local directly in the result slot only when the copy constructor is base-init (`TVec3(const TVec3& other) : Vec(other) {}`) or implicit and `operator=` does not cast its *source* (`*(Vec*)this = other; return *this;` or implicit).
+  Any statement body in the copy constructor (`*(Vec*)this = ...`, `(Vec&)*this = other`, the stock cast) or `*(const Vec*)&other` in `operator=` keeps the second copy (61 instructions against 55).
+- **With the copy elided the result temporary sits at the pool floor and every site is uniformly 4 bytes short below it** (site census `d=[-4]`).
+  The 4 bytes are one pointer temporary holding the left operand's address, created before the result and invisible in the code.
+  The only spelling found is converting the left operand through the header's `operator const Vec*()`.
+  Inside the body (`TVec3 r; r = *(const Vec*)fst; r -= snd; return r;`) it is byte-exact but emits a weak `__opPC3Vec__...` in five TUs (the `TMario::wire*` family, `damageExec`, `TSphereLink::moveHead`, `TTailRubber::bind`, `TMapWire::init`), which the map does not have.
+  As the parameter type, `friend TVec3 operator-(const Vec* fst, const TVec3& snd) { TVec3 r; r = *fst; r -= snd; return r; }`, the conversion runs at the call boundary and nothing extra is emitted.
+  That signature exists only because it reproduces the slot; treat it as the measured shape, not as recovered source.
+- Not the 4 bytes, all (0, 12) or worse: `TVec3 r(fst)`, `r = fst`, `r.set(fst)`, `r.set((const Vec&)fst)`, a member `operator-`, a by-value left operand, a `const Vec&` left operand, `return r -= snd` (8 below).
+  A named pointer or reference local is 8 below or 4 + 4; a pointer to the *right* operand (or `getPosition()` on the right) lands the slot but hoists `addi r4` to the top.
+  A pointer conversion in the copy constructor (`: Vec(*(const Vec*)other)`) puts the 4 bytes under every copy tree-wide (-138 exact).
+  496 caller-side spellings of the coaster body (accessors, `set`, `add`, setter against `=`) under the plain by-value header: none exact.
+- **The weak `__ami__` in Tongue.cpp survives through a TU-local helper, so Header round 47 is refuted.**
+  A by-value-returning argument is not nested in the outer call's expansion, so every by-value `operator-` inlines the whole `(a - b) * k` site.
+  `TongueDiff(a, b)` (copy, `-=`, return) called from `TongueScaledDiff(a, b, k) { return TongueDiff(a, b) * k; }` reproduces retail's `ctor ; -= ; ctor ; scale ; add ; sub` call sequence exactly at both sites.
+- **Tree-wide** (copy constructor `: Vec(other) {}`, the `operator=` above, the `const Vec*` `operator-`, the Tongue helper): matched functions 11510 -> 11520 (+16 / -6), fuzzy 98.3567 -> 98.4007, 122 up / 70 down, nothing missing; the `wireBinder` unit reaches 100%.
+  Exact: the `bind` of `TLiveActor`, `TCoasterEnemy`, `TWireBinder`, `THamuKuri`, `TAmenbo`, `TAmiNoko`, `TChuuHana`, `TEnemyAttachment`, `TKoopaJrSubmarine`, `TLimitKoopa`, plus `TDangoHamuKuri::behaveToWater`, two `genEventCoin`, `TEffectColumWater::generate`, `TFireWanwan::initEscapeNextGraphNode`, `TMapCollisionBase::setCheckData`.
+  Large lifts outside the class: `TNameKuri::calcRootMatrix` 83.6 -> 99.4, `THauntLeg::calcRootMatrix` 85.1 -> 99.6, `TMapWire::getPosInWire` 85.9 -> 99.5, `TTailRubber::restrict` 83.8 -> 98.1, `TBathtubData::getGravityDir` 82.8 -> 97.9.
+- **Why it is not committed: 70 regressions of two kinds.**
+  (a) Sites whose crutches were tuned to the old header: `soundTorocco`/`toroccoEffect` spell `TVec3<f32>(a - b).length()` plus binders; dropping the wrapper is 89.8 -> 99.6 but the frame stays 0x10 over, from the pool of `.length()` on a by-value temporary (an open sub-class).
+  (b) Side effects of the copy-constructor change on ordinary copies: `TMapObjBall::control`'s `vel(getVelocity())` fuses `squared()` into an `fmadds` that retail does not, which only the cast constructor reproduces.
+  Lost exact: `soundTorocco`, `toroccoEffect`, `isTakeSituation`, `moveRoof`, `TMapObjBall::control`, `TNerveMameGessoJitabata::execute`.
+  The copy constructor alone is +81 / -40 (fuzzy +0.054), `operator=` alone +13 / -5.
+- Next: land it as one migration (header, Tongue helper, and a respelling of each of the 70), starting with the `.length()`-on-a-temporary pool and the `MapObjBall` copy.
+
+## Header round cc31 (2026-09-22)
+
+- **`TBaseNPC::emitParticle_` is byte-exact with the wave-ripple block as an inline member that contains its own condition** (`emitWaveParticle_`, fabricated name, declared in `NpcBase.hpp`, defined `inline` in `NpcEffect.cpp`).
+  The TU-local free function that took the caller's `height`/`doEmit` by reference left `doEmit` in r29 and three slots off.
+  The member without the condition (caller keeps the `if`) fixes the register but leaves all three slots a uniform 4 low.
+  Moving the `getActorType() == 0x4000007 || SMSGetMarDirector()->getCurrentMap() == 4` test inside the member closes the 4 bytes, whether spelled as a wrapping `if` or an early return.
+  NpcEffect is linked.
+- **`TRotation3::setEularY`'s zero chain in axis-pair order `(0,1) (1,0) (2,1) (1,2)`** is inert on bossManta and MapObjCorona and exact in JDRSmJ3DAct, so it moved into `JGRotation3.hpp` and the TU-local copy went.
+- **`TSingleNodeLinkList::end()` cannot carry a named result.**
+  In `TPerformList::push_back` the copy constructor sits at inline depth 4 and is called out of line, so `iterator r(mTail); return r;` adds a `bl` copy (+3 instructions), not just a slot; retail's `end()` constructs straight into the return slot.
+  With `end()` unchanged, a named result in `begin()` alone is 0xd8 (retail 0xe8), `iterator r(&mHead); iterator s(r); return s;`, a named `TSingleLinkListNode**` or `iterator r = iterator(&mHead)` are 0xe0, and `return iterator(iterator(&mHead))` 0xc8; all keep `perform`'s 36 markers.
+  A named `TSingleLinkListNode** p` in `end()` keeps the `push_back` frame but trades one instruction (95.3 / 96.4).
+- **`TList_pointer<T>::push_back`'s body is pinned by the tree, not free.**
+  Taking `T` by value regresses about forty 100 % sites (`TLampTrap*::loadAfter`, `TMarDirector::registerEventWatcher`, the JDrama `TNameRefPtrListT`/`TViewObjPtrListT` `load`s, `TYoshiTongue::initInLoadAfter`, ...).
+  So `TRiccoHook::init`'s 8 bytes between the list-insert groups are a riccohook-context problem, not a `std-list.hpp` one.
+- **A `const Vec&` accessor for `CPolarSubCamera::unk148`** (`getUnk148Vec()`, the `getUnk124Vec()` sibling) is worse in `TLensFlare::perform` than the `(const Vec&)` casts: both accessors 94.83 -> 93.69, `unk148` alone 94.4 with one extra instruction.
+  Not added.
+
+## Migration attempt cc34 (2026-09-22): by-value `operator-`
+
+Not landed. The cc23 header shape (base-init copy constructor, uncast `operator=`, `const Vec*` left operand) plus site cleanups gives +16 / -5 exact but still 67 regressions (patch and list in the session scratchpad `cc34/`).
+- `(a - b).length()` sites: removing the old `TVec3(...)` wrapper makes every instruction match but leaves the frame 0x10-0x28 large; a wide by-value `operator-(TVec3 fst, ...)` is uniformly 8 over there but 4 short at `bind` sites.
+- Plain copies (about 46 of 67): the old cast copy constructor took the local's address and kept it in memory; the base-init form lets MWCC optimise fields (float copies, fused `fmadds`). `TVec3 v; v = src;` restores one declaration (MapObjBall `control`) but not repeated `TVec3(vel).y` temporaries. Implicit copy ctor (81 down), `: Vec((const Vec&)other)` (88 down), old ctor plus by-value `operator-` (98 down, `__ami__` MISSING) are all worse.
+- Hand-built copy chains (`npcMadding`, `TNerveNPCTurnToMario`) are one copy short; a by-value `MsGetRotFromZaxisY` costs ~40 functions.
+- The `const Vec*` operand has no binary evidence beyond the frame slot; the by-value `TVec3 fst` spelling loses 13 of 16 gains. Treat the class as still open: it needs an explanation of the copy count at the `.length()` sites before another migration.
+
+## Research batch cc39 (2026-09-22): the JGadget stride is not a function-set property of the chain; no header shape closes the class
+
+Scored nine sites at once from scratch compiles with a header override directory (`riccohook`, `createEnemies`, `gatekeeper`, `perform`, `TMirrorActor::init`, `SDLModel::entry`, `TLampTrapIron::loadAfter`, `rsetup`, `setupObjects`), about 60 header variants; driver `hv.py`/`atoms.py` in the session scratchpad `cc39/`.
+Nothing was committed.
+
+- **The "per-function block" reading does not hold for plain temporaries.**
+  In a scratch TU, two or three expansions of the same inline never share a slot, whether the object is a call-result temporary, a by-value parameter or an address-taken named local (`C(); C(); C();` gives three slots, first expansion highest).
+  Every case measured follows the locals-list order described in AGENT_MATCHING_TIPS ("An inline's locals are numbered in reverse"): new objects are prepended, so the first-created object gets the highest offset.
+  The `riccohook`/MActor observations that looked like block sharing are better read as **frontend-eliminated temporaries keeping a stack home**: an argument or `this` binding that copy propagation removes still gets a home, while one that survives to the backend takes a register and none.
+  So whether a given binding temporary costs a word depends on distant code.
+  In `TRiccoHook::init`, the `theNerve()` argument of the head statement `initWith` moves JGadget group 2 by 4 even though it is created before the push chain.
+- **The Twilight Princess clean-room header shape is inert or worse.**
+  The zeldaret/tp `std-list.h` differs from ours in three places, and none of them helps:
+  - An empty `TIterator<...>` base on `TList::iterator`, at one or two levels: byte-identical slot maps at all nine sites.
+  - The iterator constructor written as body assignment: also byte-identical.
+  - `push_back`/`push_front` returning `iterator` (on `TList_pointer`, `TList`, or both): moves only the `end()` return slot to the top of the pool, e.g. riccohook `7c 80 a0` for retail `84 88 8c`.
+- **Inert or worse, all nine sites.**
+  - A defaulted `iterator(TNode_* = nullptr)` replacing the default constructor.
+  - A user copy constructor on the base iterator (frames 0x10 to 0x18 smaller, collapses the pools) and on the derived iterator.
+  - A named `end()` in `push_back`.
+  - A cast `where` into `Base::insert`.
+  - The derived `iterator(Base)` constructor as a body assignment.
+  - `end()`/`begin()` through the implicit conversion.
+- **The receiver chain moves the pools, but site-dependently.**
+  - A named reference in `TViewObjPtrListT::getChildren()` (`TList_pointer<T*>& l = *this; return l;`) gives riccohook frame 0xd8 with group 1 and the `what` spill exact, and group 2 still 4 low (`80 84 88`).
+  - The same slot map comes from a dead 4-byte probe object in `push_back`; an 8-byte probe gives exact group 1 and group 2 but a spill 4 high.
+  - Adding a `search<T>` root or result binding lands `createEnemies`' whole iterator pool (`5c..6c 78 7c 80`) but puts the conversion temporary 0x10 high (0x94, frame 0xb8).
+  - Every such lever is global over ~250 `search`/`getChildren` sites (header round 21 already priced the `search` binding at -60 exact).
+  - No single lever and no pair of `getChildren`/`search`/`add`/`push_back`/ctor levers lands two sites.
+- **The retail residues are not one shift.**
+  - Riccohook wants +8 between groups and -4 above group 2.
+  - `createEnemies` wants +8 below group 1, +4 between the groups, and three dead words moved from above group 2 to below it, plus +8 above the conversion temporary.
+  - `TMirrorActor` wants +16/+8/+0; `SDLModel` wants +12 on its lower pool words and +8 on its upper ones.
+  - Each is a different set of eliminated binding temporaries, set by the site's own receiver and argument expressions.
+  - Treat these as per-site closures (which caller expressions are "unsafe" and bound), not a header round.
+
+## Research r1 (2026-09-22): shared causes among the 49 frame-only functions
+
+- Census: a map-versus-`nm -S` size comparison over all 41 units in the frame-only list finds no UNUSED helper off its map size and none missing; the misspelled-helper class is invisible to size checks here.
+- Only bosseel has three or more members sharing an inlined helper (`TBossEel::setBckAnm`, UNUSED 0xf8, inlined into every nerve); hinokuri2 and fruitsboat's graph-wander nerves share nothing structural.
+- `setBckAnm` spelled as `docs/progress/lever-search/bosseel_setbckanm_248.patch` but with `getBossEelParams()` kept at `ExecSpinNerve_Sub`'s accel read: 125 exact (HEAD 125). OutWait closes; FirstSpin goes +8 (0x90 against 0x88).
+- Dropping the patch's `ratio` local fixes FirstSpin but reopens OutWait, WaitAppear and SleepOnBottom (122). With `!spine->getTime()` in FirstSpin the frame lands but `spinSpeed` sits at 0x68 against retail 0x6c, under the 0x70 conversion temp: the inlined `ratio` holds a named-block slot, so retail's per-site +4 lives in the low region, not in a named local.
+- Inert or worse on that base: an `int prev` for `getCurAnmIdx`, `ratio` declared first, a named `oldAnm` (+4 size), `rate` declared after `ctrl` (schedule breaks), a named `basName` (+4 size), a TU-local blend-ratio setter, a `getFrameCtrl` fork, and in FirstSpin `SMSGetMSound()`, a raw accel read, and a `gpMSound` roll sound.
+- Eat and Die stay 0x28 short on that base (Die uniform low region; Eat has an extra 8 bytes between the `TFlagT` and `canEatMario`'s vector). They are inert to `getMActor()` at all `mMActor` sites (Die -8) and to `getSpine()` or `!= nullptr` in the inlined `setBubble`/`generateBubble`.
+- Open: the low-region +4 per `setBckAnm` expansion that retail has and that no named local can supply.
+
+## Research js1 (2026-09-23): the JGadget loop residue is not the push_back stride
+
+Driver: the cc39 `hv.py`/`slots.py` copied to this session's scratch `js1/`, plus `sweep*.py` (combinatorial `std-list.hpp` bodies scored on the four ObjHitCheck loop functions) and `sv.py` (call-site variants, optionally over a header variant).
+Nothing committed.
+
+- **Sites.** `push_back` sites (MirrorActor, gatekeeper, `initAndRegister`, PerformList's own list) never read `operator==`/`!=`/`++`, and every comparison or increment variant below is byte-identical there.
+  The ObjHitCheck loop functions are a different residue: retail is **+8 per loop** (`clearHitNum` six inlined `clearGroup`s 0x1f8 -> 0x228, `entryGroup` 0xd8 -> 0xe0), one dead word above each named `end`/`it` group (5 dead words between groups, ours 4) and one beside each `!=` copy pair (stride 12, ours 8).
+  `checkAndEntryGroup` is frame-exact with the pool 0x14 high and `checkActorsHit` (inlined `checkGroupPlayer`, depth-exhausted `begin`/`end` `bl`s) is 0x20 short, so the four functions do not want the same header.
+- **Closest header:** derived `iterator operator++()` returning by value.
+  `clearHitNum` and `entryGroup` frames exact, all six `clearHitNum` named groups exact, but the six extra words land under the begin/end pool instead of in the `!=` block; tree-wide 21 functions down, 2 up (JDRNameRefGen 100 -> 75.7, MarNameRefGen -2.7). Rejected.
+- `static_cast<const Base&>(fst) != static_cast<const Base&>(snd)` in the derived `operator!=` (same as containment of a `Base::iterator it_` with `fst.it_ != snd.it_`) is exactly +8 per loop but adds four instructions (a second copy pair) per compare: `clearHitNum` 99.65 -> 90.2.
+- Inert or worse on the four functions (frame / slot distance): `!=`/`==` as members, by `const&` (either or both, mixed), `!operator==(...)`, a named `bool`, `(a == b) == false`, a copied `fst`, swapped operands, deleting the derived `==` (the base one then binds, +2 live slots, same frame), `==` through `operator->`, `(Base)` value casts (+0x18 to +0x1c per loop), derived `++` direct / cast / `void` / named reference, base `++` by value or `void`, `operator*` through the base `operator*`, `begin`/`end` via `TList<void*>` or named.
+  Site spellings on `entryGroup`: unnamed receiver, pointer receiver, `it++` (+0x30), `end` in the for-init, direct init, `it` first, declare-then-assign: none adds the word.
+
+
+## Research rvo1 (2026-09-23): no compiler build or plausible header spelling elides into retail's slot; the class stays a cc23 migration
+
+Model `TCoasterEnemy::bind` (retail 55 instructions, frame 0x40, `bl sub` temp 0x10), compiled from the real `coasterkiller.cpp` with an overlay `JGVec3.hpp` and the game flags; about 60 header variants times 19 GC compiler builds, byte-compared per function against `build/GMSE01/obj`.
+
+- **There is no return-value switch in 1.2.5.** `mwcceppc -help all` and the binary's pragma strings have nothing like RVO/NRVO; `opt_classresults` first appears in 3.0a5.2.
+- **1.2.5 elides the return copy by itself, gated on the copy members (reconfirms cc23, sharpened).**
+  The +6 disappears iff the copy constructor is base-init or implicit **and** `operator=(const TVec3&)` is uncast (`*(Vec*)this = other;`) or implicit.
+  The current cast `operator=` alone keeps the +6 even with no user copy constructor; a statement-body copy constructor keeps it even with an uncast `operator=`.
+- **With the copy elided, every plausible spelling lands (0, 12) at frame 0x38, temp 0xc, 55 instructions** (by-value left operand, `TVec3 r(fst)`, `r = fst`, raw `Vec` copy, member `operator-` forms).
+  `return TVec3(fst) -= snd` is frame 0x48; a named `const Vec* p = &fst` is temp 0x14; component constructors and `r.sub(fst, snd)` lose the `bl sub`.
+  Only cc23's `friend TVec3 operator-(const Vec* fst, const TVec3& snd)` is byte-exact, with or without implicit copy members.
+- **No other compiler build helps; retail's game code is 1.2.5 (or behaves identically).**
+  1.1 and 1.2.5n give 1.2.5's `bind` exactly; 1.3 through 3.0a5.2 inline `sub` and never emit the `bl`.
+  Spot check on exact units `Enemy/spline`, `Player/MarioAction`, `NPC/NpcTrample` (9 functions): 1.2.5 9/9, 1.1 9/9, 1.2.5n 6/9, 1.1p1 5/9, 1.0 5/9, 1.3+ 0/9.
+  1.3-2.7 crash on the precompiled-header prefix under wibo; the text `SMS.pch` prefix shifts some offsets, so compare versions under the same prefix mode.
+- Consequence: the 130-site class needs the cc23 migration (copy members that allow the elision, plus an honest source for the 4-byte left-operand pointer temporary). Do not look for it in compiler versions or return-value flags.
+
+
+## Research fd1 (2026-09-23): no shared header inline carries the dead low region
+
+Driver: `pop.py`, `noinl.py`, `graph.py`, `rank.py`, `nnls.py`, `enrich.py`, `probe.py`, `measure.sh` and `score.py` in `sms-wt/fd1-scratch/` (outputs `ranked_callees_top15.tsv`, `unused_carrier_leads.tsv`, `pop_*.tsv`).
+Nothing in `include/` changed.
+
+- **Population.** Functions whose instructions equal retail modulo `r1` offsets (and relocation names), objdump of `build/GMSE01/obj` against `build/GMSE01/src`: 200 with our frame short (121 register-exact, 79 register-renamed), 33 over, 10,281 frame- and slot-exact controls.
+  Deficits are 8 mod 16 in 122 of the 200 and 0 mod 16 in 78, so a 12-byte `TVec3` local (+16 each) cannot be the common carrier.
+- **Inline sets without reading source.** Recompiling every TU with the build's flags plus `-inline off` (30 s for 706 TUs) turns every expansion into a `bl`; a function's expanded callees are its `-inline off` call targets minus its real-build `bl` targets, closed transitively through the weak copies.
+  This is reusable for any "which inlines does this function expand" question.
+- **Statistics.** The only family enriched after matching on size and expansion count is `JGeometry::TVec3<f32>`/`TUtil<f32>` (users 1.4x as likely to be short, z 3.2; per method `cross` z 5.7, `epsilon`, default ctor, `dot`, `sub`, `squared` z 5).
+  No method is short at every user: each has frame-exact users (`cross` 2, `setLength` 20, `isZero` 9, default ctor 271), and a non-negative least-squares fit gives at most 4-6 bytes per expansion with R² 0.40, where a real carrier would give a constant 8 or 16.
+  Expanding a map-UNUSED callee looks predictive raw (8.9% short against 1.6%) but not after the size match (z 1.6): big functions both expand helpers and have gaps.
+- **Probes (dead non-trivial local inserted into one header inline, full rebuild, frame and slot compare over the population).**
+  8-byte local in `cross` is the only one that shrinks the total gap (-160 bytes, 4 frames fixed) and still breaks 7, including the two exact users (`TRealoidActor::calcRootMatrix` with three `cross`es, `TGesso::bind`).
+  Every other site loses more than it fixes (exact functions lost): `isZero` 9, `normalize()` 13, `setLength(v, f)` 21, `scale(f, v)` 20, `sub(a, b)` 6, `zero` 58, `squared` 64, `dot` 73, `set(const Vec&)` 10, `operator=` 174, copy ctor 142, default ctor 252, `TVec3(T, T, T)` 155, `TUtil::epsilon` 30, `TUtil::one` 18.
+  A 16-byte `TVec3` local in `cross` fixes 1 and loses 2.
+- **Reading.** The `TVec3` enrichment is per call site, not per header function: retail wrote the vector math differently at some sites (a by-value temporary, a named copy) while other sites use the same inline as ours.
+  Header work on JGeometry is not the lever for the dead low region; closure agents should treat these gaps as site spellings.
+- **Leads (unit-local, all users short, none exact):** `TNozzleBase::isAnmEnd` (UNUSED 0x94, all three `animation`s, 40-168 short), `TMapWire::getPointPos*` (two users, 96/112), `loadBookmark` (CardLoad, 104 twice), `MSStageProc::setBgmPosition` (104/64), the `TGameSequence` set/copy chain (`decideNextStage` 8, `setNextStage` 16, `TApplication` ctor 16, `proc` 80; `decideNextMode` exact with one `set`), `TKoopa` turn helpers (`TNerveKoopaTurnL`/`R` 280/272 short, the `getParam` users with one expansion exact).
+  Three JPADrawVisitor `exec`s (`RotDirectional`, `DirectionalCross`, `RotDirectionalCross`) are each exactly 8 short and reach frame parity (slots still off) under the 8-byte probe in `cross`, overshooting under `isZero` or `normalize`: one 8-byte site-level temporary around their shared `cross` is the likely fix.
+
+## Research uf1 (2026-09-23): the frame-short skew is not a unit-level cause
+
+Per-function `stwu r1` frames compared over 719 units (retail `build/GMSE01/obj` vs ours); driver and tables in the session scratch `uf1-scratch/` (`frames.py`, `rank.py`, `variants.py`, `unit_rank.tsv`, `flag_variants.tsv`).
+
+- 1021 non-exact game functions: 514 frame-short, 92 long, 85 identical frames with offset-only residue. The short share is broad (quartiles 0.33/0.50/0.62 over units with 6+ open functions); Koopa (14/17) and Map (5/6) are the tail, not outliers. No PCH correlation (0.51 vs 0.48). Deficits are a smooth spread in steps of 8, the signature of individual missing locals and inline levels.
+- Koopa, Map, MarDirectorDirect, GCConsole2 and Guide recompiled one flag at a time: `-O`/`,s`/`,p`/`-opt level`/`-inline smart|all`/`nodeadcode`/`nocolor`/exceptions are byte-identical; `-fp_contract off`, `nolifetimes`, `noloop`, text PCH, compilers 1.1/1.2.5n only lose instructions; dropping `-inline deferred`, `-inline noauto`, `-sym on`, the other `-opt no*` and compilers 1.0/1.1p1/1.3/1.3.2 are worse; `-proc 750` does not compile.
+- `-inline level=N` is the only lever that grows frames, and it does so by auto-inlining extra calls (Koopa exact 62 -> 55-59). So retail's frames come from deeper source-written inline chains and codeless locals, fixed per function.
+- Largest codeless gaps left (aggregate-local leads): Koopa TurnL/TurnR 0x108 and Flame 0x148 with no stack slots used, GCConsole2 `perform` 0x368, `TMapObjBase::initUnique` 0x1d8, `drawShadowGD` 0x270.
+
+## Research batch c-r20 (2026-09-28): the copy-out word is the return copy's source expression, and no header shape gives exactly one
+
+Measured with the MWCC debugger (`tools/mwcc-stack/udbg.py`, `iro.py`) on real units and on a synthetic TU holding a setter copy-out, a named copy-out, an `operator=` copy-out, a plain assignment and a `(a - b).length()`, then tree-wide with `census.py`/`cmpcensus.py` and `ninja changes_all`.
+Every by-value shape below was measured with the twelve `TVec3<f32>(a - b).length()` wrappers unwrapped and the uncast `operator=` (`*(Vec*)this = other`).
+Nothing landed; the worktree is back on the stock header.
+
+### Retail's object sequence (first created highest)
+
+- `TCoasterEnemy::bind`: `nextPos` 0x28, a dead 12-byte object 0x1c (the return temporary), the live `bl sub` object 0x10, one 4-byte word 0xc created last.
+- `TLiveActor::bind`: `nextPos` 0x2c, return temporary 0x20, one 4-byte inliner word 0x1c, live object 0x10, one word 0xc.
+- `TMario::moveRequest`: `offset` 0x5c, return temporary 0x50, `checkRideReCalc`'s inlined `ridingMtx` 0x20, live object 0x14, one word 0x10.
+  The live object is created after a depth-1 callee local, so it is a local of the inlined `operator-` body (`TVec3 r(a)`), not a by-value parameter: `operator-(TVec3 a, ...)` puts `a` directly under the return temporary, above the Mtx (dumped).
+- `TMario::soundTorocco` (the stock header plus the `TVec3<f32>(...)` wrapper is byte-exact, so its dump is retail's layout): copy 0x3c, live 0x30, three inliner words (the `getPosition()` binding, `length()`'s receiver binding, the MSound binder), then one F and three pointer P temporaries for the difference, one float P and the MSound F.
+  So retail expands `(a - b).length()` in value context with exactly three pointer `ECOMMA` temporaries.
+- `TLeanMirror::loadAfter`: retail is the local-`r` shape plus two words, one directly under `r` and one at the very bottom, so the per-site count is not uniform (1 at coaster, `TLiveActor`, `moveRequest`; 2 here and at `TBeeHive::bind`, `TKumokun::bindOnFlying`, `TChuuHana::attackToMario`, `TDangoHamuKuri::behaveToWater`, `TPoiHana::genEventCoin`).
+- Tongue: after the out-of-line `__ami__` the return copy's source is `addi r4, r1, <r>`, not `__ami__`'s r3, so if that site is `operator-` its body is `x -= b; return x;`.
+  That call sequence alone does not prove a by-value return: the stock header plus an explicit `TVec3<f32>(a - b)` wrapper produces the same `ctor ; __ami__ ; ctor`.
+
+### Where the copy-out word comes from
+
+- At a statement-level copy-out (`m = a - b`, `setX(a - b)`, `T v = a - b`) `operator-` is hoisted into statements, and the only objects its body adds below the live object come from the return copy's source expression.
+- `return x;` (x a local or by-value parameter) is simple and adds nothing: 0 words.
+- `return x -= b;` adds two: the copy constructor's `other` binding (dead: its one use is the RHS of the struct copy) and the IRO pointer P for the `-=` comma assigned to it.
+- The only one-word result found is `return (const Vec&)(a -= b);`: the `TVec3(const Vec&)` constructor reads the binding three times through `set`, so it keeps a register and only the P dies; but the copy then goes through `lfs`/`stfs` (+3 instructions at every site) and Tongue would call a constructor the map lacks.
+- Retail sits exactly between the two families at coaster, `TLiveActor::bind` and `moveRequest`, and matches the two-word family at the six sites above, so whichever family is the header, a subset of sites needs a per-site word the other way.
+  Caller-side objects are created before the live object, so under a two-word header the one-word sites cannot drop a word; under a zero-word header an accessor on the right operand adds one (c-r2) but reorders two instructions.
+
+### Header shapes measured (exact functions against 11998, census)
+
+| `operator-` body | copy-out words | `.length()` pointer P | tree-wide |
+| --- | --- | --- | --- |
+| stock (`TVec3 fst` by value, returns `const TVec3&`) | live object at parse time | 3 (with wrapper) | 11998 |
+| `TVec3 r(a); r -= b; return r;` (c-m1) | 0 | 6 | 11992 (+2 / -8, `__ami__` MISSING), 14 up / 52 down |
+| `(TVec3 a, ...) { a -= b; return a; }` | 0 | 5 | 11992, 13 up / 52 down |
+| `(TVec3 a, ...) { return a -= b; }` | 2 | 3 (retail) | 11998 (+3 / -3), 14 up / 30 down |
+| `TVec3 r(a); return r -= b;` | 2 | 4 | 12000 (+9 / -7), 22 up / 35 down |
+| c-r2's `operator=` returning its assignment expression, local `r` | 1 via `operator=` | 6 | 11712 (every plain assignment gains a P) |
+
+- `(TVec3 a, ...) { return a -= b; }` makes `soundTorocco`, `toroccoEffect`, `isTakeSituation` and `moveRoof` byte-exact by unwrapping alone, with their existing binders, and keeps `__ami__`; it loses only the three sites tuned to the old header (`TBWPicket::moveRequest`, `TNerveMameGessoJitabata::execute`, `execUTurn`) and leaves the bind family uniformly one word over.
+  It is refuted by `moveRequest`'s order (live object above the Mtx) and by Tongue's return-copy source.
+- `TVec3 r(a); return r -= b;` is the best net shape measured (exact: `TBeeHive::bind`, `TKumokun::bindOnFlying`, `TChuuHana::attackToMario`, `TDangoHamuKuri::behaveToWater`, `TPoiHana::genEventCoin`, `TLeanMirror::loadAfter`, `TMario::wireMove`, `TEffectColumWater::generate`, `TMapCollisionBase::setCheckData`; lost: the three tuned sites and the four torocco `.length()` sites, one word over).
+  `ninja changes_all` for it: 32 up / 74 down, matched_code 73.07 -> 73.13, and MarioSound and mameGesso unlink; Tongue's return-copy source argues against it too.
+- Inert or worse, all measured in the synthetic TU: an implicit copy constructor (identical to `: Vec(other) {}`), a copy constructor forwarding to `*this = other`, a `const TVec3&` `operator-=`, a member `operator-`, `TVec3 r; r = a;` (7 P), the comma returns `return (a -= b, a)` and `return (r -= b, r)` (0 words, 4-5 P), `return *&(a -= b)` and `static_cast` forms (2 words), `operator-=` spelled `return sub(o), *this;` (adds an F), and a static by-value helper under a const-reference `operator-` (3 P at `.length()`, but `-=` goes out of line at the bind sites).
+- Tool trap: `ninja build/GMSE01/mario.dol` does not rebuild the objects of unlinked units, so a census after it is stale; build the default target with `-k 0` (the SHA check fails last) before `census.py`.
+- Next: a construct that makes the return copy's source add exactly one dead word at no instruction cost, or proof that the six two-word sites carry their own per-site word (an accessor or a named operand in retail's source), which would make the zero-word local-`r` shape plus per-site words the migration.
+
+## Research batch c-r21 (2026-09-28): `MsMtxSetRotZ` fills through a flat pointer; `operator*` stays open
+
+Measured with `tools/mwcc-stack/udbg.py` dumps, per-unit scoring and tree-wide `census.py`/`cmpcensus.py` plus `ninja changes_all` (base 12001 exact, then 12003 after the landed commit).
+
+### Class 1: the `MsMtxSetRot*` expansions
+
+- Retail's sequence at the pointer sites (HauntLegCallback, TobiPukuRollCallback, KillerBodyCallback, PakkunSeedCallback, TTamaNokoFlower::perform, TSmallEnemy::genEventCoin): the matrix is the only stack object the rotation adds, `&mtx` is held in a callee-saved register from before the sine lookup until after the last concat or `MTXMultVec`, and each 0.0f/1.0f literal is loaded after the stores that precede it.
+  The frame is already right at HauntLeg (0xa0), so the missing piece is one pointer web, not a slot.
+- The pointer web needs an inline-owned pointer whose definition is an explicit conversion (c-r15), and the conversion can sit inside the header body: `f32* m = (f32*)mtx;` with the twelve stores as `m[0]`..`m[11]` reproduces both tells with no caller-side cast.
+  `f32* m = &mtx[0][0];` and `f32* m = *mtx;` are inert (propagated like a bare address); `f32* m = mtx[0];` adds 8 bytes of frame at every site, including the weak bodies.
+- The flat-pointer body keeps the weak `MsMtxSetRotX` (MapObjPinna) and `MsMtxSetRotY` (MapObjFence) bodies byte-exact, so the map does not choose between the two bodies.
+- Tree-wide exact counts (census, against 12001):
+
+| Flat-pointer body in | Exact | Gained | Lost |
+| --- | --- | --- | --- |
+| `MsMtxSetRotZ` only | 12003 | HauntLegCallback, TobiPukuRollCallback | none (TRollBlock::calcRootMatrix 99.24 -> 93.28, not exact) |
+| `MsMtxSetRotY` and `Z` | 12003 | the two above, TTamaNokoFlower::perform, TSmallEnemy::genEventCoin | TGorogoro::generateByGateKeeper, TCraneUpDown::control |
+| all three | 12001 | the same four | the two above, TBGPolDrop::perform, TBossGesso::calcRootMatrix; THauntLeg::calcRootMatrix and TPinnaShell::control move away |
+
+- It is a per-site split, not a header fact: within one TU the two bodies coexist (hauntLeg's callback wants the pointer, its `calcRootMatrix` the plain X body; igaiga's roll callback the pointer, `generateByGateKeeper` the plain Y body).
+  The sites that want the pointer are the static joint callbacks and rotations inside a loop body; the ones that want the plain body are straight-line member functions (TRollBlock, Gorogoro, Crane, BGPolDrop, TBossGesso, THauntLeg::calcRootMatrix).
+  No construct was found that makes that difference inside one header body; it is the lead for whoever takes this up next.
+- Landed on wt/c-r21: the flat-pointer `MsMtxSetRotZ` (no `MsMtxSetRotZ` site in the tree wanted the plain body except TRollBlock), closing HauntLegCallback and TobiPukuRollCallback (its `MtxPtr rot` alias removed), with KillerBodyCallback 96.9 -> 99.7 and PakkunSeedCallback 93.2 -> 99.7 made instruction-exact by calling `MsMtxSetRotZ` instead of hand-written rows.
+  TRollBlock keeps its 99.2 through a TU-local plain `RollBlockRotZ`, which records the split at that site; drop it and take the 93.3 if that helper is judged a codegen pick.
+- Residues after the landing: KillerBodyCallback's frame is 8 short with both matrices 0xc low (three more retail words below `roll`); PakkunSeedCallback's is 0x10 short with `spin` 0x14 low (five words); igaiga's RollEnemyBodyCallback under a flat-pointer X body is instruction-exact except an r30/r31 swap between the joint number and `&roll`.
+- The flat-pointer X/Y bodies are worth re-measuring together with TU-local plain helpers at the four straight-line losers only if the loop/callback discriminator is explained first.
+
+### Class 2: by-value `operator*` on `TVec3<f32>`
+
+- Retail `TTamaNoko::landEffect` (frame 0x90): the four `operator*` return temporaries at 0x74/0x68/0x5c/0x50, one word at 0x4c, the four scaled operands at 0x40/0x34/0x28/0x1c, and four more words from 0xc to 0x1c; the stock header pairs each operand with its return temporary and has no words between or below (0x80).
+- `friend TVec3 operator*(const TVec3& fst, f32 snd) { TVec3 r(fst); r *= snd; return r; }` (rule 8d, V2) gives exactly retail's grouping, returns first and the `r` locals after them, with the one word between (a `checkGround` binding), but not the four words below, so the frame stays 0x80.
+- Retail `TYoshiTongue::emit` shows the same grouping: the `vel * 0.5f` return temporary at 0x3c above the `dir` operand (0x30) and the `vel` operand (0x24).
+- Retail `TEffectColumWater::generate` copies the scaled operand straight into `mScaling` (one object), which no by-value return gives: the consumption split of batch 159 still holds.
+- Tree-wide (census against 12003, then `changes_all` for V2):
+
+| `operator*` body | Exact | Notes |
+| --- | --- | --- |
+| stock `(TVec3 fst, f32) { fst *= snd; return fst; }` | 12003 | |
+| V2 `(const TVec3&, f32) { TVec3 r(fst); r *= snd; return r; }` | 12001 | damageExec 97.71 -> 99.83; calcForces exact -> slots, Tongue's weak `__ami__` MISSING, landEffect/generate/touchPlayer/movement a few hundredths down |
+| member `TVec3 operator*(f32) const`, same body | 12001 | same movers as V2 |
+| V3 `(TVec3 fst, f32) { TVec3 r(fst); r *= snd; return r; }` | 12002 | landEffect 0xb0, emit 0x68, TWarpInCallBack 0xf0: the parameter copy is 12 per site too many |
+| `(const TVec3&, f32) { TVec3 r(fst); return r *= snd; }` | 12001 | landEffect 0xa0 (two words per site), emit frame right, `__ami__` MISSING |
+| `(TVec3 fst, f32) { return fst *= snd; }` | 12002 | landEffect 0xa0, emit frame right |
+| V2 with `r.scale(snd)`, `r.set(fst)` | not built tree-wide | landEffect 76.7 / 89.8: the call depth moves |
+| V2 with `TVec3 r; r = fst;` or `return TVec3(r);` | not built tree-wide | identical to V2 at the five scored sites |
+
+- None is a net gain; nothing landed for class 2.
+- The open question is the same one c-r20 left for `operator-`: retail's by-value operators add exactly one dead word per site below the body locals, and the only way found to make one word (`return (const Vec&)...`) costs float copies.
+  V2 plus that one word per site would give landEffect's slot map exactly, so a construct that adds it is worth looking for in the copy constructor or `operator*=` rather than in `operator*` itself.
+- Tongue's `canGo` residue (retail's `sub` operand three words lower than ours) belongs to the `operator-` class, not to `operator*`.
+
+## Research batch c-r22 (sister decomps) (2026-09-28): MKDD's setQuat product order closes the rotation class; no sister shape settles TVec3, TColor or JGadget
+
+Sources, cloned read-only (sparse, blobless) into `/home/user/ext/sister/`:
+- zeldaret/tww `1f9e8cb` (`include/JSystem/JGeometry.h`, `JUtility/TColor.h`, `JGadget/`);
+- zeldaret/tp `c8fa8c9` (`libs/JSystem/include/JSystem/JGeometry.h`, `JUtility/TColor.h`, `JGadget/std-list.h`);
+- doldecomp/mkdd `ffc513c` (`include/JSystem/JGeometry/{Vec,Matrix,Quat}.h`, `JUtility/TColor.h`, `JGadget/std-list.h`);
+- doldecomp/pikmin2 `e3e6f6f` (`include/JSystem/JGeometry.h`, `JUtility/TColor.h`, `JGadget/list.h`).
+Every file read is a reconstruction (they carry "fabricated", "TODO: OK?", "Non matching" and "From SMG" notes); none looked like leaked original source.
+None of the four has JDrama or any SMS-only header.
+Measured tree-wide with `census.py`/`cmpcensus.py` (about a minute per full rebuild here) against 12004 exact, then 12007 and 12008 after the two landings; site scores with the c-r20 `score.sh` adapted to the libs layout (scratch `r22/`).
+
+### Landed: `TRotation3::setQuat` and `setSQ`
+
+- MKDD's `setQuat` (Matrix.h) names nine products in the order yy zz xx xy xz yz wz wx wy and spells each diagonal `1.0f - a - b`, with no named `1 - xx`.
+  Ours had eleven locals (the two `1 - n*n` terms named) in x-first order.
+- Taken verbatim it makes the weak copy in fireWanwan byte-exact (98.5 -> 100) and closes `TKazekun::calcRootMatrix` (98.08 -> 100) and `TBathtub::calcRootMatrix` (87.82 -> 100), with `TTabePuku::getTakingMtx` 93.45 -> 99.58, `TWireTrap::calcRootMatrix` 96.94 -> 99.05 and `KoopaNeckCallBack` 93.72 -> 94.97: +3 exact, nothing down.
+  The retail FPR schedule c-m11 read off Corona (2y, 2z, 2x, 2w first) falls out of this declaration order; the eight bytes Kazekun and Bathtub had over retail were the two dead homes of the named `1 - n*n` locals.
+- No sister has `setSQ`, but the same order with each row scaled makes its only ROM copy (weak in BeeHive.o) byte-exact (91.05 -> 100): +1 exact, nothing down.
+  The batch-era table under `setSQ` permuted the product groups of the old body but never tried the squares as yy, zz, xx with the `1 - n*n` terms unnamed.
+- Two frames moved the other way without losing exactness anywhere: `getTakingMtx` is now 8 short (0xe0 against 0xe8) and `TWireTrap::calcRootMatrix` 0x10 short, both recorded in their TODOs.
+- MKDD's `getQuat` is worse here (Kazekun's weak copy 99.5 -> 98.2) and MKDD marks it non-matching too; ours stays.
+
+### TVec3 (`operator-`, copy constructor, `operator=`): no sister shape helps
+
+| Shape (source) | Exact | Gained / lost |
+| --- | --- | --- |
+| copy ctor through a `setTVec3f(const f32*, f32*)` level, lwz/stw body (MKDD, TP; theirs is psq asm) | 11985 | 0 / 23 (Kumokun, BathtubKiller nerves, `calcForces`, ...) |
+| the same level in `operator=` too | 11966 | 0 / 42 |
+| member `TVec3 operator-(const TVec3&) const { TVec3 tmp(*this); tmp -= b; return tmp; }` (MKDD, pikmin2, TP's `operator+`) | 12001 | 0 / 7: the four torocco `.length()` sites, `execUTurn`, `TNerveMameGessoJitabata`, and Tongue's `__ami__` MISSING |
+| pikmin2's `result = *this; result.sub(other)` | sites only | `sub` inlines away: coaster bind 99.9 -> 56.0, every bind site -10 |
+| member by-value `operator+` (TP, pikmin2) | 12008 | 0 / 0, 9 non-exact functions down |
+| TWW's unnamed `squared(const TVec3&)` | 12007 | 0 / 1 (`TShine::calc`) |
+| TP's `TVec3<s16>::operator=` (word plus halfword) | 12005 | 0 / 3 (TTrembleModelEffect) |
+
+- The member `operator-` is c-r20's local-`r` family (zero copy-out words) with `this` in place of a reference parameter; it loses the same sites c-r20's `TVec3 r(a)` did, so the member/friend difference is inert.
+- Refuted by the map rather than measured: TWW's `operator=` as `set(b.x, b.y, b.z)` (float copies; the weak `__as__` in enemy.cpp is lwz/stw), TWW's and pikmin2's missing user copy constructor (the map has the weak 0x1c `__ct__`), and every sister's self-contained `normalize()`/`setLength(f32)` (the ROM's normalize sites call the two-argument `setLength` out of line, so ours forwards).
+- None of the four has a `const TVec3&`-returning `operator-` or a by-value left operand; MKDD, TP and pikmin2 all return by value from a member, TWW has no `operator-` at all.
+  So the sister record agrees with c-r20 that retail returns by value, and says nothing about the one dead word per site c-r20 and c-r21 are looking for.
+- TWW's TVec2 `length()` through a named `sqr` is inert tree-wide (0 up, 0 down).
+
+### JUTColor stride: no sister shape helps
+
+- Scored at the ten TColor sites (TMenuPlane ctor, `setTimer`, `startAppearLife`, `moveStage`, `drawShadow`, `SMS_AddDamageFogEffect`, `TSelectDir::direct`, and the three already exact).
+- MKDD's `ALIGN(4)` (`__attribute__((aligned(4)))`) on `TColor` is byte-identical at all ten, so the 8-byte conversion temporary is not an alignment effect.
+- TWW's and TP's `set(GXColor)` through a named `GXColor* temp = this` puts TSwingBoard::initDraw 8 over (exact -> 99.9) and moves the TMenuPlane ctor and `drawShadow` the wrong way.
+- TWW's `TColor& operator=(const TColor&) { GXColor::operator=(other); ... }` does not compile under MWCC 1.2.5 (an explicit call to a C struct's implicit assignment); spelled `static_cast<GXColor&>(*this) = other` it moves the TMenuPlane ctor 0x4c0 -> 0x4a8 and `startAppearLife` two markers down.
+- Every sister keeps the `TColor(const TColor&)` copy constructor commented out, as ours does; none has our `get()`.
+
+### JGadget iterators: no sister shape helps
+
+- The map's `__eq__7JGadgetF...8iterator...8iterator` fixes `operator==` as a friend taking both iterators by value, which is ours and pikmin2's, not MKDD's `const iterator&`.
+- pikmin2's user `void operator=(const iterator&)` on the base iterator is byte-identical at all ten sites (the four ObjHitCheck loops, MirrorActor, riccohook, PerformList, SDLModel, gatekeeper, SelectDir `rsetup`, `setupObjects`).
+- pikmin2's `TNode_::getElement()` level (in `operator*`, `operator->`, `CreateNode_`, `DestroyNode_`) adds 12 bytes per loop where retail needs 8: `clearHitNum` 0x1f8 -> 0x240 against 0x228, `entryGroup` exact -> 0x120, `SDLModel::entry` exact -> 0xd0.
+- MKDD's `std-list.h` and TP's were already covered by cc39 and js1 (body-assigned constructors, `const&` comparisons, iterator-returning `push_back`).
+
+### What stays open
+
+- The `operator-`/`operator*` one-word-per-site class (c-r20, c-r21), the JUTColor 4-versus-8 stride and the JGadget per-site pools are not header shapes any sister project reconstructed differently from ours in a way that helps.
+- `getQuat`'s `fadds` operand order (Kazekun's weak copy, 99.5) survives MKDD's body too.
+- Any later sister lead is most likely to be in the other rotation bodies (`setEular`, `mult33`, the TQuat4 inlines), where declaration order sets the schedule the way it did for `setQuat`; MKDD's versions of those are paired-single or absent.
+
+## Research batch c-r25 (2026-09-29): the uncast `operator=` migration needs ten site respellings and still loses the koopajr pair
+
+Measured on main 8cce087b: JGVec3.hpp's `operator=(const TVec3&)` changed from `*(Vec*)this = *(Vec*)&other;` to `*(Vec*)this = other;`, full `ninja -k 0`, DOL SHA-1 intact, `ninja changes_all`.
+The weak `__as__` (enemy.cpp, 0x1c, lwz/stw) stays 100% under both bodies and is emitted only there.
+The header change is not landed. wt/c-r25 carries this record, the header comment, and the six respellings that are neutral under the current body (`calcVtx`, `pullTail`, the NPC turn, the hanachan sand check, `calcNrm`, `TTPHitActor::bind`; `changes_all` empty, symbol order unchanged).
+
+### Header alone: +2 / -1 exact, 20 up, 12 down
+
+- Gained exact: `TEffectColumWater::generate`, `TMapCollisionBase::setCheckData`.
+- Up: Kukku GraphWander 97.00 -> 99.53 and Fall 96.99 -> 99.77, `TBWLeash::perform` 98.69 -> 99.08, `TBossEel::collideToMario` 98.34 -> 99.49, `TBossMantaManager::spawn` 98.88 -> 99.95, `TKazekun::doAttackPose` 85.65 -> 91.79, `TYumbo::shotSeeds`, `TTrembleModelEffect::clash`, the two TAnimalBird paths, `TBossGesso::perform`, `TSelectShineManager::perform`, `TModelWaterManager::move` and six smaller.
+- Down: `TBWPicket::moveRequest` 100 -> 98.82, `TTelesa::behaveToWater` 99.92 -> 96.17, `TBWLeashNode::calcMatrix` 99.15 -> 87.03, `TNerveBWJumpToBath` 99.71 -> 98.29, `TBossHanachan::perform` 97.72 -> 97.33, `TKoopaJrSubmarine::calcRootMatrix` 98.46 -> 96.75, `makeKillerVelocity` 98.88 -> 97.71, `TTPHitActor::bind` 96.48 -> 96.39, `TMapObjPlane::calcNrm` 92.77 -> 91.51, `TNerveNPCTurnToMario` 99.87 -> 97.15, `TMBindShadowManager::forceRequest` 99.50 -> 89.45, `calcVtx` 97.23 -> 95.27.
+
+### With the site respellings: +3 / -0 exact, 22 up, 2 down
+
+Each is ordinary source; the first four also read better than what they replace.
+The next five and `pullTail` are neutral under the current (cast) header and are already on the branch; the first four regress under it (forceRequest to 89.45) and go in with the header.
+- `forceRequest`: `TVec3 delta = param_1.mPosition; delta -= gpCamera->getUnk124Vec();` drops the by-value `ShadowUtilRequestPos` helper and is byte-exact (Camera.hpp's comment on `getUnk124Vec` then needs updating).
+- `TTelesa::behaveToWater`: `local_20 = local_20 * fVar1; mVelocity = local_20;`, the spelling the old TODO predicted, is instruction-exact (99.96; the `operator*` copy sits at 0x60, retail 0x38: the c-r21 class).
+- `TBWLeashNode::calcMatrix`: the neighbour points read as `rope->mPoints[index ± 1].unkC` (retail rebuilds their address from `rope`); back to 99.15, instruction-exact, frame 0x80 against 0xe8. Dropping the `points` local too is worse (98.4).
+- `TNerveBWJumpToBath`: no `bath` local (`TVec3 toBath(BW_BATH_POS)`, `boss->mPosition = BW_BATH_POS`); the initialiser's own temporary is the retail copy at 0x10. 99.75, instruction-exact, 8 short.
+- `calcVtx`: `TVec3 oldPos; oldPos = request->mPosition;`.
+- `TBWLeash::pullTail`: `TVec3 before; before = mRope->mPoints[0].unkC;` keeps `TBWPicket::moveRequest` exact. Its copy-initialised form is the map's 0xc4 out of line and wins `TBWLeash::perform` 99.08, but loses moveRequest's `mRope` reload; `mOwner->getLeash()->pullTail(...)` at moveRequest gives the reload (instruction-exact), but no combination of its binders lands both the 0x68 frame and `before` at 0x48 (18 combinations; hsearch dbg: two words too many above or below `before`).
+- `TNerveNPCTurnToMario`: `toMario` assigned, not copy-initialised.
+- `TBossHanachan::perform` (sand check): `delta` assigned, not copy-initialised.
+- `TMapObjPlane::calcNrm`: `sum` assigned, not copy-initialised.
+- `TTPHitActor::bind`: `pos` assigned, not copy-initialised.
+Symbol order is unchanged in every touched unit.
+
+### The two it cannot fix: address-taken locals in koopajr
+
+- `calcRootMatrix`: `trans = center;` under the cast body takes `center`'s address, so the stores that build `center(0, 0, centerZ)` stay behind the `centerZ` load, as in retail; under the uncast body the zero is stored first. Inert: `trans` copy-initialised, `center` built by `set`, a named `centerZ`, raw `.value`, `+=` for `add`.
+- `makeKillerVelocity`: `axis = toMario;` likewise keeps `toMario` in memory through the cross product (retail reloads `toMario.x` after the `axis.y` store); the uncast body keeps it in registers. Inert: `axis.cross`, `cross2`; `axis.set(toMario)` is 81%.
+- Bodies measured tree-wide with the respellings applied: `*(const Vec*)&other` = the current body; `*&other` and `static_cast<Vec&>(*this) = other` = uncast; `const Vec& o = other; *(Vec*)this = o;` changes the DOL.
+  So what separates the two families is the pointer conversion of `other`, not the `&`, and no body gives both retail's elisions and retail's address-taken schedule.
+- Next: a retail-plausible spelling at either koopajr site that takes the local's address through a pointer conversion (a `const Vec*` argument, a `Vec*` conversion) with no extra code, or a third `operator=` body that keeps the conversion but still allows the Kukku/effectObj/MapMakeData elisions.
+
+## Research batch c-k18 (2026-09-29): the koopajr pair wants opposite things from `operator=`
+
+Goal: honest spellings at the two koopajr sites, so that the uncast `operator=` (c-r25) could land with no function going down.
+It cannot land: neither site has an honest fix under the uncast body.
+The header is not changed; this record, the JGVec3 comment and the two koopajr TODOs are the only changes.
+All measurements below use the MWCC debugger dumps (`tools/mwcc-stack/udbg.py`, frontend-00/01 and backend-01/06/07).
+
+### What the dumps show
+
+- The cast body emits `ETYPCON pointer(Vec)` around the source address (`&center`, `&toMario`); the uncast body emits a plain `EOBJREF [x] pointer(Vec)`.
+  Both bodies emit an `ETYPCON` on `this`, and so does `static_cast<Vec&>(*this)`.
+  An object under an `ETYPCON` is address-taken for the IR optimiser.
+- `calcRootMatrix`: under the uncast body, the IR optimiser forwards the `centerZ` load (temporary `@N`) into the `center.z` store.
+  Nothing aliases `center`, so the load then comes after the two zero stores (frontend-01).
+  Under the cast body, `center` is address-taken, so the zero stores might alias the params load and the temporary stays, as in retail.
+  So `calcRootMatrix` needs `center` address-taken.
+- `makeKillerVelocity`: retail keeps all three `dir` components in registers across the stores to `axis`, and reloads `toMario.x` only.
+  Every body that casts `this` makes `axis` address-taken, so its stores kill the `dir` loads.
+  The cast body reloads `dir.y` (98.88) and the uncast one all three (97.71).
+  With no user `operator=(const TVec3&)`, the implicit copy is an untyped aggregate `EASS`, so neither local is address-taken.
+  The cross product is then exact, registers included, the instruction count equals retail's (451), and the function scores 99.51 with only the frame (0x150 against 0x178) left.
+  c-r25's note that the cast body "keeps `toMario` in memory" has it backwards: the cast body is the one that keeps `toMario.x` in a register.
+- So one site needs its source address-taken and the other needs its destination not address-taken.
+  No single body gives both; `Vec& v = *this; v = *(const Vec*)&other;` gives `calcRootMatrix` 98.5 but `makeKillerVelocity` 98.2.
+  Retail's `center` must be address-taken by something other than the assignment, and nothing in the function takes it honestly.
+
+### Site spellings tried under the uncast body (all inert or worse)
+
+- `calcRootMatrix`: `TPosition3f offset(center)` and `translation(center.x, center.y, center.z)` (both 96.75, frame +8); a `const` `center`; `center = TVec3(0, 0, z)` and `TVec3 center = TVec3(0, 0, z)` (both 93.5); `trans.sub(getPosition(), center)` (86.2).
+  Only the forbidden `trans = *(const Vec*)&center` restores 98.46.
+  A single lever-search run (60 s) found only the frame: a `getModel` fork plus a `getSwingAngle` binder reached 97.15, and both are pass-through helpers.
+- `makeKillerVelocity`: `axis.cross(dir, toMario)` (97.2); the cross written out, KoopajrCross with `Vec&` parameters, or with pointer parameters (all 97.71, identical code).
+  `axis.set(toMario)` scalarises `axis` completely (81%).
+  Every operator-free honest copy would be a copy construction into a new local, but retail uses one slot for the cross result and the copy.
+
+### Other `operator=` bodies, measured
+
+- `static_cast<Vec&>(*this) = *(const Vec*)&other;` behaves like the cast body at koopajr (98.46 / 98.88).
+- `Vec::operator=(other)` does not compile: `undefined identifier 'Vec::operator='`.
+- `Vec& v = *this; v = other;`: `makeKillerVelocity` 99.5, but tree-wide the DOL changes, with 385 down and 269 exact lost.
+- The implicit copy (the operator removed), on main 510a99dd without the c-r25 site respellings:
+  - Exact: +2 (`TEffectColumWater::generate`, `TMapCollisionBase::setCheckData`) and -3 (`TBWPicket::moveRequest`, `TMapObjBall::control`, `TBigWatermelon::control`); 26 up, 24 down.
+  - MapObjBall's `matched_data` also drops, to 29%, and the total `matched_data` goes from 99.84 to 99.47.
+  - The enemy.cpp `__as__` stays emitted and 100%.
+  - Ups beyond the uncast family's: `TLimitKoopa::startHipDrop` 91.55 -> 99.88, `TMario::pulling` 98.57 -> 99.96, `TModelWaterManager::move` 96.98 -> 99.77, `TConeBeam::calcVertices` 95.65 -> 98.39, `FeetInvCalc` 96.64 -> 98.33, `TAmiNoko::calcRootMatrix`, `makeKillerVelocity`.
+  - Downs beyond the uncast family's: `execWallCheck_` 99.87 -> 95.60, `calcSlopeAngleX_` 98.39 -> 95.47, `TFireWanwan::bindBody` 98.39 -> 95.71, `TPopo::walkBehavior` 99.81 -> 97.51, `TBossHanachan::init` and `bind` (bind 99.86 -> 96.82), `TRocket::setDeadAnm` 91.71 -> 80.88, `TKumokun::bind` 99.51 -> 97.67, `TBaseNPC::npcMadding` and `execWalk`, `TWarpInCallBack::execute`, and the MapObjBall trio.
+  - With the c-r25 respellings applied it is +3 / -3, 28 up, 21 down.
+  - `TMapObjBall::control` shows why it is no single-body answer either: its `vel = getVelocity(); vel.isZero()` needs `vel` memory-resident (no `fmadds`), which the implicit copy loses.
+- Next: the per-site knob is whether each local is address-taken, not the body.
+  The remaining lead for both koopajr sites is the implicit copy combined with some retail-plausible source for `center`'s address at `calcRootMatrix`.
+  One candidate is a JGPosition3 `translation`/`setTrans` that takes its argument's address; it has not been measured.
+
+## Research batch c-r26 (2026-09-29): the camera's unk124/unk148 are TVec3; the outside `Vec` reads are accessors
+
+Lead (c-k17): `TLensFlare::perform` and `TBaseNPC::perform` copy `CPolarSubCamera::unk124`/`unk148` float by float through `TVec3(const Vec&)`, where a TVec3-typed member gives word copies, so the two members might be plain `Vec`.
+Measured on main 0e88dc3a (12023 exact) with full `ninja -k 0`, `ninja changes_all` and `census.py`.
+
+### Refuted by the camera's own TUs
+
+- Both members as `Vec` does not compile in five TUs: the camera TUs call TVec3 members on them (`set`, `+=`, `==`, `squared` in Item.cpp) and pass `&unk124`/`&unk148` to `TCameraBck::updateDemo(TVec3*, TVec3*, TVec3*, f32*)` (the map's mangling).
+- Retail `updateDemoCamera_` passes `addi r4, r30, 0x124` / `addi r5, r30, 0x148` straight to that `TVec3*` signature, and `calcInHouseNo_` passes `addi r5, r31, 0x124` / `addi r6, r31, 0x148` straight to `CLBCalcNearNinePos`'s `const TVec3&` parameters (no conversion temporaries); `TMirrorCamera::makeMirrorViewMtx` and `TMapObjGrassManager::perform` do the same.
+  A `Vec` member would need a pointer cast at the first and a `TVec3(const Vec&)` temporary at the others.
+- Holding the five non-compiling TUs on TVec3 (a scratch macro) and letting every other TU see `Vec`: 0 up, 6 down, exact 12023 -> 12022.
+  Down: `TMapObjGrassManager::perform` exact -> 99.18 (MapObjGrass unlinks), `calcInHouseNo_` 97.31 -> 91.90, `TMap::update` 99.94 -> 95.91, `TMirrorModelManager::perform` 91.33 -> 80.72, `TBaseNPC::perform` 97.33 -> 93.77, `forceRequest` 99.50 -> 93.84.
+  Honest site fixes (a `const Vec&` for `TMap::update`'s `camPos`, for NpcBase's `at`/`pos`) bring `TMap::update` back to 99.94 and NpcBase to 96.61; the other four take their camera point as a `const TVec3&` argument and cannot be respelled.
+
+### What landed (wt/c-r26, neutral)
+
+- Retail's eight out-of-line `TVec3::set(const Vec&)` calls read camera members only at 0x124 (sunmodel, bosstelesa x2, lensflare) and 0x148 (lensflare), so the outside `Vec` view is a pair of accessors: Camera.hpp gains `getUnk148Vec()` beside the existing `getUnk124Vec()`.
+- `TLensFlare::perform` reads both through them instead of `(const Vec&)` casts: instruction-identical (0 instruction, 15 register, 71 slot mismatches either way), frame 0x220 -> 0x238 against retail 0x2b8 (hsearch dbg: 7 fewer missing words at the bottom, one more between the camera conversions and the pool above them).
+  `SMSGetCamera()->` for the two reads gives 0x240 with the same instructions; not taken, a frame-only binder.
+- `TBaseNPC::perform`: `local_4C = gpCamera->getUnk124Vec()` reproduces retail's float copy, but the whole is 96.6 against 97.33 with the word copy, the same as c-k17's cast; `at`/`pos` through the accessors 96.5; the copy folded into `MsIsInSight`'s argument 96.1.
+  Retail keeps `&unk124` in r5 for y and z and loads `gpCamera` after the `extsh` of the angle; ours loads y off the camera base and hoists the load. Not landed; the TODO records it.
+- `ninja changes_all` empty, DOL SHA-1 intact, symbol order PASS for lensflare and NpcBase.
+
+### Other camera members
+
+- No other `CPolarSubCamera` member is copied float by float outside the camera TUs: the remaining outside reads (`unk13C`, `unk16C`, `unk1EC`, `unk258`, `unk270`, `unk290`, `unk2C8`, `mUp`) are scalars, matrices, pointers or direct `const TVec3&` arguments.
+
+## Research batch c-r27 (2026-09-29): the implicit copy assignment cannot land; under it every copy spelling compiles the same
+
+Lead (c-k18): drop JGVec3.hpp's user `operator=(const TVec3&)`, so that the implicit copy assignment is used, and respell the sites that go down.
+Measured on main 58ad859c with full `ninja -k 0`, `ninja changes_all` and the DOL SHA-1 (intact in every run below except the `getVelocity` one).
+Only this record and a header comment are committed; the header is unchanged.
+
+### Tree-wide numbers
+
+- Header alone: +2 / -3 exact, 26 up, 24 down (c-k18's figures, reproduced).
+- Header plus c-r25's four header-dependent respellings (`forceRequest` through `getUnk124Vec()`, `TTelesa::behaveToWater`'s `local_20 = local_20 * f; mVelocity = local_20;`, `TBWLeashNode::calcMatrix` through `rope->mPoints[index ± 1]`, `TNerveBWJumpToBath` without `bath`): **+3 / -3 exact, 28 up, 21 down**.
+  These four behave the same under the implicit copy as under the uncast body: forceRequest exact, behaveToWater 99.96, JumpToBath 99.75, calcMatrix back to 99.15.
+- Exact gained: `TEffectColumWater::generate`, `TMapCollisionBase::setCheckData`, `TMBindShadowManager::forceRequest`.
+  Exact lost: `TBWPicket::moveRequest`, `TMapObjBall::control`, `TBigWatermelon::control`.
+  The enemy.cpp weak `__as__` stays emitted and 100%.
+- Up (28): startHipDrop 91.55 -> 99.88, pulling 98.57 -> 99.96, `TModelWaterManager::move` 96.98 -> 99.77, Kukku GraphWander 97.00 -> 99.53 and Fall 96.99 -> 99.77, `TBossMantaManager::spawn` 98.88 -> 99.95, makeKillerVelocity 98.88 -> 99.51, `TBossEel::collideToMario` 98.34 -> 99.49, `TConeBeam::calcVertices` 95.65 -> 98.39, `FeetInvCalc` 96.64 -> 98.33, `TYumbo::shotSeeds` 96.35 -> 98.35, `TTrembleModelEffect::clash` 94.00 -> 97.28, `TKazekun::doAttackPose` 85.65 -> 91.79 and `flyAroundMario` 98.00 -> 98.38, `TAnimalBird::doLanding` 93.62 -> 97.29 and `doFlyToCurPathNode` 95.35 -> 97.21, `TSelectShineManager::perform` 94.07 -> 95.37, `TBWLeash::perform` 98.69 -> 99.08, `TAmiNoko::calcRootMatrix` 96.19 -> 96.85, `TBossGesso::perform`, `TFireWanwanTailHit::init`, `TSphereLink::moveHead`, `TRope::moveHead`, plus the three exact gains and the three c-r25 sites above.
+- Down (21): `execWallCheck_` 99.87 -> 95.60, `calcSlopeAngleX_` 98.39 -> 95.47, `TFireWanwan::bindBody` 98.39 -> 95.71, moveRequest 100 -> 98.82, `TPopo::walkBehavior` 99.81 -> 97.51, `TBossHanachan::init` 99.95 -> 99.12, `bind` 99.86 -> 96.82 and `perform` 97.72 -> 97.31, `TRocket::setDeadAnm` 91.71 -> 80.88, koopajr `calcRootMatrix` 98.46 -> 96.75, `TKumokun::bind` 99.51 -> 97.67, `TTPHitActor::bind` 96.48 -> 96.39, `TMapObjPlane::calcNrm` 92.77 -> 91.51, `TMapObjBall::control` 100 -> 94.53, `TResetFruit::control` 99.95 -> 99.02, `TBigWatermelon::control` 100 -> 97.73, `npcMadding` 99.87 -> 96.53, `TNerveNPCTurnToMario` 99.87 -> 97.15, `execWalk` 97.82 -> 95.38, `calcVtx` 97.23 -> 95.33, `TWarpInCallBack::execute` 86.30 -> 80.23.
+- MapObjBall's `matched_data` drop (100 -> 29%) is the jump table `@4191` (56 bytes, 67.9%) inside `TResetFruit::control`: its entries move with the function body, so it recovers with that function.
+
+### Why the drops have no site fix
+
+- **Under the implicit copy the spelling knob is gone.** `T a = b;`, `T a(b);` and `T a; a = b;` give byte-identical code at every site tried: `execWallCheck_`'s four posArg/posCam spellings, `npcMadding`'s three copy-chain spellings, and all six c-r25 respellings already on main (reverting commit e849b594 under the implicit copy changes none of the seven functions).
+  So the declare-then-assign and copy-initialise respellings that c-r25 used under the uncast body cannot be used here.
+- **About half the drops are copies retail keeps and the implicit copy forwards away** (our frame short, `<` copy blocks): `calcSlopeAngleX_`, `bindBody`, hanachan `bind`/`perform`, `setDeadAnm` (its dead `dir` copy is deleted outright), `npcMadding`, `TNerveNPCTurnToMario`, `execWalk`, `calcVtx`, `TWarpInCallBack::execute`.
+- **The exact losses need the destination address-taken.** Retail's `vel = getVelocity(); vel.isZero()` keeps three `fmuls` (no `fmadds`), and moveRequest reloads `mRope` after the stores to `before`.
+  Both show that the copied-to local is address-taken in retail.
+  Scratch probes confirm the mechanism: `vel = (const Vec&)getVelocity();` makes `TMapObjBall::control` and `TBigWatermelon::control` exact, and `before = (const Vec&)mRope->mPoints[0].unkC;` makes moveRequest exact.
+  In each probe `operator=(const Vec&)` casts `this`, which makes the destination address-taken.
+  The casts are not honest source, and the header reading behind them is refuted: `TLiveActor::getVelocity()` returning `const Vec&` (with the implicit copy) keeps the two MapObjBall controls exact but changes the DOL and loses 16 exact functions against main, among them moveRequest, `TMapObjGeneral::receiveMessage`, `TLeafBoat::touchActor`, `TNameKuri::moveObject`, `TPakkunSeed::moveObject`, the two smallEnemy jump nerves, `TTobiPuku::hitWater`, `TSamboHead::behaveToWater`, `TEggYoshi::receiveMessage`, `TMapObjElasticCode::control`, `TRailFence::control`, `TMapObjBall::touchGround` and `TResetFruit::hold`.
+- `TMapObjBall::control` alone is exact under the implicit copy with a temporary, `if (!JGeometry::TVec3<f32>(mVelocity).isZero() || ...)`: a temporary is not a local for `fp_contract`.
+  That is the same shape `TResetFruit::perform` already uses.
+  But the statement count drops, so `TResetFruit::control` expands `TMapObjBall::control` (99.95 -> 70.0).
+  In `TBigWatermelon::control` the temporary lands at 0x38, while retail's named `vel` is at 0x68 (99.9).
+- **koopajr `calcRootMatrix`: c-k18's JGPosition3 lead is refuted.** Under the implicit copy, `translation(const Vec&)` and `translation(const Vec*)` both stay at 96.8; the `const Vec*` form goes through TVec3's `operator const Vec*()`, so it takes `&center` with a cast.
+  Neither keeps the `centerZ` load ahead of the zero stores.
+
+### TMario::pulling
+
+- Under the implicit copy, pulling is instruction-exact (321 instructions, `fmadds f2, f3, f3, f2` as in retail).
+  Only the two `operator-` temporaries sit 0x20 higher (0x58/0x64 against 0x38/0x44), so it is behaviour-exact: the 1-ulp fused multiply-add difference the audit flagged comes from the cast `operator=`, which makes `delta` address-taken.
+- Under the current cast body, `delta` copy-initialised from a ternary gets the `fmadds` (the copy constructor does not take the address).
+  But the copy then sits after the join, where retail copies in each arm (95.0 against 98.57).
+  Retail's per-arm copy into a `delta` that is not address-taken is what `operator-`'s return copy into its result slot would give.
+  That needs cc23's by-value `operator-`, so it is part of that migration, not a site lever.
+
+### The two copy behaviours, side by side
+
+- `TLimitKoopa::startHipDrop`: retail copies `calcVelocityToJumpToY`'s result from 0x64 into `velocity` (0xa0) word by word.
+  It then reuses `length()`'s squared sum in `normalize()`, so `velocity` is not address-taken, even though it is an existing local assigned from a temporary.
+  Under the cast body, a new copy-initialised local (80.4) and `velocity.set(...)` (53.5) are both worse.
+- So in retail, some word copies into existing locals and members make the destination address-taken: `MapObjBall`, moveRequest, `setDeadAnm`, the NPC copy chains.
+  Others do not: startHipDrop, pulling, makeKillerVelocity, `mStaticHitActor.mPosition = ...` in `TModelWaterManager::move`.
+  The first group wants the cast body and the second the implicit copy, and neither body, nor any spelling found, gives both.
+- The split does not follow the source's value category.
+  `mStaticHitActor.mPosition = mParticlePositionSOA[i]` and makeKillerVelocity's `axis = toMario` have lvalue sources and still want the non-address-taking copy.
+- Next: look for what retail's address-taking sites share (an inlined callee, a `Vec`-typed accessor that the map does not show) before any further `operator=` round.
+
+## Closure batch c-k20 (2026-09-29): the three-function units, no closure
+
+Twenty units with three non-exact functions each; none closed, nothing landed.
+- **Survey.** `check-relocs.py --mode calls` flags no call-set difference in any of the twenty except NpcNerve's known `getCurGraphIndex`.
+  `find-copied-bodies.py` finds only known pairs (shoot and `setZigParameter`) plus readBillboard and `CLBDistXZ`, which does not apply: the zero guard sits between the differences and the sqrt, and `CLBDistXZ` goes through `MsSqrtf`.
+  Every residue left is frame, slot or register; the per-function TODOs already record the deep searches, so the rest of this entry is new measurements only.
+- **NpcNerve `getCurGraphIndex` (probed with `inline-modes.py --snippet`).** The fabricated `hasOnlyOneNext` chain puts the index accessor at level 3.
+  A named reference, `return cur().oneNext()`, `if (cur().oneNext())` and a `getRailNode()` member call all stay at 3.
+  One `rail()` level (`return cur().getRailNode();`) gives 4, and so does an NPC-level wrapper over the tracer predicate; both together give 5.
+  No mode spelling adds two levels with one construct, so retail's out-of-line pair still needs two invented levels (open, as recorded).
+- **TDStageGroup chain (MenuDir, MovieDirector and GCLogoDir `setup`, the `rsetup`s).** In a scratch TU the frame does not depend on the new-expression's context.
+  `g = new`, a named local, `return new`, `ext(new ...)`, a bare `new T(d);` and a member store all give the same frame, so this is not a site-mode effect.
+  `char*` name parameters at the DSG and list levels are inert, and a dead `const char*` in DSG's body is +8.
+  Retail layout (hsearch `dbg`): one extra word above each of the three `this` bindings (0x3c/0x34/0x2c), and six words under the FrmGXSet `this` where ours has three.
+  Ours numbers @1680, @1682-@1684, @1686 and @1688 between the kept objects and eliminates them; these are the candidates for retail's kept words.
+- **Dead words below conversion buffers.** warpOut keeps 4 more words below its two int-to-float buffers (@1243/@1245), and `TMapObjGeneral::recover` keeps 10 more below its two.
+  Neither function has any later inline object in ours.
+  Remnant spellings for recover's bare `getModel();` (`getModel()->getAnmMtx(0)`, named `mat`, named `model`) are +0/+8/+0x10, never the 0x28.
+- **More layouts read with `dbg`.**
+  - readBillboard: retail has 15 more words below `std::sqrtf`'s volatile and 1 more above `moveDist`.
+  - fruitsboat `init`: 5 more words above the `getCurrentPos` return temporary and 4 fewer below the Mtx.
+  - fruitsboat GraphWander: one of the four depth-1 words above the first pos/rot pair (@1263-@1267) sits below the pair in retail.
+    `!checkLiveFlag` spelled `== false`, raw, or as an empty-then/else arm is inert or worse; so are a named tracer and `getGraphNode(getCurGraphIndex())` for `node`.
+- **shoot: a full reversal.** Retail's four parse-time temporaries (the `operator-` copy, the node copy, the two TMsRanges) are created in exactly the reverse of our order.
+  Moving goal..end into one TU-local helper, with or without the `setZigParameter` call, changes instructions (97.2), so the cause is not one callee.
+  The residue stays in the `operator-` class.
+- **MSoundStruct `startSoundSetDyna`.** The if-statement restart test expands `searchD` at level 2 (expression mode) whether the predicate is a scalar initialiser or `if (!f())`.
+  No statement-mode spelling moves `searchD` to level 3 without one more level.
+- **Inert, recorded so nobody repeats them.**
+  - calcNoticeTargetYrot_: `int`/`u16` ang, `CLBAbs<s16>` over the int or s16 difference, `(int)`/`(s16)` casts on ang. The best is 97.2; retail's `extsh r4, r3` before the subtraction survives all eight.
+  - SelectGrad: six top-left cycle spellings (pre/post-decrement, `+= 6`, ternary, if/else, a named cycle). The regalloc replay there is misaligned: retail r31/r2 appear for volatile webs.
+  - fruitsboat `init`: named tracer (-0x18, instructions change), named graph (inert), named type (+0x10), named position (+8, 6 extra instructions), raw `manager` (instructions change).
+
+## Research batch c-r28 (2026-09-29): the director setup deficit is one header default plus the pad statement
+
+Question: the shared JDrama header shape behind the director `setup` deficits (MenuDir, MovieDirector, GCLogoDir setup 0x40/0x258 against 0x58/0x280; SelectDir rsetup).
+Answer: only one word of it is in the JDrama chain; the rest is the setups' own pad statement.
+MenuDir and MovieDirector `setup` are byte-exact on wt/c-r28 (8de925f5, 49aa812e); GCLogoDir setup 0x258 -> 0x278 of 0x280.
+
+### Retail's objects, decoded (MenuDir setup, top-down)
+
+- 0x3c a temporary created before TDStageGroup's `this` binding (in GCLogoDir it sits in the parse-time block, above the TDStageDisp flag temporary and the TColor one); 0x38 TDStageGroup `this`; 0x34 **X**; 0x30 list `this`; 0x2c **Y**; 0x28 list TViewObj `this`; 0x24 allocator; 0x20 FrmGXSet's TViewObj `this`; 0x14-0x20 twelve bytes created after every binding.
+- X is a depth-1 object created after the TDStageGroup expansion, Y a depth-2 object created after the stage group's list and FrmGXSet bindings.
+  Breadth-first expansion (frame-model.md rule 7) puts a *later statement's* depth-1 and depth-2 objects exactly there, and GCLogoDir confirms it: X sits between TDStageGroup's `this` and the next `new`'s binding, where lines 80-81 (the pad) are.
+  SelectDir has neither: its `new TDStageGroup(unk1C)` is followed by out-of-line constructors, not by a pad statement.
+- c-k20's candidates `@1680`, `@1682`-`@1684`, `@1686`, `@1688` are return labels (`L@...`), not eliminated objects.
+
+### What landed
+
+- `TDStageGroup(TDisplay*, const char* = "<TDStageGroup>", TFlagT<u16> = 0)`, the flag unused, as JDrama's other creatable objects spell it (TDStageDisp, TEfbCtrlDisp, TEfbCtrlTex).
+  Its temporary is the 0x3c word at all four sites and its per-field IRO copy (2 bytes) one bottom word: +8 on MenuDir/MovieDirector/GCLogoDir setup and SelectDir rsetup, nothing else moves (census 12023 -> 12023, 4 up / 0 down).
+- The pad statement: `unk2C->mFlags = 1` is `getGamePad()->setFlag(1)`, with `setFlag(u16)` a plain TMarioGamePad setter and `getGamePad()` a class accessor of TSelectDir::getGamePad()'s shape (`TMarioGamePad* gamePad = unk2C; return gamePad;`) on TMenuDirector, TMovieDirector and TGCLogoDir.
+  The setter's receiver binding is X, the accessor's named pointer Y, and the rest of the bottom region their IRO copies; a plain `return unk2C;` accessor gives X only.
+  MenuDir and MovieDirector setup exact (census 12023 -> 12025), GCLogoDir setup 0x260 -> 0x270; the TU-local binders MenuDirUnk2C and TGCLogoDirGetGamePad are now the member accessor (byte-identical).
+- The same accessor at the other frame-short pad sites, one site at a time: TGCLogoDir::setup's `mProgSelect->mGamePad = getGamePad()` +8, `direct` +8 (0x50 of 0x78), `direct_nlogo` +0x18, TMenuDirector::direct +0x10, TMovieDirector::direct +0x38 over four sites (every instruction and register unchanged).
+  Worse, left raw: the TMenuPlane arguments in MenuDir rsetup (code changes), TMovieDirector's dtor and `decideNextMode` (exact today with the plain `MovieGamePad` fork; the binder adds 8), GCLogoDir's two `mState != 2` tests (inert).
+- `new JDrama::TDStageDisp("<DStageDisp>", 0)` (SelectDir's spelling) at the other three sites puts that flag temporary where retail has it, in the parse-time block: hsearch dbg order/gap GCLogoDir setup 1/54 -> 0/14, MovieDirector rsetup 1/68 -> 0/14, MenuDir rsetup 2/96 -> 1/52 words; score-neutral, landed (c14ae656).
+
+### Measured on the way (synthetic director TU, `tools/mwcc-stack` dumps)
+
+- An inline's argument bindings are created left to right (the first argument highest); a result object is created before them; default-argument temporaries of calls inside an inline ctor body are callee temporaries of that ctor (created before its `this`, so above it).
+  A default-argument temporary of `new` on an *inline* ctor is created in source order with the parse-time temporaries; on an *out-of-line* ctor (TDStageDisp) it is created after every parse-time temporary of the function.
+- Reference parameters force a binding for a simple argument: `TFrmGXSet(TDisplay* const&)` gives one dead word after TDStageGroup's `this`, `TDStageGroup(TDisplay* const&)` one after the list's; `const`/`void*`/cast/body-assignment spellings are inert.
+  A one-level identity call on the display at the `new` and in `unk20(...)` reproduces MenuDir exactly too, but adds a word in SelectDir that retail lacks; that is how the pad statement was found.
+- `TFlagT<u32> = 0` on TViewObj and TFrmGXSet also reproduces MenuDir's offsets, but the map's weak `__ct__Q26JDrama8TViewObjFPCc` (called with one argument from nine units) rules out any second TViewObj parameter.
+- A named local in TNameRef's or TViewObj's ctor is ruled out by their weak copies' 0x18 frames (`u16 key = calcKeyCode(name)` is also inert: it takes a register); a class `operator new` would add a word at every exact `new` of a TNameRef class.
+- Not the MarDirector class: the same binder shape on `TMarDirector::getGamePad(int)` is 3 down / 0 up tree-wide and breaks the DOL (`setup2`, `evInvalidatePad`, `evOnNeutralMarioKey`), so its deficits (currentStateFinalize and the rest) keep the plain accessor and stay open.
+- Left open: GCLogoDir setup (two words between the TNintendo2D/TProgSelect push_backs, the JGadget iterator stride, two bottom words), MenuDir/MovieDirector `rsetup` (no TDStageGroup; list/iterator classes).
+
+## Research batch c-r29 (2026-09-29): the director deficits are binder-shaped member accessors and a BOOL pad test
+
+Question: apply c-r28's two mechanisms (default-argument temporaries, later statements' accessor objects landing breadth-first) to the director `direct`/`setup`/state functions.
+Answer: the missing words are the second mechanism, and the accessors that carry them have one shape: `T* get() { T* x = m; return x; }`, the shape c-r28 found for the directors' `getGamePad()`.
+The same shape on `TApplication::getFader()` and on further director members, plus a `BOOL` return on `TMarioGamePad::isSomethingPushed()`, lands most director frames.
+
+### What landed (wt/c-r29)
+
+| Function | Before | After | Retail |
+| --- | --- | --- | --- |
+| TMovieDirector::direct | 0x1f8, other | **exact** | 0x270 |
+| TMarDirector::moveStage | 0x50 | **exact** | 0x70 |
+| TGCLogoDir::direct | 0x50 | 0x78, slots (1 word) | 0x78 |
+| TGCLogoDir::direct_nlogo | 0xa0 | 0x130, mState reload only | 0x130 |
+| TGCLogoDir::direct_dolby | 0x38 | 0x68, mState reload only | 0x68 |
+| TGCLogoDir::setup | 0x278 | 0x280, slots (JGadget stride) | 0x280 |
+| TSelectDir::direct | 0x58 | 0xc8, every temporary on retail's slot | 0xd0 |
+| TMarDirector::nextStateInitialize | 0x98 | 0x130 (98.55 -> 99.47) | 0x160 |
+| TMarDirector::changeState | 0x100, other | 0x148, every register right | 0x168 |
+| TMarDirector::currentStateFinalize | 0x90 | 0xd0 | 0x120 |
+| TMarDirector::updateGameMode | 0xa8 | 0xd0 | 0x130 |
+| TMenuDirector::direct | 0x90 | 0xb8 | 0x128 |
+| TGuide::perform | 0x260 | 0x298 | 0x2b8 |
+
+- `TApplication::getFader()` is `{ TSMSFader* fader = mFader; return fader; }`, used for `gpApplication.mFader` at the fader sites of every director (d8b7b9f9).
+  Every director frame moves toward retail and none overshoots except GCLogoDir setup's `setColor` site, which stays raw (its `startWipe` takes the accessor).
+  A plain or `const&` return is inert.
+  Inside TApplication's own members `mFader` stays raw: `getFader()` there changes code in `proc` and `initialize`.
+  setupObjects' TU-local `MarDirectorFader()` binder (cc32) was this accessor; it and the `MarDirectorCurrentStage()` fork are now `gpApplication.getFader()` and `mCurrArea.getStage()`, byte-identical (70ec682a).
+- `TMarioGamePad::isSomethingPushed()` returns `BOOL` (60ea6329).
+  Its bool-to-int conversion makes the call a value, so a test like `a && pad->isSomethingPushed()` keeps a dead forced-load word (TApplication::proc's `!` tests moved too, 0x78 -> 0x80).
+  This is what hsearch found as "name the pushed value" in TMovieDirector::direct and what cc32 found as a named `bool pushed` in TSelectDir::direct; it closes TMovieDirector::direct with no site change.
+  Measured against a named-local body, `? true : false`, an if/return body and a raw `(mValue & bit) != 0`: those change code in MovieDirector, SelectDir and TApplication::proc; `BOOL` changes no instruction and only moves frames toward retail, in all five units that call it.
+- `TGCLogoDir::getProgSelect()` and `getNintendo2D()` and `TSelectDir::getSelectMenu()`, same shape, invented names (ace6f0ea, f12bf941).
+  getProgSelect() at every read of direct and direct_nlogo gives direct_nlogo retail's 0x130 exactly; setup, which reads `mProgSelect` right after assigning it, stays raw (the accessor overshoots there).
+  getNintendo2D() at one of direct's three TNintendo2D reads closes direct's frame (any one of the three gives the same layout; two overshoot by 8).
+  getSelectMenu() at all seven reads of TSelectDir::direct overshoots the low region by three words; at six (without the `mCloseMenu` read or without the first `mSelectedShine` read) every temporary and `res` sit on retail's slots.
+- moveStage then closed under hsearch (ae72c85d): raw `nextArea.unk1` for the two scenario tests (the stores beside them are raw) and `gpMarioOriginal->getFludd()`.
+- TMarDirector's own accessors are plain (the binder shape loses tree-wide, below), but the state functions read raw what retail read through them: `getGamePad()` for every `unk18[0]`/`unk18[i]` (`offFlag` for the `mFlags &= ~f` stores), `getStage()`, `getConsole()`, `getPortNum()`, `getTalkMode()` and `getTalkingNPC()` (18bdbf24, ffec580a).
+  Spelled at every site they move nextStateInitialize 0xc0 -> 0x130, currentStateFinalize 0x98 -> 0xd0, updateGameMode 0xa8 -> 0xd0 and changeState 0x140 -> 0x148 at unchanged instructions; the exceptions change code (`getTalkingNPC()` as openTalkWindow's argument).
+  changeState's r27/r29 swap was its `TConsoleStr* str` declared in the else block: declared at the top it takes retail's registers (hsearch `decl-hoist`).
+
+### Measured and rejected
+
+- A binder-shaped `TMarDirector::getConsole()`: census 12028 -> 11996 exact (2 up / 34 down, the DOL breaks), so the MarDirector accessors are not this shape; neither is `TApplication::getMovie()` (MovieDirector direct overshoots to 0x2c0, decideNextMode to 0x100).
+- TApplication::proc: `getFader()` at any one of its five `mFader` sites changes code.
+- TMarDirector::currentStateFinalize: every combination of `getGamePad()->offFlag`, `unk18[0]->offFlag`, `mCurrArea.getStage()`/`getScenario()` and `getConsole()` reaches at most 0xd0 (retail 0x120); a static inline holding the repeated "Group 2D" off / "Guide" on pair is inert.
+  hsearch (240 s each, after these landed) finds no honest exact for it, changeState, TMarDirector::direct (its best 0x198 frame costs 25 register mismatches) or TMovieDirector::rsetup; their best spellings name single-use BOOL values or cut machine helpers.
+- TMenuDirector::direct: a member binder over `unk40` at all seven reads gives 0x108 at unchanged instructions (retail 0x128), but the remaining words (five depth-1, two among setNextArea's depth-2 objects, one at the bottom) are not supplied by the `unk44`/`unk38` binders (each show/hide site is one depth-1 word plus two bottom words; the checkFlag and setString sites change code) or by any `setNextArea` spelling.
+  Not committed: the binder alone moves the frame but not the score.
+- TGCLogoDir's `mState` reload after the pad test (direct_nlogo, direct_dolby): with the frames exact nothing that adds an object can supply it, and an inline mState reader at the test or at the tail, `mState != nextState`, a named or `!= false` pad result and a pad-test helper all leave ours CSE-ing the load.
+- TGCLogoDir::direct's last word (between the rect and colour temporaries): named rect/colour locals, `TColor(u32)`, a `.get()` colour and TNintendo2D setter levels (which change code) are all worse.
+- decideNextScenario: our dump has no dead object at all (the inlined shadow-Mario loop's bool and counter take registers); retail's 6-8 words stay unexplained.
+
+### Reading
+
+- The directors' source reached their own members and the application's fader through getters of one binder shape; where the tree read the member raw, the frame is short by one depth-1 word (the named local) plus its forced-load and comma words per site.
+  Reads right after the member is assigned (`mProgSelect = new ...; mProgSelect->...`) and reads inside the owning class stay raw.
+- A value-context use of a `bool` accessor is free, but of a `BOOL` accessor costs a word: when a pad or flag test is short one word per site and the test is an `&&` operand, check the accessor's return type before naming the value.
+
+## Research batch c-r30 (2026-09-29): a tree-wide sweep of header accessor shapes
+
+Question: is c-r29's binder shape (`T* get() { T* x = m; return x; }`) or a `BOOL` return a house style for header accessors, so that it could be applied tree-wide?
+Answer: no; both are per-class facts, and the binder shape wins only on a handful of accessors, each owned by one class and read from few units.
+
+### Method
+
+`tools/accessor-candidates.py` lists every one-line header accessor (getters, predicates, and since this batch accessors with parameters) with its caller counts.
+`tools/accessor-sweep.py` rewrites one accessor at a time, builds only the units whose bodies call its name (at most 40, `-j2`), and compares a census against the base.
+A probe with ups and no downs then gets a full tree-wide measurement with `tools/shape-measure.sh` (full build, DOL SHA-1, `ninja changes_all`, census, validate-symbol-order).
+`tools/fold-binder-helpers.py` folds a TU-local binder helper into the header accessor it emulates, and a raw-member respelling tool searches which sites of a function read the member raw.
+A change was kept only when no function dropped anywhere and at least one improved.
+What counts: a census class change (exact/slots/frame/other) or a frame-size move is an up or a down, and so is any objdiff fuzzy drop that `changes_all` reports, even when the census class of that function improved.
+The probe sees only the calling units, so a clean probe is not a result until the full measurement agrees (getTalkMode was clean in the probe and 1 up / 1 down tree-wide).
+
+### What landed (wt/c-r30)
+
+| Accessor | Function | Before | After | Retail |
+| --- | --- | --- | --- | --- |
+| TMarDirector::getTalkingNPC | TMario::readBillboard | 0x30 | 0x38 | 0x70 |
+| TMarDirector::getTalkingNPC | TMarDirector::updateGameMode | 0xd0 | 0xe0 | 0x130 |
+| TBGCheckListWarp::getPreNode, then TBGCheckList::getNext | TMapCollisionData::removeCheckListData | 0x48 | **exact** | 0x70 |
+| TBGCheckListWarp::getPreNode, then TBGCheckList::getNext | TMapCollisionData::updateCheckListNode | 0x48 | **exact** | 0x60 |
+| TCardManager::TCriteria::getWriteCount, then getState | TCardManager::writeBlock_ | 0x58 | **exact** | 0x70 |
+| TCannon::getChorobei | TNerveCannonSearch::execute | 0x170 | 0x190 | 0x198 |
+
+TMapEventSink::getRaisingBuildingIdx, TTinKoopa::getTruckMActor and TOptionSubtitleUnit::getParentPane took the binder shape in place of their TU-local binder helpers at zero census change (no function moved), which removes fabricated helpers.
+getNext and getState landed only with the sites that dropped read raw (MapMakeList's list walkers, getBookmarkInfos_'s read loop): a header binder that gains in one unit and loses in another often means the losing unit read the member raw.
+
+### Results by shape
+
+- Binder shape, 181 accessors probed: 5 clean, 30 inert, 75 only down, 71 mixed.
+- The widely shared accessors lose heavily as binders: TLiveActor::getMActor 17 up / 210 down, TSpineBase getTime 10/179, getBody 14/138, getCurrentNerve 6/135, SMSGetMSound 28/111, SMSGetMarDirector 7/63, THitActor::getActorType 4/53.
+- So retail's binder-shaped accessors are specific classes (the directors, the BG check lists, the card criteria, TCannon), not a JSystem-wide or game-wide style; ups on a widely shared accessor are usually functions whose missing word comes from elsewhere.
+- Bool to `BOOL`, 27 predicates probed: none gained, 18 inert, 9 dropped.
+- A predicate used only as a branch condition is inert under `BOOL`; where it moves, it changes code rather than frames (TMarioGamePad::checkMeaning 3 down, TMarioGamePad's isAHit/isAPressed/isBPressed/isBHit turn TEnemyMario::checkController from exact to other).
+- TMarioGamePad::checkFlag as `BOOL` is inert; TMarioGamePad::isSomethingPushed (c-r29) stays the only `BOOL` pad predicate the binary supports.
+- Accessors with parameters (getObj(i), getGraphNode(i), getJointModel(i), getChild(i), checkFlag(flag), checkLiveFlag(flag), isActorType(t)): none clean; ObjManager getObj(i) is 2 up / 40 down.
+- Folding TU-local binder helpers into their header accessor dropped in 14 of 20 attempts (the item/sound/bombhei/hamukuri holders 16 down, the FLUDD accessor 13, PollutionLayer's children count 8): most of those helpers exist because the other units read the accessor plain.
+- TGraphTracer::getGraph as a binder (const, non-const, or both) is 4/24, 0/4 and 5/20.
+
+### Held back
+
+- TMarDirector::getGamePad(int) as a binder moves updateGameMode 0xe0 -> 0x110, currentStateFinalize 0xd0 -> 0xf8 and changeState 0x148 -> 0x158 (retail 0x130, 0x120, 0x168).
+  With it, EventWatcher's pad helper folds exactly as `SMSGetMarDirector()->getGamePad()->invalidate(frames)`, and evOnNeutralMarioKey stays exact as `gpMarDirector->getGamePad()->onNeutralMarioKey()`; reading `unk18[0]` raw there drops its frame from 0x30 to 0x20, which is direct evidence that retail's accessor binds.
+  It is blocked by TMarDirector::setup2: folding Setup2GamePad keeps the 0x410 frame but places the fader TColor and the JUTRect temporaries 4 bytes low (17 slot markers).
+  Every other setup2 pad read spelled through getGamePad() overshoots to 0x418, the camera's own `setGamePad()` or a setter helper overshoots too, and a raw camera read changes code.
+  changeState's fuzzy score also drops 99.93 -> 99.92 under it, which `changes_all` counts as a regression.
+- GameSequence getScenario as a binder: changeState's frame moves toward retail but its fuzzy score drops 99.93 -> 99.92, the same cost getGamePad shows there, so changeState's frame words and one of its slot offsets are tied.
+- Talk2D2 getTalkMode, MarDirector getStage, getInitialBounds, BossWanwan getRope/getPicket: one down for each up in the full measurement.
+
+## Research batch c-sh1 (2026-09-30): one shared definition per duplicated TU-local helper
+
+Question: the TU-local helpers that worktree agents parked for want of shared-header access include the same computation spelled in several units; which of them can share one header definition without a regression?
+Method: group the 1341 `static inline` helpers under src/ and libs/*/src by body (names, parameters and local names normalised), put one definition in the owning header, delete the copies, and measure the full tree (objects, census, `ninja changes_all`, DOL SHA-1, validate-symbol-order of every unit whose object changed).
+A spelling was kept only where every site it replaced stayed byte-identical or improved.
+
+### Promoted (one definition, every copy of that spelling removed)
+
+- MathUtil.hpp `WrapDirectionF` (fmodf wrap: koopajr, wireTrap, BathtubPeach, MapObjCorona, KoopaNerve.hpp) and `WrapDegreesF` (BathtubPeach, the Koopa units): byte-identical.
+- MathUtil.hpp `WrapDirection` (TUtil mod wrap with the named result): koopajr's copy plus Koopa.hpp's unnamed `KoopaModDirection`; the named result moves both Koopa Turn nerves' frames 0x10 toward retail (0x148 -> 0x158 and 0x150 -> 0x160, retail 0x1a0/0x1a8).
+- MathUtil.hpp `fromPolar`: bossgesso, bgtentacle, bosswanwan's and fruitsboat's `MsGetVecFromRotY`, and bosspakkun's `BosspakkunFromPolar(s16)` called with the degree angle; all byte-identical.
+- MathUtil.hpp `MsDistance` (named copy, in-place sub, length): walkerEnemy, fireWanwan, riccohook.
+- Enemy.hpp's existing `TSpineEnemy::calcDist` replaces AnimalNerve's identical `calcDist`.
+- MathUtil.hpp `MsAngleBetween` (Mamma, Koopa), `MsSquaredDistXZ` (NpcWalkTurn, BossHanachanMain), `MsSquaredDist` (NpcBase, CameraNotice; getNoticeActor_ 97.08 -> 97.13).
+- MSound.hpp `MSGetEarPos` (MSoundSE, MSoundMainSide); MSHandle.hpp `MSGetSeCategory` (the three `get_thing` copies; MSoundSE loses a stray local symbol).
+- CubeManagerBase.hpp `TCubeManagerBase::getCube` (the begin()-depth lookup of bosseel and MSoundMainSide); PathNode.hpp `TPathNode::getPointRaw` (ten units' raw getPoint copies).
+- Global binders `T* x = gGlobal; return x;` as `...Bound` accessors beside the plain one: director (21 copies), MSound (29), particle manager (21), map (6), camera shake (6), camera (3), item manager (3), flag manager (4), player (4), rumble manager (3), water manager (4), Mario position (4); three direct-return director copies became SMSGetMarDirector().
+- Every promotion above is byte-identical except where noted; a header inline built from a template constructor (MsSquaredDistXZ) or a new class member (getPointRaw) renumbers local `@`/`$` labels in every includer, which changes no code, no symbol order and not the DOL.
+
+### Not unified (the sites need different spellings)
+
+- setCenteredSize: no single body serves CardLoad, CardSave, ConsoleStr and Guide.
+- With every site routed to the header, each body drops 8 to 12 exact functions: the header's two named bounds, `Wr` (width raw, height named), `WHh`, `Ww` and upstream's all-raw `Rr` differ only in frame, by 8 bytes per named or accessor-read bound.
+- waitForStart is frame-exact (98.09 -> 98.34) only with `Rr` at all four of its sites; the other 24 mixes of the five spellings (open pair, close pair) leave it 8 to 0x40 long, and `Rr` at CardLoad's other close sites costs three exact functions.
+- CardLoad now holds `Wr` and `Rr` (its unused `WHh` and `Ww` copies are gone); CardSave keeps `WHh` and `Wr`.
+- fromPolar: fireWanwan's Fly nerve wants the named result (97.57 -> 96.47 on the shared body), tamaNoko's walkBehavior the named angle (exact -> frame 0x10 short), and polarXZ in enemy/riccohook/walkerEnemy the named cosine and sine (8 bytes of frame at two sites); the shared body with the named angle costs five functions.
+- WrapAngleDiffF (MapObjCorona) spelled as `WrapDegreesF(a - b)` drops getNearGrip from exact: the subtraction belongs inside the level.
+- Copy-and-subtract distances: TSpineEnemy::calcDist's by-value copy costs walkerEnemy, fireWanwan and riccohook 8 bytes each and emario's perform 98.18 -> 73.48, so MsDistance and EMarioCalcDist stay separate.
+- Squared distances: enemyMario's one-expression sum, CameraMultiPlayer's unnamed products and MapObjSirena's reused dz each lose exact functions on MsSquaredDist.
+- getCubeInfo's `(*unk14)[i]` and getCube's `begin()[i]` cannot share a body: either one at the other's sites costs CubeManagerBase or MSStageCubeFade (and the begin() weak copy).
+- Binders over the header accessor (`MSound* x = SMSGetMSound(); return x;`, 25 copies; the director, flag manager and getCurrentMap families too) are 8 bytes smaller at every site as the raw-global binder (32 functions drop), so they are a separate family and stay TU-local.
+- Binders over member accessors (getCurrentMap, getHeldObject, getModel, getConsole, checkFlag) were not folded; c-r30 already showed their header accessors cannot take the binder shape.
+
+## Research batch c-r31 (2026-09-30): no single accessor body serves both the plain and the `...Bound` global sites
+
+Question: is there one honest spelling of a global accessor (specimen `SMSGetMarDirector`/`SMSGetMarDirectorBound`) that reproduces both the plain sites and the c-sh1 `...Bound` sites, so the fabricated duplicates can go?
+Answer: no; every accessor body adds a fixed number of dead words per expansion in every call context, and the Bound sites need two more than the plain sites in the same contexts, so the difference has to come from something else in those functions.
+Nothing landed; the `...Bound` accessors stay.
+
+### The cost ladder is a constant shift per body (synthetic TU, marker method)
+
+Dead words per expansion over a raw `gp->` read, measured with `int mk; extp(&mk);` declared first, GC/1.2.5 with the game flags, in seven contexts (`gp->getConsole()->f(x, true);`, `if (gp->mMap == 3)`, `u8 m = gp->mMap; if (m != 7 && m != 4)`, a member store, `if (!gp->isTalk())`, a root member call, and `a == 3 || a == 59` with two reads).
+- Plain `{ return gp; }` is +1 (one F forced load), 0 when the value feeds a call directly.
+- The binder `{ T* x = gp; return x; }` is the plain cost +2 in every context: the callee local and the P comma temporary (dump of `TBossPakkun::showMessage`: inline 2, F 2, P 1 against the plain spelling's 3).
+- `T* f(T* d = gp) { return d; }` (a default argument) and an identity inline over the raw read (`id(gp)`) equal the binder exactly; an identity inline over the plain accessor is +3.
+- A statement body without a local (`{ (void)0; return gp; }`, `return ((void)0, gp);`) is plain +1.
+- Equal to plain: a `T* const` return, `static inline`, `*&gp`, a class-static getter, a namespace-struct getter, a `T* const` global, a two-level accessor (`return Plain();`), a same-type cast; a base-typed global with a derived cast is plain except +1 under a predicate.
+- Equal to raw: `T*&` and `T* const&` returns.
+- Statement mode against expression mode (c-r24) moves nothing here: the root member call, the receiver of an out-of-line root call, a `!` operand, a store and an inline's argument all keep binder minus plain at exactly two words.
+- So a body X costs plain + k at every site for a fixed k; the plain sites need k = 0 and the Bound sites k = 2 in the same contexts (`...->getConsole()->startAppearBalloon(N, true);` is plain in TNerveBossEelDie, BossHanachanNerve and chuuhana and Bound in TNerveBossEelWaitAppear, bossManta and fireWanwan).
+  No accessor body, qualifier or declaration of the global can serve both.
+
+### Tree-wide checks (census against the base, 12038 exact)
+
+- Bound's body as the plain one (the duplicate simply deleted): 0 up / 37 down (32 exact lost), all frame-only.
+- Bound's body as the statement body `{ (void)0; return gp; }`: 0 up / 31 down, every one 8 short or with slots 4 low.
+- Every plain `SMSGetMarDirector()` site respelled raw `gpMarDirector` (72 units): about 100 down, so the plain sites are real one-word expansions and not raw reads.
+- The plain accessor as the binder: c-r30's 7 up / 63 down.
+- One uniform body does fit `TMantaMessageState::update`'s three identical balloon statements: its 0x98 frame takes raw+Bound+Bound, plain+plain+Bound or the statement body at all three; the statement body there is the only uniform one, and the same body loses 30 functions elsewhere.
+- Frames pin only the count: in the slot-class specimens (TNerveBossEelWaitAppear, TNerveFireWanwanDie) the named `marioPosition` at the top moves with the total, not with where the binder's words sit, so any honest source of the same two words anywhere in the function would do.
+
+### Leads, not landed
+
+- `SMSGetMarDirectorBound()->mMap` in a condition equals `SMSGetMarDirector()->getCurrentMap()` (3 words each) and `->unk7D` equals `->getCurrentStage()`: bossgesso's six mMap sites, bosspakkun's and hinokuri2's unk7D sites and MapObjBall's lines 814 and 876 respell byte-identically; MapObjBall's makeObjWaitingToAppear and perform sites drop (receiveMessage 8 short, perform slots).
+  Not committed: getCurrentMap and getCurrentStage are themselves fabricated names, so it swaps one frame carrier for another and leaves the Bound accessor in place.
+- The Bound sites share no call shape that the plain sites lack (the same `isDemoMode3() || isDemoMode4() || isTalkModeNow()` test is raw in MarioMove and Yoshi and Bound in WaterGun and enemyMario), and most Bound functions carry other fabricated binders (fireWanwan's tail-hit and manager helpers, bosseel's cube-manager binder, MapObjBall's unk1A4 binder).
+  The missing words belong to per-function structure (a missing inline level or a different local), which is closure work, one function at a time.
+- The map has no inline evidence for a second director or sound accessor: no `TMarDirector` inline is emitted anywhere, and the weak `SMSGetMSound__Fv` (8 bytes, Option.cpp) and `SMS_GetMarioPos__Fv` (bossgesso) are one-load bodies that the plain and the binder shape both compile to.
+
+## Closure batch c-k21 (2026-09-30): replacing `...Bound` sites one function at a time
+
+Question: for each function that reads a global through a fabricated `...Bound` accessor, which real construct supplies the binder's two stack words?
+Answer: for 89 of the 274 sites (in 52 functions) an existing construct respells the site byte-identically; `SMS_GetMarioPosBound` lost its last user and is deleted, and the other eleven accessors keep users.
+Every commit is one function, byte-identical code (per-function disassembly compared against HEAD), the DOL SHA-1 unchanged, `ninja changes_all` clean and validate-symbol-order unchanged.
+
+### What landed (wt/c-k21)
+
+- `SMSGetMSoundBound()->startSoundActor(id, pos, 0, nullptr, 0, 4)` is byte-identical to `SMSGetMSound()->startSoundActor(id, pos)` at 46 sites in 22 functions, and the handle form to the three-argument overload (TMapObjBillboard::swing).
+  The short overload binds its JAISound* result, and that binding is the same two words as the binder's; so these sites are the short call, not a bound receiver.
+- The same short overload also replaces an explicit `if (SMSGetMSoundBound()->gateCheck(id)) MSoundSE::startSoundActor(...)` pair in TNerveHanaSamboAttack::execute and TSamboHead::setAfterDeadEffect.
+  At the other gate pairs (bosspakkun, koopajr, popo, yunbo) it changes code or overshoots, so those gates are real.
+- c-r31's lead holds where the site is not inlined elsewhere: `->mMap` as `getCurrentMap()` in TNerveBGDie::execute (seven sites), TResetFruit::checkGroundCollision and waitingToAppear, and `->unk7D` as `getCurrentStage()` in TBossPakkun::gotHipDropDamage and TNerveHino2GraphWander::execute.
+  TResetFruit::makeObjWaitingToAppear cannot take it: receiveMessage inlines it and drops 100 -> 99.96.
+- hsearch, run on a copy of the tree with every Bound site respelled plain or raw (45 s per function, `-j 1`), found header accessors that supply the words:
+  `getPosition()` (TBossEel::updateTearsCnt, TCogwheelScale::touchPlayer, TCannon::bombShoot, TEnemyMario::startDisappear, TNerveYumboAppearing::execute with SMS_GetMarioPos()), `getLeash()` (TBossWanwan::emitEffects), `getDistToMarioSquared()` (TFireWanwan::updateRumble), `getCurrentBck()` (TNerveHino2Squat::execute), `getDamageStage()` (TNerveTinKoopaDamage::execute), `getActorKeeper()` (TPopo::possessedIn), `SMS_GetMarioAngleY()` (TMapObjGeneral::put).
+  The short sound overload at a neighbouring plain site closes TNerveFireWanwanDie::execute and TDemoCannon::perform.
+  A named `MSound* sound` receiver closes TKoopaJr::receiveMessage.
+- A sweep over every function with a Bound site, respelling its Bound calls plain or raw and every six-argument `startSoundActor(id, pos, 0, nullptr, 0, 4)` in it short, found six more byte-identical functions: TNerveBGDie::execute (its item-manager and demo-state sites), TShiningStone::putOnLight, TMapObjPuncher::touchPlayer, TAmiKing::calc, TMario::checkGraffitoFire, TYoshi::thinkHoldOut; TMareFall::calc the same by hand.
+  There the two words belonged to a neighbouring sound call, not to the particle or position read.
+- TBossEelAwaCollision::perform takes `getPosition()` in its first height test and `mPosition` in its second; retail re-reads Mario's position for each test, so no named value serves, and this is the only spelling of its frame found.
+  With it and TMapObjPuncher::touchPlayer, SMS_GetMarioPosBound has no user left and is removed from MarioAccess.hpp.
+- TBathtub::showMessage (UNUSED, 0x64) takes a bit index and shows balloon `0x1E + index`: that body is exactly the map's 0x64 (the old one was 0x60).
+  TBathtub::perform's seven balloon blocks are this body with the index folded (0-5 give 0x1E-0x23, 15 gives 0x2D).
+
+### Measured and rejected
+
+- A named receiver (`T* x = plain; x->f();`) in place of the Bound call is byte-identical at only three of 50 statement-level sites (koopajr, MarioSound, fireRideYoshi); elsewhere the named slot lands in the named block, not the low region.
+- `isDemoModeNow()` for `isDemoMode3() || isDemoMode4()` changes code (the combined inline materialises the bool).
+- Calling showMessage from TBathtub::perform (any of four bodies, plain, raw or bound time read) leaves the frame 0x38-0x60 short of retail's 0x168: the eight Bound sites and the shine fork there are fabricated, and whatever really fills that frame is still missing.
+- TBossPakkun::showMessage(0) is inlined in TNerveBPVomit::execute (spelling the call there keeps every instruction), but with the Bound body the nerve is 8 over and with the plain body its slots move.
+- A named `s64 ticks` inside TMarDirector::startTimer (the getRestTime style) adds no frame.
+- `!isDemoMode3()` for `->unk124 != 3` in TNerveBGDie::execute, `*gpMarioPos`, SMS_GetMarioY/Z and getPosition() variants in TMapObjPuncher::touchPlayer, and plain getCurrentMap() at TResetFruit::perform: all worse.
+- hsearch's other exact results named single-use values (`spine->getTime()`, `isBckAnm(4)`, `getActorType()`, a loop's bool) or combined several unrelated moves; none were taken.
+
+### Reading
+
+- The Bound sites are not one construct: sound sites were the short overload, and many other sites were a raw member read that retail spelled through its header accessor somewhere else in the same function.
+- Before respelling a site, check whether another function inlines it (MapObjBall's makeObjWaitingToAppear into receiveMessage and perform): a byte-identical function can still move its inliners.
+- UNUSED helpers whose bodies fold into a caller (TBathtub::showMessage, TBossPakkun::showMessage, THinokuri2::shakeCamera, TFireWanwanManager's balloon checks) are the next lead for the balloon and shake sites.
+
+## Closure batch c-k22 (2026-09-30): a site-level sweep for the `...Bound` stack words
+
+Question: which real constructs, beyond c-k21's, supply the two stack words of the remaining 185 `...Bound` sites?
+Answer: 46 sites in 32 functions respell byte-identically (whole object compared against HEAD, DOL SHA-1 unchanged, `changes_all` clean, symbol order unchanged); 139 remain and no accessor lost its last user.
+Per accessor: MarDirector 11, ParticleManager 12, MSound 8, Map 6, FlagManager 3, Mario 2, and one each for CameraShake, ModelWaterManager, Camera and RumbleMgr; ItemManager's two sites (TMonumentShine::receiveMessage, TItemManager::newAndRegisterCoin) found no carrier.
+
+### Method
+
+- A scratch sweep compiled each variant of one unit in a shadow tree and compared every function of the object with the HEAD compile (words and relocation targets), so an inliner that moves is caught.
+- Per function it removed one or two Bound sites (plain or raw) and applied the same number of single-site alternates, then pairs and triples mixed across kinds.
+- Alternates: the short `startSoundActor(id, pos)`, a const-reference or member-level header accessor for a raw member read (`getPosition()`, `getRotation()`, `getScaling()`, `getVelocity()`, `getGroundHeight()`, `getHolder()`, `getSpine()`, `getMActor()`), `getCurrentMap()`/`getCurrentStage()`, and a raw global read respelled through its plain accessor (`gpMarDirector->` as `SMSGetMarDirector()->`, likewise gpMSound, gpMap, gpCamera).
+- Word prices measured on the way: a const-reference accessor read is +2 words, `getCurrentMap()` +2, a plain global accessor +1 over the raw read, so one Bound site trades for one accessor read or for two plain-global reads.
+
+### What landed (wt/c-k22)
+
+- Accessor reads that make a function consistent were preferred, and a hit was taken only when the respelled reads read naturally:
+  `getPosition()` at TBossHanachan::bind, TNerveCannonDamage (demo camera copy), TEnemyMario::emDownAnimation (both reference copies), TBGKMtxCalc::calc, TMario::thinkYoshiHeadCollision, TMario::checkWet, TCogwheel::control and TManhole::touchPlayer;
+  `getRotation()` at TCraneRotY::control and TCraneUpDown::control (both limit tests) and ExecSpinNerve_Sub (both wrap tests);
+  `getGroundHeight()` at TBossHanachan::bind and TResetFruit::checkGroundCollision, `getVelocity()` at TResetFruit::perform, `getHolder()` at TDangoHamuKuri::receiveMessage and TGCConsole2::checkChangeTelopArray, `getSpine()` at TBiancoGateKeeper::emitParticles and the else arm of TBossPakkun::gotHipDropDamage, and `getScaling()`/`getRotation()` at TMuddyBoat::control.
+- The short sound overload at TMareWallRock::movement, TNerveBGEyeDamage, TNerveBGKDie, TMapObjBase::perform (both state sounds, both director reads plain), TFluff::control, TRiccoWatermill::control, TNozzleTrigger::movement and TYoshi::doEat.
+- Plain director reads: TMantaMessageState::update, TEnemyMario::emDownAnimation, TTalk2D2::forceCloseTalk, evAppear8RedCoinsAndTimer, TMario::isUnUsualStageStart and TNerveBGBeakDamage.
+- TNerveBGBeakDamage::execute loses all seven of its Bound sites: its two boss-theme tests take `SMSGetMarDirector()->getCurrentMap() == 3 || ... == 59`, the spelling the same unit already uses at four other sites, and the function improves from 19 slot mismatches to 8 (frame exact).
+- `getCurrentMap()`/`getCurrentStage()` also carry the words at TGCConsole2::checkChangeTelopArray and TMario::warpRequest.
+- THinokuri2::shakeCamera (UNUSED) is 0xa8 in the map: `if (getDistToMarioSquared() <= range * range)` adds the `cror` the old early return lacked.
+
+### Measured and rejected
+
+- The UNUSED helpers that hold Bound sites (ExecSpinNerve_Sub, TBossPakkun::resetWaterMark, TConductor::clipAloneActors, TSamboHead::setCrashAnm, TTalk2D2::closeTalkWindow, TYumbo::updateEffect) are all inlined into exact callers, so their Bound words are needed; only ExecSpinNerve_Sub found a carrier (its own `getRotation()` tests).
+- THinokuri2::shakeCamera does not fold into TNerveHino2GraphWander or TNerveHino2Stamp: retail tests the clip and airborne flags before the frame test there, and the helper tests them first.
+- TBossPakkun::showMessage with a plain body, called as `showMessage(1)` from TNerveBPTumbleOut (identical) and `showMessage(0)` from TNerveBPVomit (frame fixed, slots 30 to 8), leaves the out-of-line showMessage 8 short; seven body spellings (ternary mask, named console, bool, `!= 1` arms, zero-initialised mask) all do, so the out-of-line frame has two words the inlined copies must not have.
+- TMario::soundMovement accepts any three of its 24 six-argument sounds made short (920 of 1500 pairs byte-identical), so no site is identified.
+- TBGKMtxCalc::calc's second director site and TRiccoWatermill::control's wheel sound only fit with one accessor inside a call whose sibling arguments stay raw; TNozzleBox::load only with one of two identical `getNozzleRight(gpMarDirector->mMap, n)` arguments respelled; not taken.
+- Frames count words per path: in TResetFruit::checkGroundCollision the two `param_1->y <= mGroundHeight` tests sit in exclusive arms and only one Bound site can go, whichever arm takes the accessor.
+- TMonumentShine::receiveMessage: 42 combinations of `getPosition()`, raw sound receivers and `getActorType()` around the item-manager site all move code or frame.
+
+### Reading
+
+- Most remaining Bound sites sit in functions with no raw member read an accessor could carry (Talk2D2's 22 sound sites, the NPC event functions, TBathtub::perform, the gatekeeper and bosspakkun nerves); their words need a per-function structure, not a site respelling.
+- A unit's own spelling elsewhere is the best tie-breaker when several placements are byte-identical, as bossgesso's `getCurrentMap()` tests were.
+
+## Closure batch c-k23 (2026-09-30): the single-function units, with the new constructs
+
+Question: which of 25 units with exactly one non-exact function close with the constructs c-k21/c-k22/c-r31 found (accessor reads, plain global accessors, the short sound overload, UNUSED helpers, default-argument temporaries)?
+Answer: two functions closed and one unit linked; two more close only with shared-header changes, measured and parked below.
+
+### What landed (wt/c-k23)
+
+- TMario::jumpingBasic: the whole 0x48 of dead frame was accessor words: `getGroundPlane()->getActor()` at both receiveMessage reads, `getWallPlane()` at all seven wall reads, `getCurrentNozzleIndex()` and the short overload for the wall sound (hsearch, 52 s).
+  MarioJump is linked.
+- TEnemyManager::performShared: its two TTimeRec colours are call-site temporaries of a `startTimer(const JUtility::TColor& = JUtility::TColor(0xff, 0xff, 0xff, 0xff))` overload, parked TU-locally as `EnemyManagerStartTimer` (also used by TEnemyManager::perform, which stays exact).
+  A call-site temporary is created while the caller is parsed, so both colours sit together at the top of the pool (0xbc/0xb8) with countLivingEnemy's result below them; the header's four-u8 overload makes the colour an inlined local instead (0xbc/0xb4).
+- TShine::control, partial: the six short sounds, getInitialPosition() at both reads and the idle state's light block as one inline level take the frame 0xa8 -> 0xe8, and the debugger shows retail's six words above the GXColor temporary.
+
+### Parked for a shared-header change
+
+- TimeRec.hpp: replacing `startTimer(u8 r = 0xff, u8 g, u8 b, u8 a)` with the `const JUtility::TColor&` overload above (callers written `startTimer(JUtility::TColor(0xff, 0x00, 0x00, 0x80))`) is neutral tree-wide (livemanager, objmanager, ModelWaterManager unchanged, DOL SHA-1 unchanged) and closes performShared without the TU-local copy.
+- With it, TMario::perform closes with two more moves: `sil` dropped and gpSilhouetteManager read through a plain accessor at both silhouette sites (`inline TSilhouette* SMSGetSilhouetteManager()` in DrawUtil.hpp, a fabricated name with no map evidence), and the one raw `mWaterGun` site moved to any of the seven sites after the first CUE_MOVE call (the last, CUE_SEMITRANSPARENT_PRIO_1, is exact).
+  Measured on the full tree: no regression, MarioMain 100%, and MarioMain linked from source keeps the DOL SHA-1.
+  The accessor cannot be parked TU-locally (it would be a pass-through helper), so this waits for the header decision.
+
+### Measured and rejected
+
+- enemymanager cannot be linked even though every function matches: its .sdata2 pool orders the int-to-float double first in retail (@3073) and fourth in ours, so the double belongs to one of the UNUSED bodies before getFarOutEnemy (createCopyAnmMtx 0x15c or killOtherEnemies 0xa4), which are 4-byte stubs here.
+- TShine::control from 0xe8: `MsWrap(getRotation().y, ...)` at one discarded wrap is +8 (0xf0) and lands appearWithDemo's TFlagT at retail's 0xa0, but both wraps saturate at 0xf0 with more slot marks; all 128 mixes of short and six-argument sounds with or without SMSGetCamera() peak at 0xe8; SMSGetCamera() swaps r28/r29 in the demo block; a TVec3 temporary or an unnamed colour for the light changes code.
+  The debugger then wants three more words between the colour temporary and the flag.
+- TMonumentShine::hitByWater: one named epsilon used at both tests puts waterDir right (0x54) but pushes marioDir 4 low (13 marks); direct-initialised vectors, a `static const` up vector and `0.0f <` are inert.
+- TRideCloud::control: seven spellings of `300 * scaling.x * unk160` keep the f0/f1 swap or add a frame.
+- TBossHanachanPartsBase::considerSetAnm_: the debugger maps only the conversion temporary and wants ten dead words below it; hsearch reaches 0xf8 (getRotation().z plus a named getActorType), so the TODO's four-expansion lead stands.
+- TRKSuppAccessFile: the loop as a `for` with `done += length` as its increment and a `u8 replyIOResult` are inert (12 marks).
+- MarioCap, CameraDemo, enemyAttachment, wireBinder, NpcCollision, keepDistance and getPosInWire are the `a = b - c`/`a = b + c` operator temporary order; PerformList and MirrorActor the JGadget iterator stride; MarioReceiveMsg a named-block hole of Mtx/TVec3/TVec2 size; none was retried.
+
+## Closure batch c-k24 (2026-09-30): the two-function tier
+
+Question: which of 21 units one or two functions short of 100% close with c-k21 to c-k23's constructs?
+Answer: one function closed (TSelectDir::direct); no unit reached 100%, because every other target is a recorded deep residue or a known-open class.
+
+### What landed (wt/c-k24)
+
+- TSelectDir::direct: the two named words the TODO placed around `res` are an `int ret = TApplication::APP_STATE_DEFAULT;` declared first and returned at the end (MenuDir's direct has the same result local), and the fader status named for the `switch`.
+  Either alone leaves the frame at 0xc8 (the first word lands in alignment slack); together they give 0xd0 and every slot.
+  With `ret` declared after the first block instead, two slot markers remain.
+  SelectDir still cannot link: rsetup is the JGadget pool-word class.
+
+### Measured and rejected
+
+- TLimitKoopaJr: c-m28's configuration (calcTargetDirection returning `f32`, SMS_GetMarioPos() in it, a named `limit` in canRun) makes the Run nerve exact again, and getPosition() at any two of moveWait's three `mPosition` reads then lands the Wait nerve's frame (0xb0) with 6 slot marks, all TurnBody's target and copy 4 high.
+  The debugger's id order places the one missing word as a depth-2 object created between canRun's calcTargetDirection objects and TurnBody's copy; getPosition's words land below the TurnBody objects instead.
+  All 64 mixes of getPosition()/SMS_GetMarioPos() over moveWait's three lines peak at 6; a named speed or turn result in TurnBody, `target.get()`, `.value` for the rotation speed, copy-initialised or assigned targets, a named canRun bool and a `const TVec3&` Mario position are inert or change code.
+  TurnBody taking the vector by value with `dir.normalize()` inside (both callers passing `toMario`/`forward` directly) is byte-identical to the fabricated LimitKoopaJrNormalize forwarder plus by-reference TurnBody, so the forwarder can go; not landed because the unit does not close.
+  moveRun stays 0x10 short (0x108 against 0x118) in that configuration, with calcDirectionVector's return buffer retail places between `forward` and `dir` in the named block.
+- TMovieDirector::rsetup: retail has a hole at 0x2c4 between `group2d` (0x2c8) and `thpRender` (0x2c0) and one at 0x2a0 between `screen` and `audioInfo`; movieName at function scope, a named `u8* buffer`, dropping `mem` and moving `audioTrack` below `audioInfo` do not move a byte (149 marks), so named scalars there take no slot.
+  hsearch (240 s) reaches frame 0x318 only by hoisting stageDisp and naming two getMovie() reads (129 slot marks).
+- TRollBlock::calcRootMatrix: a third MTXConcat argument through `getModel()->getBaseTRMtx()` or without the `mtx` local changes code (91.6 or worse).
+- TPollutionLayer::stampModel: `model->getBaseTRMtx()[0][3]` unnamed at both reads keeps the swapped pair; the raw `unk20` is private to J3DModel.
+- SelectDir's plain-accessor sweep (SMSGetMSound() at both gpMSound sites, TFlagManager::getInstance() at the setFlag site, all seven subsets) is inert.
+- hsearch at 160 s: TBaseNPC::behaveToHitObject_ reaches 0xa0 of 0xc0 only by stacking six moves, TRailBlock::control 0x188 of 0x1b0 through an extracted helper, TFenceWaterH::control finds nothing.
+- Debugger maps for the rest: TMenuDirector::direct lacks 29 words in three inline bands (12, 2 and 15), TLensFlare::perform 32 words in four bands, TRailBlock::control one named word above `mtx` plus 19 inline words, MSSceneSE::frameLoop three words above `listenerTrans` and seven below it; none is a single construct.
+
+### Reading
+
+- A named local that is never live across a call (a constant result, a switch value) still takes a named-block slot, and its word can hide in alignment slack until a second one arrives, so test such names in pairs.
+- CameraChange stays blocked on changeCamModeSub_'s missing `bgt; b` pair (its data is gated on that function's size), MSoundScene on the three unreconstructed UNUSED helpers, and MapWarp, SelectDir::rsetup and MenuDir::rsetup on the known-open operator and JGadget classes.
+
+## Research batch c-r32 (2026-09-30): no JGadget header construct closes the pool-word class
+
+Question: which header-level construct does retail's JGadget have that ours lacks, behind the pool words of the eight functions blocked on the "JGadget iterator stride"?
+Answer: none was found; every candidate from the brief is inert, already refuted, or closes one site and breaks the functions that pin today's header.
+Nothing was committed apart from this entry.
+
+### Method
+
+- A header-overlay harness compiles every object that depends on a JGadget header (291 objects, deps from `ninja -t deps`) with the overlay ahead of `-i include`, then classifies each function against retail and against the base build (about 60 s tree-wide; 7543 exact functions in those units).
+- A single-unit scorer compiles one unit with an overlay and source variants and prints, per variant, the histogram of `retail - ours` r1 displacements; one displacement value means the grouping is right and only the count of objects below it differs.
+- `tools/mwcc-stack/dbg.sh` (with `OVL=`) dumps showed which object each slot is.
+
+### The target list is not one class
+
+- MapWarp is not a JGadget case: `init` differs by an r12/r19 and r8/r9 register swap in the warp-table copy loop, and `watchToWarp` is the by-value `operator+` class its TODO already records.
+- TDrawSyncManager::setCallback closes with one more reference-returning inline level between the site and `TVector::operator[]` (a TU-local `v[i]` wrapper, or a named `T* p = pBegin_ + u; return *p;` inside `operator[]`): the level's result object is the missing word below the temporary.
+- The header form is 4 up / 8 down tree-wide (CPolarSubCamera `controlByCameraCode_` and `ctrlOptionCamera_`, `SMS_IsInSameCameraCube`, `TCubeManagerArea::isInAreaCube`, `TMapWireManager::load`, `TLeafBoat::control`, `TMapObjWave::updateHeightAndAlpha` lose exactness and `watchToWarp` gets worse), so `operator[]` is right and the level belongs to the site.
+- The TU-local wrapper is a pass-through helper and the map has no TDrawSyncManager element accessor, so setCallback stays open.
+- `*(mCallbacks.begin() + i)`, `mCallbacks.begin()[i]`, a named `TDrawSyncTokenRange&` or `T*` for the element and a named range are all 4 or 8 off.
+- TVector::insert, SelectDir and MenuDir `rsetup` and MirrorActor `init` keep the residues their TODOs record (the insert depth surcharge, the director pool, the per-site bindings of cc39).
+
+### TPerformList::perform: the receiver, not the iterator, splits the chain
+
+- `forEachPerform(begin(), end(), graphics, cue)`, calling the inherited list directly with no `getChildren()`, gives retail's grouping for all but the last copy pair: top block [4], 3 dead, `it`, the end and begin chains contiguous, 1 dead, the `!=` copies, all at one displacement (0x40).
+- The dump shows why: `getChildren()` is a non-simple receiver, so each `begin()`/`end()` expansion binds it, and those two dead bindings sit between and under the chains, where retail has nothing.
+- What stays off on that site: retail has 3 dead words between the `!=` copies and the `==` copies where we have none, and 13 more words below them (frame 0xa8 against 0xe8).
+- Research 161's named result in `TSingleNodeLinkList::begin()`/`end()` supplies two of those three: the named `r` locals are depth-2 callee locals, created after the `!=` body's copies and before the `==` body's.
+- With the `getChildren()` site that lever lands 0xe8 with 12 slots off; on the direct site one word between the pairs and five below are still missing.
+- It stays unusable: `return r;` makes both `push_back` overloads call the out-of-line copy constructor, where retail copies the temporary bitwise, so retail's `TSingleNodeLinkList::end()` is `return iterator(mTail);`.
+- `begin()` is used only by `perform`, so it is free; a 5 x 4 grid of base and derived `begin()` bodies (temporary, named `r`, `const` `r`, named node pointer, `iterator(r)`; derived temporary, named base iterator, named derived result, `const` base) on both sites reaches 12 slots off at best, never exact.
+- 63 site spellings (receiver `getChildren().`, none or qualified; body `it->perform`, `(*it).perform` or the raw `mPerformer->testPerform`; `it++`, `++it`, `!(it == e)`, `while`, declare-then-assign with default constructors, looping on `b` itself) are no better; the `b`-loops and the raw body change instructions.
+
+### Header candidates, each measured
+
+- On `singlelinklist.hpp` (both sites of `perform` plus the 8 other dependents): an empty base on the base iterator (TP's `std::iterator`) and default constructors at both levels are byte-identical.
+- Also inert: the derived `operator==` as a `const&` cast, `operator!=` as `!operator==(a, b)` or `(a == b) == false`, `operator++(int)` spelled non-`const`, copy-initialised or through the base `operator++`, and `void` pre-increments.
+- Changing instructions: derived `operator==` by slicing copies or on `unk0`, `!=` through value casts, member comparisons, deleting both derived comparisons, a ternary `!=`, by-value pre-increments, and the base `operator++` through `operator->`.
+- Moving the pool but not onto retail's: deleting only the derived `==`, `operator!=` through the base operators, `operator->` reading `*unk0` or through a named node.
+- The map rules out an iterator destructor: `push_back` runs out of inline depth and calls both iterator constructors out of line, so a destructor would be emitted and called too, and the map has none.
+- On `std-list.hpp`, `TList_pointer<T>::iterator::operator==` written like TLinkList's and TSingleLinkList's (`(Base&)fst == (Base&)snd`) is 0 up / 12 down (the eight template loops, JDRNameRefGen and MarNameRefGen, and ObjHitCheck), so the direct `p_` compare is pinned.
+- Brief candidates already refuted and not re-run: by-reference iterator members, containment instead of inheritance and the TP/MKDD/pikmin2 shapes (cc39, c-r22); a derived `operator++` returning by value (js1); a named `end()` and an iterator-returning `push_back` (c-r4); by-value `insert`/`erase` iterator parameters are what the map mangles.
+
+### Reading
+
+- In MWCC a callee's named local is created later than its temporaries: a named local of an inline expanded inside an argument expression lands after the enclosing body's depth-2 copies, while a temporary lands with the argument's chain.
+- Retail's `perform` therefore has depth-2 objects in the `begin()`/`end()` chains that are not named iterators (those would change `push_back`) and a receiver that binds nothing between the chains; neither has been found.
+- Treat the eight functions as separate per-site residues, as cc39 concluded; no header round is pending for them.
+
+## Library batch c-lib1
+
+- `J3DSkinDeform::initMtxIndexArray` compiles exact with zeldaret/tww's display-list cursor, but only with the identity cast below, so under the no-fakematch rule it is held back (branch parked/c-lib1-cast), not on main: `u8 cmd = *dl; dl++;`, `u16 vtxCount = *(u16*)dl; dl += 2;`, `&dl[vtxSize * k]` inside the loop and `dl = (u8*)dl + vtxSize * vtxCount;` at its end.
+- The identity `(u8*)` cast on that last line is load-bearing: `dl += n`, `dl = dl + n` and `dl = &dl[n]` are one instruction longer and reorder the loop header, while `(u8*)(dl + n)` is also exact.
+- So a cast anywhere on the right of `p = p + n` stops MWCC treating it as the in-place increment; that is the lever for a pointer step that compiles one instruction long.
+- With the cursor stepped past the header, `int vtxCount` leaves every instruction right but the named block 4 low; `u16 vtxCount` lands it, and `s32` or `int` for `k` are both exact.
+- `JPABaseEmitter::deleteAllParticle` is exact with one function-scope `next` shared by both list loops; a block-scope `next` in each loop (our old body, and tww's) costs 8 bytes of frame.
+- Sister shapes measured and not better: melee's TRKSuppAccessFile `(0, TRKRequestSend(...))` comma and its declaration order (12 and 19 markers), and melee's TRK flags (94.0%).
+- Also not better: tww's `allocFromHead` (two `getContent()` calls, `int foundSize`, a `blockSize` local: 97.3%) and mkdd's (C-style top declarations with `ALIGN_PREV`: 94.9%, frame 0x40).
+- pikmin2's `AudioDecoderForOnMemory` is built with GC/2.6 and declares `readSize` first, which is the 86.2% order already recorded at the function.
+- tww's JAudio is a later generation: `updateJcToDSP` is a member with `flushChannel()` calls, a ternary `pan` in `updateEffectorParam` is 18 markers, and `JAInter::SeMgr::checkNextFrameSe` is an empty Nonmatching stub.
+- tww's JParticle is the JPA1 generation (`JPAFieldData`, function-pointer base planes); its single `force` vector in the vortex field (frame 0x68), `set` then `scale` in the convection field (0xe8) and the one-read `flag & 0x1FFF` in `J3DDeformer::deform` (20 markers) are all worse.
+- No sister carries JAIGFrameSe, JALModSe or JDrama, and a 420-second hsearch run on `JPAVortexField::affect` found no gain.
+
+## Research batch c-r33 (2026-09-30): retail's per-site operator word is created after every operator body, not at the call boundary
+
+Question: which honest source form, per site or per overload, gives retail's temporary order at the seven single-function units blocked on the operator-temporary class (TMarioCap::perform, CPolarSubCamera::updateDemoCamera_, TEnemyAttachment::bind, TWireBinder::bind, TBaseNPC::bind, TMario::keepDistance, TMapWireActor::getPosInWire)?
+Answer: none was found; nothing landed, and the header is unchanged.
+The debugger maps do narrow what retail's missing word is.
+Method: `hsearch dbg` maps of all seven under the stock header and under four header variants; each variant was scored on the seven units and on the coaster `bind`, with `census.py`/`cmpcensus.py` tree-wide against 12051 exact.
+The drivers `hv.py`, `bvrun.sh` and `score7.sh` are in the session scratchpad `r33/`.
+
+### Retail's temporaries per function (stock-header dumps)
+
+- TEnemyAttachment::bind, TWireBinder::bind and TBaseNPC::bind: retail's live `bl sub` object is created after every depth-1 inliner object (the wall record's bindings, the ground-plane binding), with one word below it and, in TBaseNPC::bind, two more above it; our by-value `fst` copy is a parse-time object directly under the named block.
+- CPolarSubCamera::updateDemoCamera_: the two `origin + offset` `bl add` objects sit at 0x58 and 0x4c, adjacent, with 36 bytes of pool above them (two dead return temporaries plus the three depth-1 words) and one word more than ours below the second.
+- TMario::keepDistance: top-down, retail has diff (0x78), the `diff * step` return copy (0x5c), the two sqrt words (0x58, 0x54), the `newPos - mPosition` live object (0x44), then the product operand (0x34); so both operators' live objects are late locals, and both return temporaries are parse-time objects.
+- TMapWireActor::getPosInWire and TMarioCap::perform are the `(a - b).length()` pool.
+  Unwrapped under any by-value header, getPosInWire has 14 IRO P temporaries and a frame of 0xd0-0xd8 (retail 0xb8), and TMarioCap::perform is 0x190-0x198 (retail 0x1e0).
+  The four torocco, isTakeSituation and moveRoof sites are likewise 0x18-0x20 over when unwrapped.
+
+### Header variants, all with the uncast `operator=` (the return copy is not elided without it)
+
+- V1, `TVec3 r(fst); r -= snd; return r;` for `-` and `+`, V2 for `*`: the five non-`.length()` targets have no missing or extra instructions, but every late object is one word high (keepDistance's frame is 8 short); tree-wide the exact count is 12051 -> 12044 (up 7, down 59).
+- A reference local for the left operand (`const TVec3& a = fst;` or `const Vec& a = fst;` before the copy) gives two words and loses the elision at TEnemyAttachment::bind (six extra instructions).
+- C1 (cc23's `operator-(const Vec* fst, ...)`, conversion at the call boundary, for `-` and `+`): 12060 exact, with 17 gains, among them TEnemyAttachment::bind, TWireBinder::bind, TLiveActor::bind, the coaster, amenbo, aminoko, hamukuri, koopajr and limitkoopa `bind`s, `TCannon::moveObject` and `TEffectColumWater::generate`.
+  The losses are the six wrapped `.length()` sites (MameGessoJitabata, execUTurn, isTakeSituation, toroccoEffect, soundTorocco, moveRoof), and Tongue's `__ami__` goes MISSING.
+- C2 (the same conversion moved inside the body: `const TVec3& fst`, `TVec3 r; r = *(const Vec*)fst; r -= snd; return r;`): 12061 exact.
+  Against C1 it also gains TChuuHana::attackToMario and TLeanMirror::loadAfter, two of c-r20's "two-word" sites, and loses TCannon::moveObject, and the conversion falls out of line as a weak `__opPC3Vec__` in 11 TUs (BossHanachanSub, cannon, fireWanwan, walker, SelectShine2, MapWarp, MapWire, MapObjPlane, MarioCollision, MarioSpecial, Tongue), which the map does not have.
+- **CameraDemo decides between C1 and C2.**
+  Under C1 the objects run r1, binding, r2, binding, one word too many between the two `bl add` objects; under C2 they run r1, r2, then both words, and updateDemoCamera_ is slot-exact.
+  The four markers left there are the separate load-order residue (2) of its TODO.
+- So retail's extra word at each site is created after all the operator bodies of the function have been expanded (depth d+1 or later), not in the operator's own expansion (depth d).
+  That is also why one body covers c-r20's one-word and two-word sites, whose counts looked per-site.
+- Under C2 plus V2 `*` (C3), keepDistance has every object in retail's order, uniformly 4 low (one word more above the return temporaries in retail, one fewer at the bottom).
+  `diff(newPos - mPosition)` is identical, `diff; diff = ...` loses the elision (8 more instructions), and `newPos - getPosition()` adds 32 markers.
+- Under C2 TBaseNPC::bind's live object is 8 high: the two IRO F temporaries of `getGroundPlane() && getGroundPlane()->isLegal()` are below it, where retail has one word, and retail has two more words above it.
+  `mGroundPlane` at either or both reads is inert or worse, and a 240 s hsearch run (1670 builds) under C2 found no gain; this is the site's unknown compiled-out ground-plane block (its fakematch TODO), not the operator.
+
+### What makes the word, and what does not
+
+- The word is the reference binding of an inline call whose argument is itself an inline call: `operator=(const Vec&)` taking `operator const Vec*()`'s result, whether at the call boundary (C1) or in the body (C2).
+- Casts do not make it, at depth d or d+1: `*(const Vec*)&fst`, `*(const Vec*)this` in a member, `*(const Vec*)&fst.x`, `*(const TVec3*)&fst.x`, `*(const TVec3*)(const void*)&fst` and a `static_cast` down from `const Vec&` all fold into simple arguments (frame 0x38 at the coaster, 0 words).
+- The other bodies measured confirm c-r20's two families and give nothing in between.
+  No word: `r(fst)`, `r = fst`, a `TVec3(r)` return, `*&r`, a `(const TVec3&)r` return, a member `r(*this)`, a by-value `fst`, and an implicit copy constructor.
+  Two words: `return r -= snd` and its member and by-value forms (the copy's `other` binding plus one ECOMMA P).
+  Three or more: a named reference to `r -= snd`, a second local copy, and `return TVec3(fst) -= snd`.
+  `r.sub(snd)` expands `sub` (55-90%).
+- `getPosition()` on the right operand makes a depth-d binding: the frame is right, but `addi r4` is hoisted to the top (95.9%).
+- Next: retail's d+1 object must be an inline call whose argument is non-simple and that inlines at every depth, since the map has no weak conversion.
+  Look for one among the plausible TVec3 members (a `Vec`-typed accessor used for the copy, or a copy routed through a `set`/`operator=` level that takes the operand by pointer) before any further site search; the seven functions do not close on site spellings under the stock header.
+
+## Research batch c-r34 (2026-09-30): looking for an honest body that makes c-r33's per-site operator word
+
+Question: which honest construct inside the TVec3 `operator-`/`operator+`/`operator*` bodies creates c-r33's late per-site stack word, with no out-of-line symbol the map lacks?
+In progress; results are appended below as they are measured.
+
+### Harness and first results (scratch TU, game flags)
+
+- A scratch TU models the coaster `bind` (`setLin(nextPos - mPos)`, retail: frame 0x40, live object at 0x10, word at 0xc) and a depth-4 site (`use(p - q)` under three inline wrappers), and lists every text symbol the object emits.
+- Retail's depth-4 shape is known from Tongue: `bl __ct(r <- &tpos); bl __ami__(r, &mTipPos); bl __ct(result <- r)`.
+  So at depth d+1 retail's `operator-` body makes exactly three calls, a copy construction, `-=` and the return copy, and any helper call in the body would show as a fourth `bl` there.
+  That rules out every helper candidate (`set`, `sub`, `add`, `scale`, a `self()` accessor, a conversion) on the map alone: each is called out of line at depth 5 in the scratch TU (`self()` and `__opPC3Vec__` appear as new weak symbols).
+- `TVec3 r(fst); r -= snd; return r;` (V1) reproduces Tongue's three calls exactly and emits nothing new, but has no word.
+- The word does not need an inline call: a comma with a constant left operand makes it with no call at any depth.
+  `return (0, r);` or `return ((void)0, r);` after `TVec3 r(fst); r -= snd;` gives the coaster's frame and slots, Tongue's three calls, and no new symbol.
+  On the real units it makes coaster, enemyAttachment, wireBinder and TLiveActor `bind` exact and CameraDemo 4 markers, the same as c-r33's C2.
+- The debugger shows what that word is: the copy constructor substitutes the comma directly for `other` (no binding), and the IR optimiser then gives the pointer-valued `ECOMMA` its own temporary (`@N iro`), created after every inliner object.
+  C2's word, by contrast, is an inliner binding (`operator=`'s `other`).
+- The same comma in the copy-in (`TVec3 r((0, fst));`) also makes the word but costs enemyAttachment 6 extra instructions, and in `-=` (`r -= (0, snd)`, `(0, r) -= snd`) it makes none.
+- A comma whose left operand has side effects is hoisted by the front end and makes no word (`return (r -= snd, r);`, `return (snd, r);`).
+- A free `inline` template `operator-` (primary template, deduced `T`) compiles like the friend V1; without `inline` it is never expanded.
+- Correction to the line above: what decides is the kind of left operand, not side effects.
+  Constants and addresses (`0`, `1`, `&snd`) stay in the tree and make the word; lvalue reads (`snd`, `fst.x`, `r.x`) and side effects (`r -= snd`) are dropped or hoisted and make none.
+
+### An honest-body grammar, exhaustively (192 shapes, scratch TU)
+
+- Dimensions: friend or const member; left operand `const TVec3&` or by value; right operand `const TVec3&` or by value; return `TVec3`, `const TVec3` or `const TVec3&`.
+  Twelve bodies: copy-construct or copy-initialise then `-=`, `return r -= snd`, the by-value `fst -= snd` pair, `return TVec3(F) -= snd`, `r.sub(snd)`, `r.sub(fst, snd)`, `return TVec3(r)`, `r = F`, `r.set(F)`, and a `(const TVec3&)r` return.
+- None gives the coaster's layout (frame 0x40, live object at 0x10); 78 of them give Tongue's three calls, and those are all the no-word or two-word families already known.
+- Named aliases (`TVec3& rr = r;`, `TVec3* p = &r;`, `const TVec3& res = r;`) put the live object at 0x10 but add a word above it too, and make the body three statements, so `operator-` itself goes out of line at depth 4 (`__mi__`, not in the map).
+- Delegating to a helper (`return diff_(fst, snd);` as a static member, or `return fst.minus_(snd);`) compiles like V1 at depth 1-3 and emits the helper out of line at depth 4.
+- The helper families the task listed are each refuted by the depth-4 call sequence: `r.set(fst)` and `r = fst` put `operator-` out of line; `r.sub(fst, snd)` and `r.sub(snd)` call `sub` instead of `__ami__`; `TVec3 r(fst.x, fst.y, fst.z)` calls `__ct<f>`; a `PSVECSubtract` body calls it plus three `__opP3Vec__`; for `operator*`, `r.scale(snd, fst)` would call `scale(f, const&)` where Tongue's retail calls `scale(f)` after an inline copy.
+- So within honest C++ the word has no body-level source: every call-based construct is visible at depth 5, and the one non-call construct found is a meaningless comma.
+
+### The comma body tree-wide, as a reference measurement (not landed)
+
+- `TVec3 r(fst); r -= snd; return ((void)0, r);` for `-` and `+`, uncast `operator=`, stock `*`: exact 12051 -> 12059, 19 up, 38 down, `changes_all` 56 regressions, `__ami__` MISSING.
+- Gains: the `bind` of TLiveActor, coaster, enemyAttachment, wireBinder, amenbo, aminoko, bathtubKiller, chuuHana, hamukuri, koopajr and limitkoopa, plus `TMario::moveRequest`, `TYoshiTongue::canGo`, `TEffectColumWater::generate` and `TMapCollisionBase::setCheckData`.
+- Losses are c-r33's C1/C2 families: the wrapped `.length()` sites (soundTorocco, toroccoEffect, isTakeSituation, moveRoof, MameGessoJitabata, execUTurn), the wire family, `getPosInWire` (both), and the nerves tuned to the old header.
+- So it is as good as C2 (12061) with no out-of-line conversion, which confirms that the late word is an optimiser temporary of the return copy's source, not specifically an inliner binding.
+- V1-shaped bodies (with or without the word) also emit three symbols the map lacks: MarioSpecial's TU-local `MarioWireScaledCopy`, MapObjPlane's `__apl__` (a depth-4 `+=`) and walker's `TSpineEnemy::getWallRadius`; any migration must respell those sites too.
+
+### keepDistance says the word is not uniform
+
+- Under the comma `-` plus V2 `*` (`TVec3 r(fst); r *= snd; return r;`), TMario::keepDistance has every object in retail's order but 4 bytes high, exactly as C3 did.
+- The debugger shows why: our extra word is the comma temporary at the bottom, while retail's extra word sits between `diff` and `operator*`'s return temporary, a parse-time position.
+- A comma in `*` as well (`return ((void)0, r)`) is worse (55 markers).
+- So at keepDistance retail has no late word for `operator-`, and at the coaster it has one: the count is per site (c-r20 already found 0, 1 and 2), and no single operator body can supply it.
+- Caveat: the bottom words are dead, so which one retail lacks is inferred from the count, not read from a slot reference; what is certain is that retail has one word more above `operator*`'s return temporary and one fewer somewhere below it.
+
+## Closure batch c-k25 (2026-10-01)
+
+- MAnmSound `MAnmSoundNPC::startAnimSound` 99.50 -> 99.73: naming the result inside the inlined `getDistFromMario` (`f32 dist = std::sqrtf(...); return dist;`) gives the volume the 32nd FPR neighbour c-k2's replay asked for, so retail's f31 volume and f29/f30 powf results are exact at the same frame and the same 0x104 UNUSED size.
+- Rule: a named result local inside an inlined callee adds one coalesced web, and that is a legal "ghost" when a replay says one web is a single neighbour short of being deferred.
+- Not closed there: 8 operands, the translation pointer r29 and Mario's r27 against retail r27/r29.
+- The translation's parameter object is the dead stack slot the MarioDistance level pays for, so its register is the IRO temp @417, which is coloured after the inlined `mario` local; retail colours it first.
+- Inert or worse for that pair: non-const or reference `mario`, declare-then-assign `mario`, a `VecDistance(a, b)` level under getDistFromMario (+8 frame, registers unchanged), and any MarioDistance taking the position (getDistFromMario stops inlining, 78%).
+- JAIGFrameSe `checkNextFrameSe` (99.3, open): on top of c-k4's top declarations the replay lets the missing ghost web neighbour everything except `it`, `l` and the else-branch `k` split (@254).
+- Inert there: all 107 reassignments of j/k/l across the eight loops (85 markers each), a `head` copy of mUsedHead, local `s` copies of a candidate or track sound (72-85, whole rotation), a bVar18 hop for the second `num`.
+- JDRFrmGXSet `perform` (96.8, open): the seven `setBit` lines as a `for` loop are not unrolled (46%), so retail's late read of `cue` is not a loop.
+- JAIGFrameSequence `checkPlayingSeqTrack` (99.6, open): `*(mTrackPortData + j)`, `&[0][0] + j * 16`, a row pointer and no `ports` at all are inert or worse on retail's `seqParam + j * 32` base.
+- Skipped as recorded known-open classes with nothing new to try: JDREfbSetting, NpcCallback, CameraJetCoaster, feetinv, NpcInitPrg, BathtubBinder, MapObjPollution, NpcWalkTurn.
+
+## Lever sweep c-t3 (2026-10-01)
+
+- Lever: name the return value inside a callee that returns an expression (`f32 r = expr; return r;`), from c-k25's `getDistFromMario`.
+- Selection: 47 functions whose only differences are register numbers (objdiff operand diffs with every `r1` offset equal), run through `regsweep.py`; then a mechanical sweep that names the result of every short `return expr;` body in 163 non-exact units and scores each unit's functions with objdiff (464 variants in about 6 minutes, script-driven).
+- Paid, no regressions, DOL unchanged:
+- koopajr `TDirectionCalc::d2r` (UNUSED 0x14, still 0x14): `makeRelativeAngle` keeps every register right (frame still 0xe8 against 0xf0) and its expansion in `checkNerve` loses everything but the by-value copy's slot (16 markers to 5). The name coalesces into `calcNearerDirection`'s f1 and costs no frame.
+- MarioRun `slipFore` (UNUSED 0xc8, unchanged): `TMario::moveMain` exact (frame 0x58 -> 0x60). `slipBack` named instead is byte-identical; both together overshoot to 0x68.
+- SelectShine2 `makeNewPosition` (UNUSED 0x2c, unchanged): `TSelectShine::move` lands retail's 0x158 frame (from 0x148, 58 markers to 21); the four 0.9f operand swaps and one copy slot remain.
+- fireWanwan `FireWanwanRotFromZ`: naming the back half's `180.0f - theta` lands the Recover nerve's 0xf0 frame (88 markers to 68). Naming the whole difference without theta, or the front half's return, is inert.
+- When it does not help: on a register-only residue with an exact frame the name nearly always costs a slot.
+- Named `getIntendedYaw` (Mario.hpp) and `fromPolar` (MathUtil.hpp) results cost `TBGBeakHit::moveRequest` +8 and +0x10 of frame.
+- Named `JUTRect::getHeight`/`getWidth` results moved `TCardSave::perform`'s graph object 4 bytes or added markers.
+- Named `TUtil<f32>::sqrt` and `isUnk18Present` results cost `TMammaMirrorMapOperator::perform` +8.
+- So the lever is a frame lever with a register side effect, except when the named value goes straight into a call argument or comes out of a call (d2r here, `sqrtf` in c-k25), where it adds only one coalesced web.
+- Deferral readings (regsweep, K = 29 GPR): `TCardSave::perform` `graphics` and `TMammaMirrorMapOperator::perform` `camPos` both reach their first-sweep turn at 28 left, one ghost short of retail's deferral. Neither function inlines a callee whose named result would interfere with that web without a slot. In CardSave the ghosts are the CSE'd x1/y1 loads of `setScissor` (r3/r4); in Mamma they are the `getMesh()` arguments of `show`/`hide` (r3).
+- Other regsweep single-move readings that this lever cannot reach: Bird @1917, MapObjTree @1209, SMS_UnifyMaterial @818 and TBathtub::perform @3341/@3250 (an `@` object that must be coloured later, so it would have to stop being an `@` object), TFerrisWheel `sound`, tinkoopa `tinKoopa` and hinokuri2 `transMtx` (a named local that must be coloured earlier), and bossManta @2837 (degree 33 where retail needs 31).
+- Small gains not committed (under 0.1% and no frame change): Bird `getMyMarchSpeed` (doFlyToCurPathNode), Kukku `isDead`/`isFindOutMario` (GraphWander), MarioMove `getDizzyAngle`/`getDizzyPower` (checkController).
+
+
+## Closure batch c-k26 (2026-10-01)
+
+- Targets: the five non-exact functions left in C units (GC2D/hx_wiper.c and MetroTRK Portable/support.c); two closed, neither unit links yet.
+- Rule (C units, MWCC GC/1.1 debugger dumps): a named local or inline argument binding that copy propagation removes keeps its 4-byte stack slot, in declaration order with the other stack-homed locals.
+- So a frame hole with no stores in retail can be a single-use named value: `cx = hx.width >> 1` already did this in Hxs_Logo_TexDraw, and an expanded `GXTexCoord2f32(a + b, ...)` keeps one slot for its propagated first argument.
+- hx_wiper `Hx_Test5` 99.82 -> 100: `u32 timer = Hx_GetTimer(); f32 rate = (f32)timer / 20.0f;` declared at function scope ahead of `obj` fills retail's 8 unused bytes above obj.
+- Spill slots follow virtual-register order (named locals number in reverse declaration order), so declaring `mag_out, mag_in` before the first-vertex locals puts their spills above that block, as retail has them.
+- hx_wiper `Hxs_Logo_TexDraw` 96.37 -> 100, in three steps.
+- Dividing the corner arguments in place (`x1 /= sx`) instead of naming `u1 = x1 / sx` gives retail's saved-FPR colouring: arguments colour last, last-declared first, so y2/x2/y1/x1 take f25-f22.
+- Single-use `u32 w, h` (screen size) and `f32 du, dv` (segment delta, matching the existing "(-dv, du)" comment) supply retail's 0x10 of low region under `d`.
+- `sx` computed before `sy` fixes the divisor loads' volatile registers, and `py` declared before `px` fixes the first vertex's sums.
+- Inert on TexDraw before the slot finding: declaration order (12 orders), direct GX calls (right frame, wrong store order), Hx_TexVtx with a z, colour, swapped or split-offset parameter list.
+- hx_wiper `Hxs_GameOver` (99.66, open): retail's named block is obj, st, fadeColor, axis, six 4-byte slots, rotMtx.
+- Lead: keeping fadeColor in its own block and opening a second block at `aspect` that declares axis, aspect, texAspect, `u32 w, h, tw, th` (screen and texture sizes, all copy-propagated) and rotMtx reproduces that order and the hole; the whole frame is then uniformly 0xc short (0x180 against 0x188).
+- The missing 0xc is three more low slots below the sqrtf ones, which are the GX vertex argument bindings; vertex 0's `st[0].x` (offset 0, so no binding) and the two `(f32)hx.height` conversions (registers, not propagated) are the candidates. Not committed (no fuzzy gain alone).
+- hx_wiper `Hxs2_Circle` (99.65, open): the dump shows `color` reaching its first-sweep turn with 27 of K = 29 left, so it colours after the centerX/centerY address temporaries; retail needs two more neighbours or an `@` binding. Moving `color = alpha` within the prologue, an initialiser, and declaration order are inert or worse.
+- MetroTRK `TRKSuppAccessFile` (99.64, open): re-confirmed that no single-local move of `done` or `replyBuffer` among the ten declarations, and no loop-body or need_reply-block scoping, reaches retail; the recorded "one more web live with done only" lead stands.
+
+## Closure batch c-k27 (2026-10-01)
+
+- Targets: the three open C-unit functions c-k26 left (hx_wiper `Hxs_GameOver` and `Hxs2_Circle`, MetroTRK `TRKSuppAccessFile`), then c-hs11's Bird lead; none closed, no unit linked, TODOs updated with the measurements.
+- C units can be dumped with the MWCC debugger using the unit's own flags (GC/1.1 for hx_wiper with `-lang=c -inline noauto`, GC/1.1p1 for MetroTRK); both give our 1.2.5 frames.
+- Rule (C, inline argument bindings): a binding whose value is a global load (`(f32)hx.height`) is not forward-substituted past a volatile store, so a binding evaluated before an earlier argument's FIFO store (`y` of `GXPosition3f32(x, y, z)`, arguments bind right to left) keeps a register and no stack slot; a binding of a local array element dies across the same store and keeps its slot.
+- A texcoord argument at offset 0 of a local array (`st[0].x`) is simple and makes no binding; reading it through a `Vec*` helper parameter makes one.
+- hx_wiper `Hxs_GameOver` (99.66, open): with c-k26's two-block declarations the dump shows 9 dead GX bindings below the fourth sqrtf's volatile slot against retail's 12 (everything above is uniformly 0xc low).
+- Of the 11 bindings, the vertex 2 and 3 `(f32)hx.height` ones are registers by the rule above; Hx_TexVtx with a `Vec*` texcoord reaches 10, the existing four-float Hx_TexVtx is identical to direct calls, and u32 position parameters are worse (an instruction changes).
+- hx_wiper `Hxs2_Circle` (99.65, open): naming the mirrored row (`u32 yb`) or the centre (`u32 cx`) only replaces IRO address temps with named webs, so `color` keeps degree 28 and 27 left at its turn; chained stores and a two-vertex `Hx_Line` helper are worse.
+- MetroTRK `TRKSuppAccessFile` (99.64, open): the neighbour lists differ in three webs only.
+- replyBuffer is upward-exposed, so it is live from entry and alone neighbours the precheck's `*count` load and the `*io_result` zero; done alone neighbours the coalesced TRKGetBuffer copy.
+- The 12 initialiser orders with `done = 0` ahead of the zero store score 12-14 markers, since scheduling hoists the zero store anyway, and Melee's public decomp body (including its `(0, TRKRequestSend(...))`) is inert.
+- Bird `doFlyToCurPathNode` (95.4, open): `toGoal.sub(getPosition())` fixes the slots (90 markers to 54) but Bird.cpp reads mPosition raw everywhere; `-=` is inert and a two-argument `sub` is worse. The remaining 54 markers are the quaternion's register numbering, so the function would not close on the slot fix alone.
+- Not started: `TBossGesso::changeAllTentacleState`, whose comment block records a deep fold search.
+
+## Lever sweep c-t4 (2026-10-01)
+
+- Question: does c-k26's C rule (a copy-propagated named local or inline argument binding keeps its 4-byte slot, in declaration order) hold for C++ with the game flags?
+- Yes, and frame-model.md already says so (rules 2-4 and 8a); it is re-measured there with GC/1.2.5 objects and GC/1.1 dumps, together with the one exception found here (an aliasing store between definition and use).
+- Selection: `census.py` frame and slots classes, mapped with `hsearch dbg` (19 functions 8 short, 45 small slots functions, 20 functions 16 short, 17 functions where ours is longer), keeping those whose retail-only words sit at or inside the named block with no stores in them.
+- Nothing committed: no candidate gave retail's frame and slots with a named value that passes the acceptance rule.
+- TSamboHead `attackToMario` (hanasambo, 0x50 against 0x60): retail has three or four words above `away` and none below.
+- `const TVec3& marioPos = SMS_GetMarioPos();` with `f32 dx`, `f32 dz` for the two horizontal offsets is code-identical and gives 0x58; marioPos and dx are homed, dz keeps a register (the aliasing exception).
+- The sibling spelling `getPosition().x - SMS_GetMarioPos().x` (behaveToWater's) gives 0x60 but puts its accessor words below `away` (away 0x10 high); named `pos`/`marioPos` references give 0x60 with away 4 high.
+- So retail's top words are named values, and one more homed word than marioPos + dx is needed; only an alias of `mPosition` supplies it, which the rule refuses.
+- TMapObjBase `emitAndSRT` (MapObjLib, 0x48 against 0x50): retail's fctiwz temporaries start at 0x28, so retail homes at least three more bytes of locals than our `s16 x` (at 0x1c).
+- Our y and z are not homed because each one's store follows the store of x through the emitter (the aliasing exception); `setRotation(param_4)` and direct arguments change the code, C-style declarations are inert and a `TVec3<s16>` local overshoots to 0x58.
+- MSRandPlay `randPlay` (MSoundSE, slots): a named `u32 id = mSoundID` switch operand supplies retail's word above `actor`, and `Vec* trans = vec->mTrans` for the three actor arguments removes both dead bindings, so actor lands at 0x10 against retail 0x14 (one binding word short).
+- Calling `MSoundSE::startSoundActor` there is not inlined (96.2).
+- TMareWallRock `appear`: `f32 z = unkFC;` declared above `trans` stays in a register (`trans.set` stores x and y first), so it cannot supply retail's word above trans.
+- TNameKuri `setDeadAnm`: writing the matrix chain as named `mActor`/`model` locals in the function gives 0x38, below the unnamed spelling's 0x40, so retail's ten extra words are not named single-use values.
+- JPABaseField `loadFieldBlock` (0x48 against 0x50, two words above `value`): naming the raw data pointer removes the ctor bindings (0x40); a named size is inert; JPAConvertFixToFloat is out of line, so the words are not conversion temporaries.
+- CPolarSubCamera `execGroundCheck_`: a named lerp ratio adds an instruction; named lerp endpoints cost +8.
+- TLightCommon `perform`: the 12 bytes sit between `light` and the getLightColor return temporary, below every named object and above every inline one; retail calls getLightPosition three times, so any named copy changes the code and only an unused `Vec` fits (as cc37 found).
+- Already recorded as deep searches and not retried: TLampSeesawMain `loadAfter`, THamuKuri `jumpToSearchActor`, TBathtubData `getGravityDir`, `decideNextStage`, TMenuBase `perform`, TMario `slopeProcess`, the `operator-` binds (coasterkiller, koopajr, limitkoopa) and TLeanMirror `loadAfter`/TBathtub `quake` (`a = b - c`).
+
+## Closure batch c-k28 (2026-10-01)
+
+- Targets: c-t4's three leads (TSamboHead `attackToMario`, MSRandPlay `randPlay`, TMapObjBase `emitAndSRT`), then the one-function units beam, boid and feetinv; one function closed, one improved, no unit linked.
+- TSamboHead `attackToMario` (hanasambo) 99.95 -> 100: the rebound direction is spelled `const TVec3& marioPos = SMS_GetMarioPos(); f32 dx = ...; f32 dy = 10.0f; f32 dz = ...; TVec3 away(dx, dy, dz);`.
+- The debugger dump shows marioPos, dx and dy homed above `away` (0x50, 0x4c, 0x48) and dz in a register, every mapped slot at retail's offset, frame 0x60.
+- So a named constant component is homed like a named load: its store has no aliasing source, so the c-t4 exception never blocks it, and it is the honest third word c-t4 was missing.
+- A by-value `TVec3 marioPos` copy is not scalarised here (90.1, the copy stays in the code); `*gpMarioPos` instead of SMS_GetMarioPos() changes the code.
+- TNerveSamboHeadAttack `execute` (hanasambo) 99.86 -> 99.96, frame 0x118 against 0x120: `s32 prepareTime = head->mSaveParams->mSLJumpPrepareTime.get();` (a condition use, so homed) and the attackToMario marioPos/dx/dz spelling for goal.set put goal, the calcVelocityToJumpToY result and the three TVec3 temporaries at retail's offsets.
+- Retail homes one more word above goal; `f32 dy = 0.0f` lands the frame but adds a fourth word below goal, a named `const TVec3& point` for goal's copy removes a low word, and marioPos above goal changes the code.
+- MSRandPlay `randPlay` (open): all 35 placements of `u32 id` and `const Vec* trans` over the switch, both calls and the actor give only c-t4's code-identical form (actor 4 low).
+- The two dead words below actor are the JAIActor constructor's first two argument bindings (copies of the third after CSE); std::max/std::min for the wait clamps add code (MSL's `const T&` parameters make temporaries), and SMSGetMSound() reads gpMSound, not MSGMSound.
+- TMapObjBase `emitAndSRT` (open): emitAndSRT is static (no `this` slot); retail's locals end in (0x20, 0x28], ours at 0x1e with only x homed.
+- A `TVec3<s16> rot` assigned member by member scalarises to identical code but homes rot plus the three setRotation argument bindings (0x58; 0x60 with a constructor), so retail has fewer than that; reversed declarations, f32/s32 locals and direct or vector setRotation arguments change the code.
+- Skipped as recorded deep searches tied to the by-value operator class: beam `calcVertices`, boid `calcBoids`; feetinv `FeetInvCalc` also differs by five instructions (scheduling and the reload-x register pattern), so the layout mapper cannot run on it.
+- hsearch `dbg` adds the J3DModel/J3DJoint includes a hanasambo dump needs; `tools/mwcc-stack/dbg.sh` on the bare source fails there, so prefix those two includes to a scratch copy when the raw dump is needed.
+
+## Lever sweep c-t5 (2026-10-01)
+
+- Question: where do c-k28's rules (a named constant component is homed after earlier stores, a condition-only value is homed) and c-t4's propagated-local rule give an honest carrier in the census frame and slots classes?
+- Selection: every frame-short function up to 0x18 (59) and the 68 slots functions whose body has a TVec3 constructor, a `set`, a Mario position or a nerve body, each mapped with `hsearch dbg` (about 25 s each, run in chunks of 20 in the foreground); kept those whose retail-only words sit in or above the named block.
+- Two functions improved, one closed; no regressions, DOL unchanged.
+- TNerveAmiNokoWalkOnFence (amiNoko) 99.96 -> 100: `const JGeometry::TVec3<f32>& goal = amiNoko->unkF4.getPoint(); JGeometry::TVec3<f32> toGoal = goal;`.
+- The named goal reference is retail's word above toGoal, and with it getPoint()'s result pointer no longer sits below toGoal (frame-model.md, "Constants, conditions and named references").
+- TKoopaJrSubmarine::makeRelativeAngle (koopajr) 99.84 -> 99.96, frame 0xe8 -> 0xf0 (retail): `const JGeometry::TVec3<f32>& marioPos = SMS_GetMarioPos();` declared above toMario and passed to `toMario.sub`.
+- marioPos is homed at 0xb4 above toMario, flameDiff moves to 0xb8, toMario stays at retail's 0xa8; left: the atan2f by-value copy 0x14 above retail's, the same class as TKoopaJrSubmarine::checkNerve's makeDirection copy.
+- `const TVec3& marioPos = *gpMarioPos;` there drops toMario 4 (0xe8); a named tub position reference is inert.
+- Not committed, recorded in the TODOs or here:
+- TChuuHana::setGoal: c-d2's `f32 dist = 1000.0f;` (used for both goal components) homes exactly retail's word between goal and swing, but the named block then only loses its alignment pad, so frame (0x90), fuzzy score and layout distance are unchanged; the 12 bytes below the TPathNode temporary remain.
+- TNerveBGDie (bossgesso): retail has three named words between local_24 and zero, created before every inline object.
+- `f32 y = -5000.0f;` for the goal's height homes one (layout gap 4 -> 2, markers 24 unchanged); naming x as well swaps set()'s x binding for a named word (55 markers); `f32 height = 50.0f` for calcVelocityToJumpToY changes the code; a `const TVec3& pos` reference is 0x1b0.
+- TBossGesso::lenFromToeToMario: retail has two more words above tipPos and nothing else differs; a named tentacle or `TNode* toe` receiver is 0x38, a named `toePos` reference moves tipPos (14 markers), a named state in the fabricated isThing2 moves tipPos too.
+- TPakkunSeed::rebirth: retail's locals end one or two words higher (only the conversion temporary maps); `s32 generateTime = ...getSLGenerateSeedTime();` for the condition homes one word but the frame needs two (see the temp-boundary note in frame-model.md), so with no second carrier it is not committed.
+- Calling the UNUSED `TPakkun::seedPollute(mPosition)` for the stay branch's stamp is code-identical but 8 smaller (0x68); with getManager()/getUnk158() inside seedPollute and generateTime it is 0x70 again.
+- Mapped and left (by-value operator, TPathNode or iterator classes, or recorded deep searches): moveRun (limitkoopajr; dir is created after an inline vector in retail), TMovieDirector::rsetup (three single named words in retail around push_back'd pointers and the THP locals), TResetFruit::kicked and TShine::control (low region only), getPosAndRot, calcFarthestVertex, getNearestPosOnGraphLink, TMuddyBoat::calc, TMareWallRock::appear (retail has one word fewer below trans), TMonumentShine::hitByWater, TTelesa/TDangoHamuKuri::behaveToWater, the `bind` family.
+- Tool notes: `tools/mwcc-stack/census.py` plus `hsearch dbg` over a TSV, keeping lines that say "words above" or "between ... (named)", is a cheap way to find named-block holes; only one debugger may run at a time, so never start a dump while a batch runs in the background.
+
+## Lever sweep c-t6 (2026-10-01)
+
+- Question: where else does c-t5's named-reference lever (`const TVec3& goal = node.getPoint(); TVec3 toGoal = goal;`) pay, across every non-exact function?
+- Tool: `tools/ref-name-sweep.py` finds every `get*()` call whose header return type is a reference to a class (and `*gpMarioPos`) in the 819 non-exact functions, names it in a `const T&` just before its statement (one variant per site, one per repeated call text), and profiles the whole unit with hsearch's score key; the whole tree (736 variants, 107 units) takes about 7 minutes at `-j 2`.
+- 115 variants improved some function with no regression; review kept six functions, and a seventh (getPosInWire) improved by a declaration-order lever found while checking its winner.
+- No function closed; no regressions, DOL unchanged.
+- TSpineEnemy::doShortCut 99.64 -> 99.86 (73 -> 29 markers): `const TVec3& goal = unkF4.getPoint();` before the reach test puts node and local_28 on retail's slots; the sweep's own find, naming `node.getPointRaw()`, is 39 and puts the word below node, where retail has nothing.
+- TNerveBubbleLive (bosstelesa) 99.89 -> 99.95 (27 -> 12): a named getVelocity() reference above the by-value copy puts the setGoalPathMario node at retail's 0x98; the copy itself is still named where retail keeps it in the low region.
+- TBGTakeHit::moveRequest (bgtentacle) 99.76 -> 99.85 (36 -> 20): `const TVec3& bossPos = ten->getOwner()->getPosition(); delta -= bossPos;` (naming the local_44 initialiser instead scores the same).
+- TNerveTobiPukuReturnLaunch 99.83 -> 99.87 (26 -> 19): `const TVec3& padPos = puku->mLaunchPad->getPosition(); puku->setGoalPath(padPos);` is retail's word above dir.
+- TItemSlotDrum::generateItem (MapObjSirena) 96.11 -> 96.27 (139 -> 103): a named `pos` for makeOneEnemyAppear puts every stack slot on retail's offset (all were 4 low); raw `mPosition` there is 137.
+- TBaseNPC::npcMadding 99.87 -> 99.90 (23 -> 17): `const TVec3& marioPos = SMS_GetMarioPos();` for axis; it only lands copy on retail's slot, the vector order is still the open inline-object question in its TODO.
+- TMapWire::getPosInWire 99.47 -> 99.71 (55 -> 30): retail's perpPoint is the top named slot, so it is declared first and assigned later (`TVec3 perpPoint; ... perpPoint = MsPerpendicFootToLineR(...)`); named start/end references are worse on that shape.
+- Refused at review, so not committed:
+- A single site named among identical ones (TPopo::walkBehavior's third getUnk104(), TLeafBoat::bind's one SMS_GetMarioPos() of three; naming every site there is 96.4).
+- Frames filled by a word retail keeps elsewhere: TBossEelTooth::perform's `getScaling()` reference gives retail's 0x1e8 but puts two words above tearsPosition where retail has one between tearsPosition and toothMtx; TEnemyMario::drawHPMeter's word lands above worldPosition, retail's 3 words are below identity.
+- References in a loop shrink the frame: TMapCollisionData::checkRoofList and checkGroundList gain fuzzy from register pairing with named corner references, but the frame drops from 0x60 to 0x58/0x50 against retail's 0x70/0x78 (each accessor site's reference temporary goes away).
+- Chains and value accessors: a reference initialised from a named reference (TMareWallRock::loadAfter, TKoopaJrSubmarine::makeRoundVelocity) and a `const T&` bound to TGraphNode::getPoint()'s by-value result (TGraphTracer::calcSplineSpeed).
+- Coincidental slot matches in functions with structural residue (TNerveFlyEnemyChaseFly 0x30 short with the vector order wrong, TGorogoroManager::perform, TGCConsole2::processAppearStar).
+- The 60-odd frame-only GAINs (a short frame 8 closer) are all in functions short by 0x10 to 0x110 with the named order already wrong (cameragc, GCConsole2, Guide, Talk2D2, MapWire::init, MapObjBall, MapObjMamma, MapObjMonte, MSoundMainSide, ModelGate, MarioCap, checkSink); one more named word is not their carrier.
+- Swapping an existing `const TVec3& marioPos = SMS_GetMarioPos();` for `*gpMarioPos` or back (c-t5's 4-byte knob) helped none of the three such declarations left in non-exact functions.
+- Rule of thumb from the kept six: the lever pays when `hsearch dbg` shows retail one word above the first named object after the call's statement (or below an earlier one), and costs when the extra word lands inside a loop body or among objects whose order is already wrong.
+
+## Closure batch c-k29 (2026-10-01)
+
+- Targets: the eighteen units one function from linking with fuzzy 99.84 and up; no function committed exact, one unit closed pending an owner decision, four units' .rodata fixed so they can link once their function closes.
+- TJumpBase::control (MapObjItem2) is byte-exact with case 5 spelled `s16 sinAngle = SMS_GetMarioAngleY(); s16 cosAngle = SMS_GetMarioAngleY(); mVelocity = TVec3<f32>(JMASSin(sinAngle), 0.0f, JMASCos(cosAngle)); mPosition += TVec3<f32>(mVelocity);`.
+- hsearch dbg: the two s16 locals are homed (c-t4's propagated-local rule) and pack into the single word retail has between the conversion slot and the vector temporary, and two separate reads keep retail's two index derivations, which one named angle merges.
+- So two propagated 2-byte named locals share one 4-byte slot: a word above a vector can be two shorts, not just one int.
+- With it MapObjItem2 links (DOL SHA-1 unchanged, symbol order PASS); it is not committed because two locals holding the same angle may read as a dummy copy; the spelling is in the function's TODO for an owner decision.
+- Worse there: one named angle (merged derivation, 99.3), a `const s16&` or `const s16*` to gpMarioAngleY (98.3), a named angle mixed with one accessor (0x90, its argument binding stays).
+- Linking MapObjItem2 first failed on .rodata order, which objdiff does not check: it matches data objects by symbol, so a unit can show 100% data and still produce a different DOL.
+- The cause was include order: TMapCollisionBase::setUpTrans in Map/MapCollisionEntry.hpp emits its `(Vec){0,0,0}` and `(Vec){1,1,1}` literals wherever the header is first included, and System/DummyStrings.hpp and M3DUtil/InfectiousStrings.hpp emit theirs at include time too, so the order of those rogue includes fixes the order of the blob.
+- Fixed by include order alone (no code change): MapObjItem2, lensglow (DummyStrings before SunModel.hpp, replacing its two pasted definitions), BossHanachanParts, BathtubPeach and MapObjFence (the collision headers after InfectiousStrings or MarioDirtyStrings).
+- A byte comparison of every unlinked unit's .rodata against retail finds the same order-only difference in fifteen more units, none near linking: smallEnemy, fireWanwan, bosspakkun, bosswanwan, cannon, fruitsboat, BossHanachanMain, Koopa, Amenbo, limitkoopa, MapEventSink, MapWire, BathWaterManager, MapObjBianco, MapObjMare.
+- Before linking any unit, compare `objcopy -O binary --only-section=.rodata` of ours and retail with trailing zeros stripped; a difference whose sorted bytes agree is an include-order fix.
+- Skipped as recorded deep searches or known-open classes, with no new lever applicable: receiveMessage (dead 0x78 with no carrier), wireBinder and enemyAttachment bind (`a = b - c`), considerSetAnm_ (0x28 short), TShine::control (low region only, re-mapped: 3 inline words between the GXColor and the flag), TBaseNPC::bind (empty-if debt), MirrorActor init and gatekeeper init (JGadget iterator pools), MarioCap perform (0x68 short), keepDistance (by-value operator class), TRideCloud::control, MActorAnmData ctor, initMapObj, linGetSRT, matan, lensglow perform (lgSunN debt), JALSystem::append (parked on a type name).
+
+## Closure batch c-k30 (2026-10-01)
+
+- Targets: the seventeen units one function from linking with fuzzy 99.75 down to 98.80; no function closed, no unit linked, no code changed.
+- `tools/rodata-order.py` reports every data section of these units `same` except BathtubPeach's `.sdata2` (`order@13`, the WrapDegreesF request order of linking.md, c-r35/c-u12), so each would link as soon as its function closes.
+- TFenceWaterH::control (MapObjFence) is byte-exact when `JGRotation3.hpp`'s `setEular(f32, f32, f32)` calls `sinf`/`cosf` directly instead of the MSL `sin`/`cos` wrappers.
+- The 0x30 excess is setEular's own six locals per expansion: each holds the wrapper's forced-load return (`EFORCELOAD` in the frontend dump), so it is homed; a direct call result is not.
+- That header body is not landable: MapObjLib's out-of-line `TRotation3<TMatrix33>::setEular` (byte-exact today) loses the same six words (frame 0x78 against retail's 0x90, 99.73), so retail's body does use the wrappers and something not yet modelled keeps them unhomed in Fence.
+- Measured there and inert or worse: named angles at either call, operand order, a depth-2 wrapper (setEular is then a call), a non-inline template member (a call), and `float r = sinf(x); return r;` wrappers (both contexts grow by the same amount).
+- TMovieDirector::rsetup: hsearch dbg shows retail with one more named-block word above group2d, one between group2d and thpRender and one between screen and audioInfo.
+- A named switch operand, a named DVD entry number, a named `new u8[]` buffer and a named THPPlayerPrepare result are all inert (not homed); a named `TMovieSubTitle* subTitle` is homed but between thpRender and stageDisp, where retail has nothing.
+- TMonumentShine::hitByWater: condition-only names (`squared()` of either vector, the dot) are not homed when the value comes from an inline float computation, unlike c-k28's integer parameter read; scalar cross components drop the frame to 0x50.
+- TMapWireActor::getPosInWire: retail homes neither length (no words between `end` and the return buffer) and interleaves the two `operator-` results with their copies; unnamed or half-named lengths are worse (99.3-99.4), so it stays in the `a = b - c` class.
+- Skipped as recorded deep searches or known-open classes with no new lever applicable: setupObjects and SelectDir rsetup (JGadget pool word), updateDemoCamera_ (36-byte pool before the first temporary, many batches), spider bind (by-value return class), emitParticle_ (binder-shaped 0x20 low region plus the this/nerve swap), lensflare perform (0x80 short, order already right), IssueGXCopyDisp (scratch permutation), PerformList perform (iterator grouping), MapObjFlag draw (0x50 dead low region plus the r5/r6 row swap), TNervePeachEscape (0xe0 low region and `.sdata2` order), setIndividualDifference_ (0x98 short plus two address associations), ctrlNormalOrTowerCamera_ (FPR ranking and lazy narrowing), allocFromHead (`nor` placement).
+
+## Research batch c-r37 (2026-10-01)
+
+- Question from c-k30: why TFenceWaterH::control (MapObjFence) looked like it wanted `setEular(f32)`'s sin/cos locals unhomed while MapObjLib's out-of-line copy wants them homed.
+- Answer: the wrapper locals are homed in every context, retail's included; c-k30's 0x30 was two different differences that cancelled under the direct-`sinf` spelling.
+- Method: scratch compiles of the real MapObjFence.cpp and MapObjLib.cpp against header overlays (`-i overlay` ahead of `include/`), scoring three frames per body: Fence control (retail 0xf8), TMapObjBase::rotateVecByAxisY (retail 0xd0, the second inlined copy, 99.78 before) and the out-of-line `TRotation3<TMatrix33>::setEular` (retail 0x90).
+- Measured frames per header body, as Fence / rotateVecByAxisY / out-of-line: wrappers with setXDir/setYDir/setZDir calls (the old header) 0x128 / 0xf0 / 0x90; direct `sinf` with the calls 0xf8 / 0xd8 / 0x78; wrappers with the nine `this->ref(i, j)` stores written out 0xe0 / 0xd0 / 0x90; direct `sinf` with the stores 0xb0 / 0xb8 / 0x78.
+- So the header's real difference is the setter calls: inlined into a caller, each `setXDir(f7 * f8, f7 * f4, -f5)` binds its three arguments (they are arithmetic of setEular's own locals, which are inliner objects and not simple at the next level), and each binding dies into its store, nine dead words per expansion.
+- The out-of-line copy is blind to it (its nine dead IRO words come from the `this->ref()` stores either way), which is why the old header stayed exact there.
+- With the stores written out, rotateVecByAxisY and the out-of-line copy are byte-exact, and Fence is 0x18 *short*, all of it below `spin` (created after both setEular expansions).
+- Fence's six words are three per rotation at the call site: `FenceDegToRad(mRotation.y)`, a one-line inline returning `0.017453294f * degrees`, adds the argument's binding (a member load) and the forced-load result per site, and Fence is byte-exact.
+- Inert or wrong there: a named radian local (0 words), `0.017453294f * getRotation().y` (1 word per site), the converter applied to `getRotation().y` (4 per site), `setTrans(mPosition)`, `MTXCopy(mtx, ...)` without the MtxPtr local, a named model pointer.
+- Landed: JGRotation3.hpp's setEular(f32) stores the matrix directly; rotateVecByAxisY 99.78 -> 100, the out-of-line copy stays exact, Fence control is instruction-exact with the frame 0x18 short.
+- Parked on branch parked/c-r37-fence-helper for the owner: the Fence converter (name invented, it exists for the call-site words), which makes control exact and links MapObjFence; `changes_all` zero regressions, symbol order unchanged (116 FAIL before and after), DOL unchanged.
+- Every other copy of the f32 setEular in retail was checked by scanning the asm for three `bl sinf` plus three `bl cosf`: only these two inlined copies and the out-of-line one exist, so no other function carries the old header's eighteen-word pattern.
+- The s16 setEular (JMASSin) also calls the setters; both of its emitted weak copies (MapWire, PollutionCount) are exact, its inlined copies (if any) were not searched, and it was left alone.
+- tinkoopa's UNUSED makeEyeBeamEffect still expands setEular (frame 0x1a8 -> 0x160 with the new body); retail's weak out-of-line copy there stays unexplained.
+- TMapObjBase::makeMtxRotByAxis (0x90 against 0x80) is the nearest relative: setRotate's sin/cos wrapper locals are fine there too, and its three extra words are the S temporaries of the `f2f3f0.mul()` vector already recorded in its TODO.
+
+## Lever sweep c-t7 (2026-10-01)
+
+- Question: does c-r37's rule (an inline body's setter call with its own locals binds every argument, one dead word each per inlined expansion) explain other frame gaps in the shared headers, either way round?
+- Method: each candidate header body was respelled in the worktree, the whole tree rebuilt, and every function's frame (from `objdump` of our objects) and fuzzy score compared with the base build and with retail's frame from the asm; `changes_all` alone does not see a frame move.
+- Landed: TQuat4::setEulerZ stores through `this->set(0.0f, 0.0f, s, c)` instead of four member stores.
+- All three callers move 8 toward retail and nothing else changes: SMS_Eular2Quat 0xd0 -> 0xd8 (retail's frame, 97.54 -> 97.68), TKumokun::initAttachPlane 0x168 -> 0x170 (retail 0x178), TKoopaJrSubmarine::calcRootMatrix 0x1c8 -> 0x1d0 (retail 0x1e0); DOL unchanged, `changes_all` no regression, symbol order 116 FAIL before and after.
+- So the rule runs both ways: a body written as direct stores where retail called a setter is two words short per expansion, and the frames that are short by 8 at every caller of one body are the tell.
+- The same set() in setEulerX or setEulerY is refused: X moves SMS_Eular2Quat, TKoopaJrSubmarine::calcRootMatrix and TYumbo::shotSeeds toward retail but costs TBeeHive::calcRootMatrix (exact, 0xa0 -> 0xa8) and TKukku::dropCoins (0x158 -> 0x160); Y moves nine functions toward retail but costs TLimitKoopaJr::calcRootMatrix (exact, 0x70 -> 0x78) and overshoots both fireWanwan FindMario and RecoverGraph nerves.
+- Since the X and Y callers disagree with each other, their remaining words are caller-side, not in those bodies.
+- Refused, the setter call is retail's (writing the stores out shortens frames that are exact or already short):
+- TQuat4::getXDir/getYDir/getZDir (`rDest.set(_x, _y, _z)`): fourteen frames shrink by 8 to 0x18; TNerveBeeHiveFall 100 -> 97.04, TNerveKumokunWalk 100 -> 96.29, makeInitialVelocity 100 -> 99.88.
+- TQuat4::mul(const TQuat4&) (`this->set(_x, _y, _z, _w)`): SMS_Eular2Quat and shotSeeds lose 0x10 each, both already short.
+- TQuat4::setRotate(from, to, amount) (`this->xyz().scale(s, axis)` as three stores): eight functions lose, the weak BeeHive copy included (100 -> 99.83), so an out-of-line copy is not always blind: a scalar local passed beside a vector is bound at depth 0 too.
+- TVec3::setLength (`scale(length * inv_sqrt(lsq), v)` as a named factor and three stores): 41 exact functions lose.
+- Inert (no expanding caller, or nothing bound): TMatrix33::mult's `dst.set(x, y, z)`, TMatrix34::multTranspose (no caller), and TRotation3::setRotate's `f2f3f0.mul(f27f28f29, f27f28f29)` written out, which moves no frame anywhere: references to the body's own local objects bind nothing.
+- That last one refutes c-r37's reading of TMapObjBase::makeMtxRotByAxis (0x90 against 0x80): hsearch dbg shows ours with makeMtxRotByAxis's three parameter homes plus three inline words below the normalized vector, where retail has three words in all.
+- The s16 setEular (JMASSin) has no scored inlined copy: retail calls it out of line from TMapWire::init and the PollutionCount site, and a scan of the retail asm for functions with three sin-table and three cos-table loads finds only bodies whose source does not call it.
+- Its only inlined copies are in the UNUSED TMapWire::initTipPoints (0x170 -> 0x150 with the stores written out) and initCountObjDegree (0xc8 -> 0xa0), whose map sizes do not depend on the frame (0x1f4 against the map's 0x1f0, and 0x190, either way), so the body was left with its setters: nothing in the binary decides it.
+- TVec2::rotate, TRotation3::mult33, TMatrix33::mult(v) and TMatrix34::mult/concat pass arithmetic of their parameters, and a written-out body would change their results when the source and destination alias, so they were not respelled.
+- The game headers (MathUtil, MtxUtil, DrawUtil, Camera, LiveActor, BathWaterManager) and the J3D/JDrama/J2D/JUtility headers have no other inline body that passes its own locals to an inline setter; their remaining setter calls take parameters, members or constants.
+- TMapWire::init (0x180 against retail 0x1b0) is short by eleven words below initTipPoints' half-wire vector, all in the low region before it; no header body tried here moves it.
+
+## Research batch c-r38 (2026-10-01): the JGadget pool words are other statements' depth, not the iterator
+
+Question: which construct behind the "JGadget pool word" blocks the last function of MarDirectorSetupObjects, SelectDir, PerformList, MirrorActor and gatekeeper?
+Answer: the iterator groups are depth markers, and the words between them belong to other expansions; nothing in `std-list.hpp` is wrong for these sites.
+Nothing was committed apart from this entry, the two TODO notes and the frame-model rule.
+
+### Method
+
+- `python3 -m tools.hsearch dbg` (with `--file` variants) for the layout distance, `tools/mwcc-stack/dbg.sh` dumps for object identities, and a scratch tagger that prints, for each homed `@N`, its type and the source line of the statement that first references it (`c-r38/tag.py` in the session scratchpad).
+- One `TList_pointer::push_back` expansion spans three depths: the `end()` result, `where` and the discarded result at depth 1; the base slice, the `insert` result and the `Base it` copy at depth 2; `TList::end()`'s result and the `iterator(Base)` parameter at depth 3 (c-r4's list).
+- Because the inliner expands breadth-first over the whole function, every other statement's depth-k objects are created between push_back's depth-k and depth-(k+1) groups.
+
+### TMirrorActor::init: the call after the push_back is one level deeper in retail
+
+- Tagged, our words between the pairs are: `@505` (push_back's discarded result), entryMirrorDrawBufferAlways's `dbOpa`/`dbXlu` (depth 1) and the mirror search's `TNameRefGen` binding (depth 2) above pair 2; push_back's `Base it`, and the entry body's two search bindings and two `J3DDrawBuffer*` results (depth 2) above pair 3; the entry body's depth-3 objects below.
+- Retail has 2 fewer above pair 2, 2 fewer above pair 3 and 4 more below: exactly the entry expansion moved one level down (its locals between pair 2 and pair 3, its search objects below pair 3).
+- `static inline void f(J3DModel* m) { TMirrorActor::entryMirrorDrawBufferAlways(m); }` called as `f(getUnk14())` is byte-exact (gap 0, misplaced 0); its `m` binding takes a register at depth 1, which is what keeps the search root in r30.
+- That is a pass-through helper, so it was not applied.
+- A `this`-taking helper holding the whole `if` lands every slot but colours the search root r29 (3 markers); with the raw `unk14` either helper loses 8 bytes; `f(unk1A, getUnk14())` with the test inside changes code.
+- Inert: `this->`, `TMirrorActor::` or `(*this).` on the call, `this->getUnk14()`, the raw `unk14` argument without a helper, and defining entryMirrorDrawBufferAlways after `init` (which also swaps their text order against the map).
+- Changing code: `mirrorScene->insert(this)` and the unnamed search with `->insert(this)` (88%, 87%).
+- Open: retail's real inline around the call; nothing in the map or the other TUs names one.
+
+### TPerformList::perform: the c-r37 rule inside the iterator bodies
+
+- On c-r32's direct site (`forEachPerform(begin(), end(), graphics, cue)`), retail's three words between the `!=` and `==` copy pairs are depth-3 objects of the loop body created before `==`'s copies: the body's `perform` receiver `it->` and the increment's `++*this` are expanded at depth 3 ahead of `!=`'s `==`.
+- A named local in `TSingleLinkList::iterator::operator->` (`TSingleLinkListNode* node = Base::operator->(); return Element_getValue(node);`) adds exactly one word there, and Element_getValue's binding of it (c-r37: a callee local is not a simple argument) one at the bottom.
+- With `node` and a named `T* value` result in `operator->`, plus `bool equal = a == b; return !equal;` in the same derived iterator's `operator!=` (the base iterator's is worse), every inline object of the direct site is on retail's relative order (hsearch dbg `gap 12`, all of it 12 words below the last copy pair), at identical instructions; `forEachPerform` stays 0xa4.
+- The bottom 12 words are IRO territory (ours: 14 P, 4 F, 2 S dead); each further named local in the base `operator->`, `Element_getValue` or base `operator==` adds one or two there (best 8 short), which is tuning, not evidence, so no header was applied.
+- On today's `getChildren()` site the same header leaves the two `getChildren()` receiver bindings above (c-r32) and 8 words short below.
+
+### gatekeeper, SelectDir, setupObjects
+
+- `TBiancoGateKeeper::init` pairs the same way: the mapped iterator groups of its own push_back and of the two inlined constructors' push_backs are each one word off at nine group boundaries, and the movable words are other statements' depth-1 objects and the three search chains' `TNameRefGen` bindings (retail has none of those three at depths 3/4), plus 13 words below.
+- So each gatekeeper boundary is a separate statement's depth, as cc39 concluded per site; it is not one header shape.
+- rsetup and setupObjects were not re-mapped; under this reading their "per-expansion pad" (rsetup's five padded first expansions, setupObjects' nine words above the iterator groups) is the depth of the `new X(...)` constructor expansions between the pushes, and the place to look is which of those constructors retail reached one level deeper.
+
+### Rule for the next agent
+
+- Before trying any JGadget header shape, tag the words between push_back's depth groups with the statements that made them; the residue names a statement, and the fix is that statement's depth.
+
+## Closure batch c-k31 (2026-10-01): reading c-r38's depth markers per statement
+
+Targets: the last open function of MirrorActor, PerformList, MarDirectorSetupObjects, SelectDir and gatekeeper.
+None closed; SelectDir's rsetup moved 99.63 -> 99.67 (frame 0x618 -> 0x638 of 0x648, register webs 2 -> 0) in one commit.
+
+### Method
+
+- `tools/hsearch/dbgobj.py` deletes its dump directory, and its `@N` numbers differ from `tools/mwcc-stack/dbg.sh` (dbgobj prepends the unit's precompiled header), so c-r38's tagger cannot be joined to `hsearch dbg` output from a separate dump.
+- A scratch wrapper that runs dbgobj's `Dumper` and `layout`, keeps the dump, and joins `tag.py`'s statement lines to the retail offsets gives one table per object: our slot, retail slot, source line and type.
+- dbgobj's dump timeout is 300 s; setupObjects needs about 7 minutes.
+
+### SelectDir rsetup (applied)
+
+- Retail has three more depth-1 words between the seventh and eighth `push_back` groups, where the only statements are the two gamepad stores: reading them as `getGamePad()->mFlags = 1; getSelectMenu()->mGamePad = getGamePad();` (the existing header accessors) lands those three words.
+- The three `TLookAtCamera` TVec3 temporaries were created position, target, up in ours and position, up, target in retail; reordering the constructor's parameters to `(position, up, target, ...)` (the JSG accessor order and the member order) fixes the slot order and the f2/f3/f4 constant registers. rsetup is its only caller.
+- Gap 34 -> 14 words, webs 2 -> 0, symbol order PASS.
+
+### The TDStageDisp screen-list site (owner decision)
+
+- At every `stageDisp->getUnk14()->getChildren().push_back(screen)` site, retail creates the TDStageDisp receiver binding at depth 2 and the list's `getChildren()` binding at depth 3; ours has both at depth 2.
+- Replacing the fabricated `getUnk14()` with `JGadget::TList_pointer<TViewObj*>& getUnk14Children() { return ((TViewObjPtrListT<TViewObj>*)unk14)->getChildren(); }` in `JDRDStage.hpp`, and the sites with `stageDisp->getUnk14Children().push_back(x)`, fixes that boundary in all four users.
+- Measured: SelectDir rsetup gap 14 -> 4 (99.67 -> 99.76); MovieDirector rsetup gap 14 -> 12 and MenuDir rsetup 50 -> 48 at unchanged percentages; GCLogoDir setup gap 6 -> 4 but 99.94 -> 99.86, because its other two one-word errors no longer cancel.
+- So it was not applied; GCLogoDir's remaining depth-1 error is one word more in retail around `mProgSelect`'s two stores (lines 100-102) and one fewer after the last push (the `getFader()` binding at line 125), and getProgSelect()/raw-mFader spellings there cost 8-16 bytes.
+- With the accessor, GCLogoDir's raw `gpApplication.mFader->startWipe(14, 0.4f, 0.0f)` at line 125 removes its trailing extra word and its extra bottom word (gap 2, frame 0x278 of 0x280); what is left is one depth-1 and one depth-2 word retail has between the `push_back(unk20)` and `push_back(mProgSelect)` groups, a binder accessor's signature, but `getProgSelect()` at either `mProgSelect` store lands only one of the two and homes its named pointer (+1 named, +2 below).
+- Two-level spellings are worse: `getUnk14()->getChildren()` inside the accessor leaves five words below the pool, and a named local in `getUnk14()` adds one depth-2 word per site.
+- Still open in rsetup after it: one word above `group3D`, one depth-2 word between the seventh and eighth push, and two depth-2 words after the last push (the `unkC.off`/`on` statements are the only candidates; `on`/`off` through `set()` changes code).
+
+### MirrorActor init
+
+- Spelling entryMirrorDrawBufferAlways's two searches unnamed through any one-level wrapper (`TNameRefGen::search<TDrawBufObj>`, `getInstance()->search<TDrawBufObj>`, a cast of `search2`) makes `init` byte-exact.
+- Each of those leaves the function's own out-of-line copy 8-16 bytes of frame over; that copy is exact only with the raw chain and a named `dbOpa` (dbXlu named or not), so the body is pinned and the missing level belongs to the call site, as c-r38 found.
+- Writing the body into `init`'s `if` (MapStaticObject's ReflectSky shape) changes code (93.7%).
+- No real enclosing member was found in the map or the headers.
+
+### gatekeeper init
+
+- Mapped per statement (gap 22): at depth 1 retail has one more object before its own push, one fewer between that push and the TBGKObstacle `new` (ours: the initWith, getMActor, getMActorAnmData and getAnmPtr bindings) and one more between that `new` and the TGKHitObj `new`.
+- Deeper, retail has none of the three search chains' TNameRefGen bindings where ours puts them and one more word at three other boundaries; 13 words more below.
+- Each of the three constructors (TBGKObstacle, TGKHitObj, TBGKMtxCalc) is UNUSED in this unit in the map, so all are .cpp-defined and their own sizes already match; the constructor location is not the lever here.
+
+### setupObjects and PerformList
+
+- setupObjects: `hsearch dbg` gives order 6, gap 488, with the named block wrong first; the inline pool cannot be read until the named block is.
+- PerformList: `TSingleLinkList` is used only by PerformList.cpp and the library's own singlelinklist.cpp, so no other TU gives evidence for c-r38's `operator->`/`operator!=` spellings; nothing new was tried.
+
+### Rule for the next agent
+
+- Join the statement tagger to `hsearch dbg` output from the same dump before reading a gap: the per-line attribution named both rsetup fixes in two runs.
+- A one-word move between depth bands at every site of one accessor is that accessor's real shape; check the accessor's other users and their percentages before applying it.
+
+## Closure batch c-k32 (2026-10-01): the slot map as a tool, and the named words it finds
+
+Targets: the last open function of CameraDemo, BossHanachanEffect, lensflare, MapObjFlag, BathtubPeach, NpcInitPrg, MovieDirector, gatekeeper and GCLogoDir.
+None closed; BossHanachan's emitParticle_ moved 0x10 of frame at identical instructions.
+
+### The tool
+
+- c-k31's scratch wrapper is now `python3 -m tools.hsearch dbg ... --by-line`: per object, retail's displacement in words and the source line and type of the first statement that references it, read from the same dump.
+- `--keep DIR` keeps the dump, our object, the variant text and `meta.json`; `--load DIR` re-prints a kept dump without compiling or running the debugger; `--timeout` sets the debugger's limit (default 300 s, setupObjects needs about 600).
+- With a private copy of the debugger patched by `tools/mwcc-stack/patch-debugger.py` (MWCC_DEBUGGER pointed at the copy), the kind column names the IR optimiser's F/P/S temporaries and the F/P ones get `iro.py`'s statement line (`~` marks iro.py's approximate pairing); `iro.py`'s attribution is now the function `fp_lines`.
+- Back-end int/float temporaries and spills print `(back-end temp)`; dead objects an unpatched dump cannot label print `?`.
+- Usage is in `tools/hsearch/README.md`, "The per-statement slot map".
+
+### BossHanachan emitParticle_ (applied)
+
+- The class's existing `getHead()`, `getChangeParams()` and `getMarchSpeed()` accessors in place of the raw members take the frame 0xa8 -> 0xb8 at the same 44 markers (layout gap 10 -> 6; getHead() alone +8, the other two alone inert).
+- Left: 5 words below `position` in retail, and no existing accessor for the unk178, mBodies and gpSunMgr chains.
+
+### MovieDirector rsetup (owner decision)
+
+- The map names the word retail has between group2d and thpRender: a homed movie number.
+- `u32 movieNo = gpApplication.getMovie();` inside the movie-name block, then `getStreamMovieName(movieNo)`, homes it there and removes the inlined `idx` binding ours has at depth 1 (gap 14 -> 12), but alone it is 99.72 -> 99.70 (markers 149 -> 156), so it was not applied.
+- Adding `u32 movie0 = gpApplication.getMovie(); switch (movie0)` for the first switch and `BOOL opened = THPPlayerOpen(movie, 0);` makes the named block exact and the frame 0x318 (99.8%, 108 markers, gap 10); `opened` is never read, so it is a dummy local and was not applied.
+- Inert or worse: movieNo at function scope or shared with either switch (96.5-99.0, code changes), a named `new u8[]` buffer, `audioTrack` before `mem`, the buffer size unnamed, `new TEndingString("EndingString")` (91%, the constructor inlines).
+- c-k31's `getUnk14Children()` accessor leaves these counts unchanged.
+- Left in the inline region: one more depth-1 word in retail before the first push group and one before the `mEndingString` push, c-k31's TDStageDisp screen-list boundary, and four words at the bottom.
+
+### CameraDemo updateDemoCamera_
+
+- With the patched debugger our 19 bottom words are IRO temporaries: the angle's comma, the eight JMASCos/JMASSin forced loads and three commas per `origin + offset`.
+- Retail has the same total with 9 of those words above the two `origin + offset` temporaries, so residue (1) is when those temporaries are created (the TVec3 operator+ shape of research batches 116 and cc23), not a missing object.
+- A `(Vec&)unk124 = ...` probe of c-k17's plain-`Vec` lead changes code (58%).
+
+### The others
+
+- MapObjFlag draw: ours homes only `x` of each GXPosition3f32 (c-t4's aliasing exception keeps y and z in registers); retail's 20 extra words are dead and below every referenced slot, so the map cannot attribute them.
+- gatekeeper init: the IRO view shows each search chain's nine or ten F/P temporaries; retail has 13 more words in that region, on top of c-k31's per-depth boundaries.
+- lensflare perform is 32 words short and BathtubPeach's escape nerve 56 (and its .sdata2 is open); NpcInitPrg's function differs in instruction count, so the map does not apply; GCLogoDir has three other open functions.
+
+### Rule for the next agent
+
+- A word retail has inside the named block is a named local whose value was propagated (c-t4); look for a quantity the code reads twice or passes to an inline (here the movie number) before trying new locals.
+- Patch a private debugger copy before mapping: without names.txt the IRO temporaries at the bottom are anonymous, and they are often the words that move.
+
+## Research batch c-r39 (2026-10-01): the operator temporaries read per statement under a by-value header
+
+Question: with c-k32's per-statement slot map, what object order does retail have in the last open function of wireBinder, enemyAttachment, MapWireManager, spider, MarioPhysics and CameraDemo, and which TVec3 operator header shape reproduces it?
+Answer: under the by-value local-`r` shape (c-r33's V1) four of the six reduce to one clean residue each, keepDistance closes with a site spelling, and the copy-out word is still unexplained; no header changed.
+Committed: this entry, the frame-model rule and a TODO line in keepDistance.
+
+### Method
+
+- `python3 -m tools.hsearch dbg --by-line` with a private patched debugger, once under the stock header and once under "V1s": `friend TVec3 operator-(const TVec3& fst, const TVec3& snd) { TVec3 r(fst); r -= snd; return r; }`, the same for `+` and `*`, and the uncast `operator=` (`*(Vec*)this = other`).
+- Header candidates were then scored on the six functions (build plus `decomp-diff --clusters`), and V1s tree-wide with `tools/mwcc-stack/census.py` against a fresh baseline (12058 exact).
+
+### Per-function residue under V1s
+
+- TWireBinder::bind and TEnemyAttachment::bind: every mapped slot is retail's shifted by one word, and retail has exactly one more word created after the live `r` (the bottom of the frame).
+- CPolarSubCamera::updateDemoCamera_: every mapped slot uniformly two words low, and retail has two more words below the second `r`: one per `unk124 = origin + posOffset` / `unk148 = origin + atOffset` copy-out.
+- TMario::keepDistance: everything from `diff * step`'s return temporary down is retail's exactly, and retail has one more word between `diff` and that temporary.
+  Writing the clamp `f32 max = 50.0f; if (max < step) step = max;` (a named constant is homed, c-k28) makes it byte-exact under V1s; under today's header the same spelling is 24 -> 55 markers, so it is recorded in the function's TODO for the migration.
+  `f32 length = diff.length(); ... f32 step = length;` lands the frame but changes one instruction.
+- TSpider::bind: 13-16 words short in the named region under either header (frame 0x118-0x120 against 0x158), so its residue is not the operator class.
+- TMapWireActor::getPosInWire: the `(a - b).length()` pool; under V1s it has 118 instructions against 106 (88.1%), so the map does not apply.
+
+### New facts about the copy-out word
+
+- At a copy-out (`m = a - b`, `setX(a - b)`) `operator-` is hoisted into the consumer's expansion and expanded one depth down: in CameraDemo the L89 `r` is created after L91's depth-1 bindings.
+- Retail's two CameraDemo words are created after both depth-2 `r`s, so the word is a depth-3 object or an IRO temporary, as c-r33 inferred from C1/C2.
+- A by-value temporary consumed by `+=` has no word: keepDistance's `mPosition += diff * step` (V1s `*`, hoisted the same way) is exact without one.
+- Copy-initialisation has none either (keepDistance's `diff`), so the word comes only with `operator=` consuming a hoisted temporary.
+  Against copy-initialisation the frontend dumps differ only in the destination: the copy constructor's plain object against the `ETYPCON` the uncast `operator=` puts on `this`.
+- Consistent with c-r2: retail's plain lvalue assignments have no such word, so the object belongs to the propagated copy chain, not to `operator=` itself.
+
+### Header shapes measured (all with V1s operators)
+
+- `TVec3& operator=(TVec3&)` (non-const copy assignment, so rvalues and `const` sources take `operator=(const Vec&)`): the rvalue copy-outs lose the elision (+6 instructions per site; enemyAttachment 95.8, CameraDemo 93.7).
+- The TVec3 overload delegating to the `Vec` one (`return operator=((const Vec&)other);` or as a statement): +6 per copy-out at wireBinder, enemyAttachment and CameraDemo.
+- c-r2's assignment-expression return (`return static_cast<TVec3&>(*(Vec*)this = other);`): +5 instructions in wireBinder, frame +8 in enemyAttachment and CameraDemo.
+- A copy constructor that puts its destination under the same `ETYPCON` (`TVec3(const TVec3& o) { *(Vec*)this = o; }`) loses the elision at every copy (+6 per copy-out, keepDistance 93.1); `: Vec((const Vec&)o)` leaves the copy-outs exactly as V1s and breaks only keepDistance's copy-initialisation (267 instructions against 253).
+- Site spellings under V1s, all inert or worse: `setLinearVelocity(local_1C - mPosition)` (inert), `mLinearVelocity.set(a - b)` and `unk124.set(origin + posOffset)` (code changes), an explicit `TVec3<f32>(a - b)` around the copy-out (+8 frame, a 12-byte temporary on top), `m = a; m -= b` (86%).
+- V1s tree-wide against 12058 exact: 12051, 7 up and 59 down, the same picture as c-r33.
+  About 25 of the 59 are `slots` functions going `frame` 8 short (the bind family, the TBossTelesa and gesso nerves, TCannon::moveObject, TLeanMirror::loadAfter, TMapWarp::watchToWarp), i.e. one missing copy-out word each; the rest are the `.length()` sites, the wire family, Tongue's `__ami__` (MISSING) and keepDistance before its site fix.
+
+### Owner decision and next step
+
+- The migration is unchanged: it needs the copy-out word, and with it the bind family, CameraDemo, wireBinder and enemyAttachment would close; keepDistance closes with its site fix.
+- Look for the word in what IRO does with the `@tmp = r; m = @tmp` chain when the destination is under an `ETYPCON` (the uncast `operator=`), not in operator bodies (c-r34's grammar) or in operator= shapes that bind or convert the source (c-r2's grid and the three above).
+
+## Research batch c-r40 (2026-10-01): the copy-out word is not made by `operator=`, the copy constructor or the destination cast
+
+Question: under c-r39's by-value header V1s, which construct in the `@tmp = r; m = @tmp` copy-out chain gives retail its one late word per site (wireBinder, enemyAttachment, CameraDemo, the coaster and the rest of the bind family)?
+Answer: none was found; no header changed and nothing landed.
+The search ruled out the whole consumer side and weakens c-r39's "per consumer" reading of the word.
+
+### Method
+
+- A scratch TU with three functions, dumped with a private patched debugger (`tools/mwcc-stack/dbg.sh` with a header overlay, then `iro.py`): `f` has two copy-outs (`unk124 = o + p; unk148 = o + q;`, CameraDemo's shape), `g` two copy-initialisations each followed by a plain lvalue assignment, `h` one `+=` of a by-value result.
+- Each header variant is scored by the dead objects in list order per function and a hash of the final code with slot names and `r1` offsets normalised, so a variant must add a late word to `f` only, leave `g` and `h` alone and keep the code.
+- Calibration: c-r34's comma body (`return ((void)0, r);`) adds a P temporary per site in all three functions, and c-r33's C2 adds an inliner word plus an F per site in all three; V1s adds none anywhere.
+- The drivers (`pdbg.sh`, `vt.py`, `mkv.py`, `mkops.py`, `cc.sh`, `t4.sh`) are in the session scratchpad `c-r40/`.
+
+### Ruled out (no late object in any of `f`, `g`, `h`)
+
+- `operator=(const TVec3&)` bodies with V1s's uncast source: `static_cast<Vec&>(*this) = other`, `(Vec&)*this = other`, `((Vec*)this)[0] = other`, `*static_cast<Vec*>(this)`, `*(Vec*)&x`, `*(Vec*)&this->x`, `*(Vec*)(void*)this`, a `void` return (same mangled name), and the implicit operator (MWCC generates it as an inline function with its own exit label, then emits the same code).
+- Source spellings that cast or convert `other` (`(const Vec&)other`, `static_cast<const Vec&>(other)`, `*(const Vec*)&other.x`, `*static_cast<const Vec*>(&other)`, the conversion operator `*(const Vec*)other`): no word, and the copy-out loses its elision (the stock header's code).
+- A named `Vec& self = *this;` adds its word to every assignment, plain ones included; `Vec::operator=(other)` does not compile under MWCC.
+- Copy constructors: implicit, `: Vec((const Vec&)o)`, `: Vec(*(const Vec*)&o)`, `: Vec(static_cast<const Vec&>(o))` (copy-outs unchanged, copy-initialisation loses its elision, as c-r39 found), `{ *(Vec*)this = o; }` and `{ *this = o; }` (both lose the elision); both special members implicit together.
+- `operator+` (the probe's operator) as the local-`r` form, with a `const TVec3` return, with a by-value first parameter, with both, or as a const member: no word.
+  The stock reference return (`const TVec3& operator+(TVec3 fst, ...)`) gives three P temporaries per site at all three consumers.
+- A comma around the operand at the site (`unk124 = ((void)0, o + p);`) is dropped by the front end, at copy-outs, copy-initialisations and `+=` alike.
+- A plain `Vec` destination (c-k17's lead for CameraDemo's `unk124`) makes the built-in assignment expand `operator+` in expression mode: six P temporaries per site and `+=`'s `add` expanded inline, so the code changes.
+- The compiler is not the variable: the coaster `bind` under V1s is 0x38 with GC/1.0, 1.1, 1.2.5 and 1.2.5n (0x30 with 1.1p1); retail is 0x40.
+
+### What the dumps add
+
+- GC/1.1's IRO comma routine (0x431330) makes a temporary for every non-void `ECOMMA` it is handed in value context, so a P word needs an `ECOMMA` that survives the front end; under V1s the hoisted operator body leaves none, whatever `operator=` and the copy constructor look like.
+- The copy-initialisation chain is the same shape as the copy-out (`@tmp = r; v = @tmp`, `@tmp` propagated and dead); only the destination differs, as c-r39 said.
+- `TMario::moveRequest`'s copy-initialisation (`offset = pos - mPosition`) has the coaster's residue under V1s: every mapped slot one word low and one retail word below the live `r`.
+  keepDistance's copy-initialisation has none, so the word is not tied to `operator=`; but moveRequest's word could also be a depth-2 object of the later `checkRideReCalc()`, so this is a doubt, not a refutation.
+- `TLeanMirror::loadAfter` (`mToStone = mShiningStone->mPosition - mPosition`, a non-simple left operand) has two retail words below `r` under V1s, where our only object there is the operand's binding.
+- Tongue's retail `(tpos - mTipPos) * k` (`__ct`, `__ami__`, `__ct`, an inline copy, `scale`) is reproduced by every by-value shape once the site is written `JGeometry::TVec3<f32>(tpos - mTipPos) * k`, and by none without it (V1s and the by-value shapes call only `sub`; the stock header only `__ami__`); this is c-r20's wrapper observation, now checked against nine mixes of the local-`r`, by-value, `const`-return, member and stock forms for `-`, `+` and `*`.
+
+### Rule for the next agent
+
+- Do not look for the copy-out word in `operator=`, the copy constructor, the operator return type or parameter passing: with V1s's bodies none of them creates any object after the live `r`, at any consumer.
+- The remaining places are the operator bodies themselves (c-r34's grammar found only the meaningless comma) and the sites: a per-site source construct that leaves an `ECOMMA` or an inliner binding after the hoisted body (c-r20's counts 0, 1 and 2 per site, LeanMirror's two words, moveRequest's word at a copy-initialisation).
+- Before another header round, settle moveRequest: if its word is `checkRideReCalc`'s, the per-consumer reading stands; if not, the word is per site and no header can supply it.

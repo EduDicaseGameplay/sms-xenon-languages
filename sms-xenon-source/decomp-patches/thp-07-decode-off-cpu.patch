@@ -1,0 +1,63 @@
+Reason: port: decode THP video frames on a host thread of their own, off the game's CPU (platform/thp/thp_decode.cpp)
+--- a/libs/dolphin/src/thp/THPDec.c
++++ b/libs/dolphin/src/thp/THPDec.c
+@@ -14,8 +14,14 @@
+ #define OSRoundUp32B(x) (((uintptr_t)(x) + 31) & ~(uintptr_t)31)
+ #define LCQueueWait(n)           ((void)0)
+ // The locked-cache DMA wrote main memory behind the CPU; flushing tells the
+-// GX layer the texture changed (DCFlushRange -> GXPC_InvalidateRange).
+-#define LCStoreData(dst, src, n) (memcpy((dst), (src), (n)), DCFlushRange((dst), (n)))
++// GX layer the texture changed (DCFlushRange -> GXPC_InvalidateRange). The
++// decode may run on a host thread of its own (platform/thp/thp_decode.cpp),
++// which then flushes the ranges once the game's CPU has the frame back.
++#ifdef __cplusplus
++extern "C"
++#endif
++void port_thp_stored(void* p, u32 n);
++#define LCStoreData(dst, src, n) (memcpy((dst), (src), (n)), port_thp_stored((dst), (n)))
+ static u8 port_thp_lc[0xC000] __attribute__((aligned(32)));
+ #endif
+ 
+@@ -45,8 +51,18 @@
+ 
+ void __THPInverseDCTY8(register THPCoeff*, register u32);
+ 
++#ifdef TARGET_PC
++// THPVideoDecode is platform/thp/thp_decode.cpp's: it runs this off the
++// game's CPU. C linkage, as there (the Xbox 360 build compiles this as C++).
++#ifdef __cplusplus
++extern "C" s32 port_thp_video_decode(void*, void*, void*, void*, void*);
++#endif
++s32 port_thp_video_decode(void* file, void* tileY, void* tileU, void* tileV,
++                          void* work)
++#else
+ s32 THPVideoDecode(void* file, void* tileY, void* tileU, void* tileV,
+                    void* work)
++#endif
+ {
+ 	u8 all_done, status;
+ 	s32 errorCode;
+--- a/libs/THPPlayer/src/THPVideoDecode.c
++++ b/libs/THPPlayer/src/THPVideoDecode.c
+@@ -55,9 +55,21 @@
+ 		OSResumeThread(&VideoDecodeThread);
+ }
+ 
++#ifdef TARGET_PC
++#ifdef __cplusplus
++extern "C"
++#endif
++void port_thp_video_decode_cancel(void);
++#endif
++
+ void VideoDecodeThreadCancel(void)
+ {
+ 	if (VideoDecodeThreadCreated) {
++#ifdef TARGET_PC
++		// a frame decoding on its host thread (platform/thp/thp_decode.cpp)
++		// ends before the player lets go of its buffers
++		port_thp_video_decode_cancel();
++#endif
+ 		OSCancelThread(&VideoDecodeThread);
+ 		VideoDecodeThreadCreated = FALSE;
+ 	}

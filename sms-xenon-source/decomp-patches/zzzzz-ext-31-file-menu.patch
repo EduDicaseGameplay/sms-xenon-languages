@@ -1,0 +1,20 @@
+Reason: extensions (ext/, port_ext.h) hear a save file's menu at file select open and close, with the file, whether it is empty and the item chosen (fileMenu): the native mod API's SMS_EV_FILE_MENU (API 1.6 beta 1)
+--- a/src/GC2D/CardLoad.cpp
++++ b/src/GC2D/CardLoad.cpp
+@@ -3000,4 +3000,16 @@
+ 		if (unk10 == 4)
+ 			SMSGetMSound()->startSoundSystemSE(MSD_SE_SY_2D_OUT, 0, nullptr, 0);
+ 	}
++
++#ifdef TARGET_PC
++	// A save file's menu (selectFunction) takes the player's choice in its
++	// step 2, and its step 3 folds it away with the choice made (unkB6, -1
++	// for B): extensions hear it open and close (port_ext.h fileMenu).
++	{
++		const bool sms_menu = unk1C == PROGRESS_UNK1B;
++		port_ext_file_menu(sms_menu && unk10 == 2 ? unkB0 : -1,
++		                   sms_menu && unk40[unkB0].unk18 == 0,
++		                   sms_menu && (unk10 == 2 || unk10 == 3) ? unkB6 : -1);
++	}
++#endif
+ }

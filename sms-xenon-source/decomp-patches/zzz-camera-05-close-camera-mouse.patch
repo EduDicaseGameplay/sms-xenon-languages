@@ -1,0 +1,30 @@
+Reason: port: mouse look (SMS_MOUSE_CAMERA) turns the Y close-up camera, and so aims FLUDD in it, unless SMS_CLOSE_CAMERA_MOUSE=0 (platform/pad); off, its motion is dropped rather than kept for the normal camera
+--- a/src/Camera/CameraNotice.cpp
++++ b/src/Camera/CameraNotice.cpp
+@@ -257,6 +257,12 @@
+ // (ctrlNormalOrTowerCamera_ passes mCompSPos[6..7] to the same two calls,
+ // inverted as Invert camera X / Y say). The control stick keeps turning it.
+ extern "C" int port_close_camera_cstick;
++// SMS_CLOSE_CAMERA_MOUSE (platform/pad/pad.cpp, on by default): mouse look
++// turns the close-up camera, and so aims FLUDD in it, as it turns the normal
++// camera (CameraNormal.cpp). Off, the motion is dropped, so the normal camera
++// does not jump by it when the close-up view closes.
++extern "C" int port_close_camera_mouse;
++extern "C" int port_camera_take_mouse(f32* dx, f32* dy);
+ #endif
+ 
+ // TODO (closure batch 87): pure frame gap, 0x70 vs 0x40. The one named local
+@@ -283,6 +289,13 @@
+ 		stickX = MsClamp(stickX + unk120->mCompSPos[6], -1.0f, 1.0f);
+ 		stickY = MsClamp(stickY + unk120->mCompSPos[7], -1.0f, 1.0f);
+ 	}
++	f32 mouseX, mouseY;
++	if (port_camera_take_mouse(&mouseX, &mouseY) && port_close_camera_mouse) {
++		// a fast flick turns it further than a held stick, within the s16
++		// rotateY_ByStickX_ makes of it
++		stickX += MsClamp(mouseX, -8.0f, 8.0f);
++		stickY += MsClamp(mouseY, -8.0f, 8.0f);
++	}
+ #endif
+ 
+ 	if (mTargetFreezeFrames == 0) {

@@ -1,0 +1,135 @@
+# Codex findings
+
+Record binary-backed findings from Codex unit work here before promoting reusable rules into the topic catalog.
+
+## 2026-09-23 two-model trial
+
+- `MoveBG/MapObjDolpic`: `TMonumentShine::hitByWater` remains 91.9% (396 B). Frame is exact; the remaining reload and register differences are already documented in its TODO. No edit.
+- `NPC/NpcBase`: `TBaseNPC::perform` remains 94.7% (2024 B). Two sight-vector spellings scored 94.5% and 93.9%, below the baseline. The 0xa0 frame deficit and call-order gap are documented structural residue. No edit.
+- `Camera/lensflare`: `TLensFlare::perform` remains 94.8% (1512 B); target frame 0x2b8 versus source 0x208. The lerp and vector-copy residue is already documented in frame-gaps.md. No edit.
+- `GC2D/SelectShine2`: `TSelectShineManager::perform` remains 94.0% (1180 B); target frame 0x220 versus source 0x1b8. The main `getAngle` residue is documented in the source. The apparent `cCenter` relocation mismatch is an object-symbol alias at the same offset. No edit.
+- Model comparison: gpt-6-sol at low effort and gpt-6-luna at max effort each audited two units, each found no safe semantic change. This trial does not separate model ability; target selection reached already researched residues.
+
+## 2026-09-23 three-agent repeat
+
+- `Enemy/Kumokun`: Retail `checkOnMovingWall` saves `param_3` from r6 in r30, loads the plane normal through offset 0x198, then uses `fmadds` at 0x472c to compute `normal.x * 100.0f + param_3.x` (and likewise for y/z). Source had the scale and addend operands reversed. Reusing the normal vector with `normal.scaleAdd(100.0f, normal, param_3)` improved the function from 93.36% to 95.55%, with zero `changes_all` regressions, unchanged DOL SHA-1, and symbol order PASS with nine pre-existing UNUSED-size warnings. Landed as 017508fa.
+- `Map/BathWaterManager`: gpt-6-sol/medium audited all ten open functions. Remaining gaps were documented frame, register, inlining, and instruction scheduling differences; no justified variant or edit.
+- `Animal/BeeHive`: gpt-6-luna/max audited all eleven sub-99% functions plus mapped data. Nerve branch order, water-message vector direction, event ID order, member use and data values matched the retail evidence. Remaining differences were documented `TPathNode`/quaternion inline behavior, frame/register allocation, or inert structural probes; no justified variant or edit.
+- This repeat found one semantic fix with low-effort Sol and none with medium-effort Sol or max-effort Luna. Units differed, so this measures these assignments rather than model capability in isolation.
+
+## 2026-09-23 closure follow-up
+
+- `Enemy/BathtubKiller`: The map lists `setDeadBathtubKillerAnm` UNUSED at 0xb8 and `breakBathtubKiller`/`explodeBathtubKiller` UNUSED at 0x14c each. The current object emits the set-dead body within both methods; the nerve callers are 99.9% and 100%. Spelling the set-dead statements directly made the methods smaller (0xcc/0xf0 versus 0xd4/0xf8) without improving the nerves. Retail has no addresses for these UNUSED bodies, so the extra map bytes remain unexplained. The old missing-expansion lead is refuted.
+- `Enemy/mameGesso`: Three new reference-lifetime variants for `TNerveMameGessoThrown::execute` worsened its 99.8% baseline, even when a variant reached the retail 0x70 frame. Its 0x248 object size matches the map; the remaining slot and FPR allocation is unresolved.
+- `Player/MarioParticle`: Six TU-local copy/chain/reference variants did not reproduce the six vector slots in `TWarpInCallBack::execute`; the best preserved the 80.2% baseline. The shared `JGVec3.hpp` reference-return form previously raised the function to 92.47% but regresses the tree and loses weak out-of-line bodies, so it remains parked.
+- `Enemy/Amenbo`, `MarioUtil/MtxUtil`, and `Enemy/rocket`: Unit audits and scored variants found only documented stack, register, quaternion, or inline residues. No source changes were retained.
+
+## 2026-09-23 operand scan follow-up
+
+- `Enemy/bgtentacle`: Two switch cases had `unk40` and `unk44` feeding the wrong sine terms. Swapping the source inputs reduced mismatch markers from 160 to 158. Landed as 33707b4e.
+- `Enemy/bosswanwan`: Retail clears `mPullVelocity` in z/y/x order. Explicit field clears reduced `TBossWanwan::control` mismatches from 33 to 31. The shared inverted `li 0/1` residue remains. Landed as e74b5986.
+- `Camera/cameragc`: `calcPosAndAt_` read `mSLAimAngleYChaseMin` at 0x194 where retail reads `mSLHoldAngleXChase` at 0x16c. Correcting the member removed one mismatch. Landed as cfa6b3f5.
+- `Enemy/Koopa`: The apparent 0x68/0x74 access in `TKoopaFlame::attack_` belongs to a documented inline-depth mismatch. Related variants gave no defensible improvement.
+- `MoveBG/MapObjMare`: The 0x174/0x170 store difference in `TMuddyBoat::bind` is instruction alignment within the third `touchWall` expansion; both builds write `mEffectPos.x/y/z`.
+- `Enemy/limitkoopa`: `setUpHitActors` reads the same fields in both builds; the 0xc/0x2c difference is load order. Its five open functions all have deep-search TODOs.
+- `GC2D/SelectShine2`: The swapped f30/f31 constants in `perform` accompany a different but equivalent up-vector construction and angle arithmetic. No edit.
+- `MoveBG/MapObjInit`: `TMapObjBase::initMActor` is the unit's only sub-95% function; its unresolved `param_2` use and inert probes are already documented. No edit.
+- `MSound/MSound`: Three constructor declaration/size variants were inert or worse than 86.9%; the remaining functions have known-open TODOs. No edit.
+- `Enemy/hamukuri`: All nine open functions are 99.67–99.98% fuzzy. Three previously unexplored functions differ only by a known `operator-` temporary stack-slot class; the other six have deep-search TODOs. No edit.
+
+## 2026-09-23 targeted operand follow-up
+
+- `Enemy/fireWanwan`: `TFireWanwan::bind` loaded `mAirFric` at 0x370 in the grounded flying branch; retail loads `mFloorFric` at 0x384. Corrected member, reducing one mismatch. Landed as f2e59f60.
+- `Player/Tongue`: `TYoshiTongue::movement` called virtual `ensureTakeSituation` (slot 0xa8) where retail calls `checkTaking` (slot 0xbc). Corrected call, reducing one mismatch. Landed as 51fbcfee.
+- `System/MarDirectorSetupObjects`: The final heap virtual call in `setupObjects` was `freeTail` (slot 0x18); retail calls `getTotalFreeSize` (slot 0x28). Corrected call. Landed as 2d090efc.
+- `MarioUtil/PacketUtil`: The apparent 0xe1/0xe0 discrepancy in `ShapePacketCallBackFunc` is diff alignment. Both binaries emit 0xe0 for the first TEV register and 0xe1 for the second.
+- `Enemy/chuuhana`: The 0x204/0x20c loads in the Roll nerve read the same x/z members in both builds; inlined `rolling` changes their schedule.
+- `Player/MarioMove`: `checkCurrentPlane` retains documented structural residue. `checkController` stores at `getCurrentNozzle()+0x714` in retail, beyond the declared turbo nozzle size; no justified source member change was found.
+- `Enemy/pakkun`: `TPakkunSeed::rebirth` tests the same water-surface enum values in both builds; the 0x101/0x102 subtraction and 4/3 bounds are equivalent range groupings.
+- `MoveBG/MapObjMamma`: `TLeanMirror::controlShake` computes the same `getBaseTRMtx` address; retail performs +0 then +0x20, while the compiler folds them into +0x20.
+- `GC2D/ConsoleStr`: The 0x34/0x38 versus 0/4 loads in `perform` use equivalent pointer bases for `unk34`.
+- `Enemy/bossgesso`: `perform` has the correct source `mMActor` and destination `unk178` for its matrix copy; three named-local variants did not change load order. A comment-only agent commit was discarded.
+- `System/MarDirectorInitECT`: Both builds store image width and height in the correct projection fields; only load/conversion order differs.
+
+## 2026-09-23 refreshed operand scan
+
+- `Animal/AnimalBase`: Retail applies the frame-rate factor once to max march speed and twice to march acceleration in `execWalk`; the source had the factors reversed. Correcting both operands improved the function from 89.89% to 90.25%. Landed as 73d9cc33.
+- `System/CardManager`: `cmdLoop`'s 0x1ffc versus 0 immediate reflects a documented `setCheckSum`/`CalcCheckSum` inline split, not a bad buffer length. No edit.
+- `MarioUtil/ShadowUtil`: The old scan's load-offset clue was stale at current HEAD. `drawShadowVolume` is 99.9% with a documented stack slot shift; `calcVtx` retains a known frame deficit. No edit.
+- `Enemy/hanasambo`: `SamboHeadRollCallback` reads the same matrix columns in both builds; the 0x10/0 load difference is scheduling. No edit.
+- `Map/MapWire`: Naming x in `getPointPosDefault` improved `getPointPosOnWire` but regressed `move`; naming x/z changed the frame. Source restored.
+- `Player/MarioDraw`: The paired waist pitch/roll loads follow right-to-left argument evaluation. Swapping source arguments would rotate the wrong axes; `calcBaseMtx` retains documented frame residue. No edit.
+- `Camera/CameraBGCheck`: `calcInHouseNo_` has a documented deep search of its far-vector pointer and loop layout. No justified change from the isolated store offset.
+
+## 2026-09-23 operand scan continuation
+
+- `GC2D/CardLoad`: Retail loads 1.5f for both dimensions of the middle choice pane in `TCardLoad::waitForChoiceBM`; source used 0.5f. Correcting both factors removed one operand mismatch marker (`~253` to `~252`). Frame remains 0x468 retail versus 0x3f8 source, so the function and unit remain nonexact. Landed as 1d645406.
+- `Player/MarioAutodemo`: Retail multiplies normalized x/z movement by 50.0f before 2.0f in `TMario::readBillboard`; source had the float operations reversed. Correcting the order improved 99.8% (`~15` markers) to 99.9% (`~13` markers) with the same 520-byte body. Its 0x70 versus 0x30 frame gap remains. Landed as bd64a8fa.
+- `Enemy/conductor`: `TConductor::isBossDefeated` dispatches every map except 3 to the hinokuri arm in retail. The source only spells cases 2 and 3; its TODO already records failed switch/default variants. The unit was Claude-claimed when found, so Codex made no edit.
+- `Enemy/bosswanwan`, `Enemy/feetinv`, `Enemy/beam`, `Enemy/Kumokun::initAttachPlane`, and `Player/WaterGun`: Follow-up operand candidates were explained by equivalent Boolean order, commutative matrix sums, constant-label aliases, instruction scheduling, or diff alignment. No edits.
+- Across 93 sub-95% game functions and 358 functions at 95–99.5% fuzzy, a virtual-call slot scan found no further aligned slot error. Branch/call scans of 69 sub-95% functions found no other binary-backed semantic correction.
+- A wider near-match pass found no differing paired virtual-slot or field offsets among 562 functions at 99.5–99.99% fuzzy. Call/literal review of unclaimed small functions and 127 mid-size call/compare rows found helper scheduling, register renumbering, or previously documented equivalences only. The smallest 4–8-function, data-exact game units also retain multiple documented frame/inline blockers, with no defensible closure target from that screen.
+
+## 2026-09-23 closure and shared-residue follow-up
+
+- `Player/MarioAccess`: `SMS_IsMarioOnWire` remains 93.8%, with retail reloading `mHolder` after its null check and source reusing the first load. Its TODO records 17 prior CSE variants; no untried evidence-backed source shape was found.
+- `TRK_MINNOW_DOLPHIN/debugger/embedded/MetroTRK/Portable/support`, `JSystem/JKernel/JKRExpHeap`, and `JSystem/JAudio/JALibrary/JALModSe`: Each is data-exact with one nonexact function, but its remaining register or frame residue has an extensive source TODO. JALModSe's exact-layout probe uses an unsupported placeholder type and remains refused.
+- `GC2D/SelectMenu`, `MoveBG/MapObjRailBlock`, and `System/DrawSyncManager`: No semantic mismatch survived disassembly review. DrawSyncManager's `setCallback` exact probe uses dead locals; its weak vector `insert` body resides in a shared JGadget header. The other functions retain documented temporary slots, frame gaps, or register scheduling.
+- `NPC/NpcCollision::bind` and `Enemy/enemyAttachment::bind`: Retail's vector subtraction temporary sits at stack offset 0x10; source puts it at 0x28 and 0x24, respectively. Existing cc23/cc31 probes identify a matching pointer-shaped signature, but its source provenance is unsupported and tree-wide use regresses other units. No header change was made.
+- `MoveBG/MapObjPollution::loadAfter`: Frame already matches retail at 0x60, but saved register groups remain swapped; source TODO cc22 and closure batch 211 exhaust the legal local/inline candidates. The one-open-function 8-byte-gap census found only `Enemy/mameGesso`, whose reference-lifetime variants were already worse.
+- `Enemy/Koopa::TKoopaFlame::attack_` needs a `changeAnm` call at one site while eleven other sites inline the byte-exact body; the known statement-count probe regresses the other sites. `Enemy/koopajr::createEnemyInstance` is a different inline-threshold case apparently missing one real constructor statement, which the binary does not identify. No shared lever was justified.
+- `System/MarNameRefGen`: Retail `TCameraMapTool` assignment is inlined in `TVector::InsertRaw`, while the map requires `TStageEventInfo::operator=` out of line. Documented struct/array grouping and template flattening either miss the retail copy pattern or regress the StageEventInfo body; no further layout evidence emerged.
+- Representative unclaimed sub-95% functions in MapCheck, MapMakeList, MapMakeData, igaiga, CameraNotice and MapObjCorona retain documented inline, frame or register residues. The review found no new wrong member, constant or call.
+- `JSystem/JAudio/JALibrary/JALModSe`: The missing 0x68 frame pool in `JALSystem::append` is tied to three `JALPrmSet` and one standalone `JADPrmS<f32>` prologue constructions. Repository types and map symbols do not support the unread constructor argument that makes a placeholder probe exact, so no clean source edit was made.
+- `System/MarDirectorSetupObjects`: The apparent width/height call order swap computes and stores the same two values in both builds. No additional wrong member, virtual slot, literal or missing statement survived the 2095-instruction audit; the prior heap virtual-call correction remains.
+- `Animal/AnimalBase`: `perform` retains matrix/frame allocation and saved-register residue; `execWalk` retains an `MsClamp<f32>` call-versus-inline split and vector/quaternion inline differences. The earlier max-speed/acceleration frame-rate factor fix remains correct; no further semantic operand error was found.
+
+## 2026-09-23 embedded relocation and data audits
+
+- `JSystem/dsptask`: Retail `jdsp` has `R_PPC_ADDR32` at data offset 0x1938 to `lbl_80004600`. The source had literal bytes `80 00 46 00`, so its 7392-byte object was counted nonmatching. A pointer field at that offset reproduces the retail relocation and exact final data bytes, size and alignment. Landed as 6e4228e3; unit data rose from 53.26% to 100% with no code regression.
+- `Camera/CameraChange`: Its 204-byte nonmatching data object is a `changeCamModeSub` switch table. Source and retail use the same case pattern, but branch-layout drift moves the relocation targets by four bytes. The other 292-byte table matches. No data-only edit.
+- `System/CardManager`: The 40-byte nonmatching table is `cmdLoop`'s jump table. Making its targets exact by changing `setCheckSum` inlining regresses `writeOptionBlock_` and other matched callers; the documented alternative loop also regresses callers. No safe edit.
+- `JSystem/JParticle/JPAEmitter`: Retail `.data` input is 0x54 bytes: two retained jump tables total 0x48, followed by a 12-byte weak `JSUIosBase` vtable duplicate that the linker discards. The retail map explicitly lists that duplicate in `JPAEmitter.cpp` and selects the linked vtable and destructor from `enemyMario.cpp`. Source emission of the duplicate is correct; moving the inline destructor would remove retail-attested definitions. Seven `createParticle` switch entries still have shifted targets because that function body is nonexact.
+- `THPPlayer/THPAudioDecode`: `AudioDecoderForOnMemory` has matching 46 instructions and 0x30 frame; its 89.3% fuzzy score comes from a saved-register rotation already documented in source. No wrong operand, constant or missing statement found.
+- `JSystem/JDrama/JDRFrmGXSet`: `TFrmGXSet::perform` has matching operations, fields and constants across 137 instructions. Its 96.8% fuzzy score comes from 0x130 versus 0xc0 frame and scratch-register choices. The diagnostic dead branch that changes allocation is not a valid source edit.
+
+## 2026-09-23 follow-up triage
+
+- `MarioUtil/ShadowUtil`: The 304-byte `.data` mismatch follows local-class `$NNNN` identifiers in six `drawShadowGD` classes. Their makeDL bodies and relocations match; the identifiers come from a shared precompiled-header anonymous-entity counter, already documented in `docs/catalog/linking.md`. Counter fillers would be fakematches.
+- `JSystem/JParticle/JPAMath`, `MoveBG/MapObjPlane`: Their sub-95% targets already have deep source TODOs for memory-resident vector state and by-value temporary/frame layout. No new semantic correction survived pre-screening.
+- GMSE01 branch/immediate scan: Across 87 sub-95% functions and the 95–99.5% game band, apparent literal differences reduced to documented switch pivots, equivalent range checks or diff alignment. No new unguarded US-only behavior was found.
+- `MSound` previous voice ID: Retail stores and loads a word at offset 0x94. Current `JAIBasic.hpp` already declares `u32 unk94`, and `startMarioVoice` emits the matching word store. `docs/catalog/region-us.md` still says halfword; that premise is stale. Base/derived ownership remains unproven, so no layout edit is justified.
+
+## 2026-09-23 addressability cleanup
+
+- `Enemy/gesso::setPolluteGoal`: Removing `(void)&range` leaves the function byte exact (476 bytes, zero markers, 0xa8 frame) because the real `range.rand()` uses the stack object. Landed as c57e63af.
+- `Map/BathWaterManager::calcWaterModel`: Removing `(void)&local_2D8` and `(void)&local_2E4` leaves `prerender`'s 94.5% fuzzy score, markers and 0x348 frame unchanged. Both vectors have real later uses. Landed as b97f680c.
+- `GC2D/ExPane::update`: Three natural alpha-clamp spellings scored 98.2%, 98.2% and 99.9% versus the existing exact body; no clean exact replacement established.
+- `NPC/NpcNerve::TNerveNPCGraphWander`: Retail stores and reloads `toGoal` from three stack slots. Removing `(void)&toGoal` or replacing it with the previously tested unnamed temporary changes the frame; no genuine address-using call appears in retail. No edit.
+- `Map/MapEventDolpic::TDolpicEventRiccoMammaGate::watch`: Retail constructs a matrix and writes `unk34` into it even though it is not read later. Removing `(void)&mtx` drops the exact function to 87.8% and changes the frame. No edit.
+- `JSystem/JParticle/JPADrawVisitor`: Removing three `(void)&mtx` casts regressed Stripe from 98.0% to 88.0% and StripeCross from 97.0% to 85.9%; the casts affect matrix addressability and code generation. No edit.
+
+## 2026-09-23 literal provenance
+
+- `Player/ModelWaterManager`: Source `.sdata2+0x88` held an extra 10.0f and loaded it twice in `move` near `.text+0x3996` and `+0x4236`. Retail loads 32.0f into f31 at 0x8027f6e0 and reuses it at the `gpPollution->clean` paths near 0x8027f7d8 and 0x8027f948. `splashGround(int)` had used 10.0f to scale `mCleanSize`; changing that multiplier to 32.0f removes the extra literal and improves `move` from 96.38% to 96.55% fuzzy, about 407 to 391 mismatch markers, with the same frame. Landed as 93c83343.
+- `System/EventWatcher`: Its extra 0.5f and 3.0f literals come from inline `JGeometry::TUtil<f32>::sqrt` in `evIsNearActors` and `evIsNearSameActors`. Retail branches to the sqrt body at 0x80291ae0 and 0x80292028. This is an inline decision with no supported local semantic correction.
+- `Enemy/BossHanachanMain`: Extra 0.5f and 3.0f literals belong to a weak duplicate `JGeometry::TUtil<f32>::sqrt`, and extra -0.5f belongs to a weak `CLBRoundf<s16>` duplicate. Retail selects other linked copies. Its `perform` source also emits a zero and double 0.001 for f64 `fabs` comparisons where retail uses a float threshold; a named f32 threshold did not change codegen, and no retail `frsp` supports a direct f32 conversion. No edit.
+- `System/Application`: The current retail and source input objects each contain six distinct DVD error strings at the same offsets and bytes. Their `.rodata` sizes are 0x2f8 and 0x2f7 respectively, differing by one trailing zero byte. The older full-source-link note attributing a six-byte gap to merged strings does not reproduce on the current objects; no named source-array fix is justified.
+- A scan of 170 nonexact game-unit `.sdata2` differences found no further defensible literal correction. Most apparent constants were halves of eight-byte conversion values, static tables or string fragments; remaining real constants were tied to known deep TODOs. The `fruitsboat` 0.002 candidate was in an UNUSED guessed helper without a live retail counterpart.
+
+## 2026-09-23 99%+ semantic scan
+
+- `GC2D/SelectMenu::initData`: Retail's low-coin arm branches from object offset 0x2130 into shared shine-flag setup at 0x2258 after the last `coinDigits[2]->changeTexture`. Source branches to the epilogue at 0x2b58 because an `else` encloses all later setup. Closing that `else` after the high-coin digits fixes behavior but changes `initData` from `~109 |1 <2 >0` to `~145 |0 <2 >1` markers, with the same 0x518 source frame against retail 0x538. A separate common block gives the same result; inverting the digit condition is worse. No variant passed the no-regression gate, so the source is unchanged.
+- `NPC/NpcParts::TNpcParts`: Retail tests `j == 0` then `i == 9` before `initSimpleMotionBlend(20)` in the 0x4000010 arm. Source tests `i == 0 && j == 9`, impossible because `j < 2`. Direct, reversed-order and nested corrections each increase changed-instruction markers from ~83 to ~84 with the same frame. The existing pending patch remains uncommitted.
+- `Enemy/enemyMario::kill`: The 0x4c map symbol is UNUSED, has no retained retail body/call, and is unrelated to live `initEnemyValues`; its 4-byte source stub cannot be reconstructed from this evidence. `GC2D/Guide`'s UNUSED `shinePattern`/`mmarkPattern` bodies do inline into `linkSelect`, but the former expansion already matches and the remaining diff identifies no missing helper action.
+- 626 game functions at 99–100% fuzzy were screened for changed direct call targets. Two hits, `TNerveBWDie::execute` and `TMapObjBase::makeObjAppeared`, are documented `TMapCollisionBase::setMtx` call-versus-inline differences with equivalent matrix-copy effects.
+- The 99.0–roughly 99.5% field scan examined 230 functions and 949 changed same-opcode loads/stores; none had a changed numeric field offset. The 99.5–99.99% pass covered 547 functions, again with no changed field offset. Twenty-four apparent float-label changes resolved to equal values or identical conversion constants.
+- The branch scan screened 647 game functions and 173 compare/branch mismatch clusters in 76 functions. Apart from `SelectMenu`, changed branch opcodes checked as equivalent unsigned-zero tests, inverted conditions with the same targets, or layout; no different compare immediate survived alignment. Claude-claimed `Enemy/tinkoopa` was excluded.
+
+## 2026-09-23 branch correction and operand follow-up
+
+- `GC2D/SelectMenu::initData`: Later corrected the bug above with a `goto sharedShineSetup` after the low-coin `hide()` and a label before the common shine-count loop. Retail branches from 0x80174a4c to that shared block at 0x80174b74; this spelling keeps the high-coin-only first shine check in its original scope. It improved `initData` from 99.48% to 99.49% fuzzy, ~109 to ~108 changed markers, with the same 0x518 source frame. Landed as 48176d50; zero regressions, exact DOL SHA-1, symbol order PASS.
+- `NPC/NpcParts::TNpcParts`: A second CFG-focused pass found why valid `j == 0 && i == 9` spellings lose one marker: MWCC swaps the loop-index registers (`j` r22/r23 and `i` r23/r22) at the comparison. Direct condition, an early `break` guard and sequential guards all compile to 94.17% from 94.19%, frame 0x188 versus retail 0x1f8. The bug remains uncommitted under the no-regression rule.
+- Floating arithmetic review: 78 game functions at 99.0–99.5% were checked with symbolic effects; apparent differences were documented frame, inline or phi-model effects. Among 562 functions at 99.5–100%, no directly comparable `fsub`, `fdiv` or fused multiply-add had a wrong operand reversal.
+- Integer-flow review: 561 game functions at 99–100% and at most 2000 bytes were checked with symbolic effects. Candidate immediate differences resolved to equivalent arithmetic (`465-x+224` versus `689-x`), pointer aliases or documented register scheduling; no supported edit.
+- Rechecked the below-95% rows marked `EQUIVALENT` in the semantic-review table for branch reachability, loop identity, side-effect order and pointer aliases. The first, middle and last thirds showed only dead compares, helper inlining, equivalent null-test/loop layouts or scheduling. No new behavior bug was supported.

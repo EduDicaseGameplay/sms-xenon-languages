@@ -1,0 +1,106 @@
+Reason: port: the pause menu's save state and settings hints (patches zzzz-savestate-02, zzzz-ui-settings-01) go beside the life meter while it is at the HUD's top right, and the settings hint goes to the right edge with the save state hint (widescreen_hud = edges)
+--- a/src/GC2D/PauseMenu2.cpp
++++ b/src/GC2D/PauseMenu2.cpp
+@@ -60,6 +60,55 @@
+ 	return width;
+ }
+ 
++#include <GC2D/BoundPane.hpp>
++
++// Where the hints go: the save state hint's buttons and label, and the
++// settings hint under them, right-aligned at `right`. `edge` is the corner's
++// right, which they go with to the screen edge with widescreen_hud = edges.
++struct PauseHintPlace {
++	f32 right, edge;
++	f32 buttonsLine, labelLine, settingsLine;
++};
++
++// At the top right corner, clear of the lives counter at the top centre. The
++// life meter comes down in that corner when Mario is hurt or under water (the
++// HUD's l_ba, its back, in the group l_0 that slides in and out; the radar
++// makes room for it too, patch zzzz-radar-01), and the game is paused where it
++// is. While it is there the hints go beside it, to its left, and a little
++// lower, so the label is under the lives counter and the settings hint over
++// the PAUSE lettering (in 4:3 units, the tightest; wider frames with
++// widescreen_hud = edges have more room, as the meter and the hints go to the
++// edge and the lives counter and lettering stay at the middle).
++static PauseHintPlace PauseHintPlaceNow(const JDrama::TRect& viewport)
++{
++	PauseHintPlace place;
++	place.edge         = viewport.getWidth() - 28.0f;
++	place.right        = place.edge;
++	place.buttonsLine  = 50.0f;
++	place.labelLine    = 74.0f;
++	place.settingsLine = 112.0f;
++	const TGCConsole2* console = gpMarDirector ? gpMarDirector->mConsole : nullptr;
++	if (!console || !console->unk1C4 || !console->unk174)
++		return place;
++	const J2DPane* group = console->unk1C4->getPane();
++	const J2DPane* back  = console->unk174->getPane();
++	if (!group || !back || !group->isVisible() || !back->isVisible())
++		return place;
++	const JUTRect& b = back->getGlobalBounds();
++	// its rays reach past its back: its round width, as a part of the back's
++	const f32 kRays = 1.25f, kGap = 8.0f;
++	const f32 left  = (b.x1 + b.x2) * 0.5f - (b.x2 - b.x1) * 0.5f * kRays;
++	// in the hints' way: in their corner (not where it first comes in, at the middle)
++	if (b.x2 <= b.x1 || b.y2 <= b.y1 || b.x2 < place.edge - 200.0f || b.y1 > place.settingsLine)
++		return place;
++	if (left - kGap < place.right)
++		place.right = left - kGap;
++	place.buttonsLine  = 88.0f;
++	place.labelLine    = 112.0f;
++	place.settingsLine = 136.0f;
++	return place;
++}
++
+ static void PauseStateHintDraw(TPauseMenu2* menu, JDrama::TGraphics* gfx)
+ {
+ 	if (menu->mState == TPauseMenu2::MENU_SAVING || menu->mState == TPauseMenu2::MENU_CLOSED
+@@ -87,14 +136,15 @@
+ 		buttons += plusWidth + 2.0f * gap;
+ 	// the orthograph runs from 0 to the viewport's size
+ 	const JDrama::TRect& viewport = gfx->getViewport();
+-	const f32 right       = viewport.getWidth() - 28.0f;
+-	const f32 buttonsLine = 50.0f, labelLine = 74.0f;
++	const PauseHintPlace place = PauseHintPlaceNow(viewport);
++	const f32 right       = place.right;
++	const f32 buttonsLine = place.buttonsLine, labelLine = place.labelLine;
+ 
+ 	J2DOrthoGraph graph(viewport);
+ 	graph.setPort(); // the menu's screen left its own projection
+ 	graph.setup2D();
+ 	const f32 label = PauseHintTextWidth(font, kLabel, textSize);
+-	GXPC_HudPieceBegin(right - (buttons > label ? buttons : label), right);
++	GXPC_HudPieceBegin(right - (buttons > label ? buttons : label), place.edge);
+ 	// a drop shadow, then the hint (the icons' shadow is their shape in black)
+ 	for (int pass = 0; pass < 2; pass++) {
+ 		const f32 offset = pass == 0 ? 2.0f : 0.0f;
+@@ -138,19 +188,24 @@
+ 	const char* const kLabel = "\xA5 SETTINGS";
+ 	const f32 textSize = 18.0f;
+ 	const JDrama::TRect& viewport = gfx->getViewport();
+-	const f32 right = viewport.getWidth() - 28.0f;
+-	const f32 labelLine = 112.0f;
++	const PauseHintPlace place = PauseHintPlaceNow(viewport);
++	const f32 right = place.right;
++	const f32 labelLine = place.settingsLine;
++	const f32 width = PauseHintTextWidth(font, kLabel, textSize);
+ 	J2DOrthoGraph graph(viewport);
+ 	graph.setPort(); // the menu's screen left its own projection
+ 	graph.setup2D();
++	// at the right edge with the save state hint (widescreen_hud = edges)
++	GXPC_HudPieceBegin(right - width, place.edge);
+ 	// a drop shadow, then the hint
+ 	for (int pass = 0; pass < 2; pass++) {
+ 		const f32 offset = pass == 0 ? 2.0f : 0.0f;
+ 		font->setGX();
+ 		font->setCharColor(pass == 0 ? JUtility::TColor(0, 0, 0, alpha / 2) : JUtility::TColor(255, 255, 255, alpha));
+-		font->drawString_size_scale(right - PauseHintTextWidth(font, kLabel, textSize) + offset, labelLine + offset,
++		font->drawString_size_scale(right - width + offset, labelLine + offset,
+ 		                            textSize, textSize, kLabel, strlen(kLabel), false);
+ 	}
++	GXPC_HudPieceEnd();
+ 	gfx->setScissor(gfx->getScissor());
+ }
+ 

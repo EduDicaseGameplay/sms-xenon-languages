@@ -1,0 +1,77 @@
+Reason: port: split-screen co-op (ext/coop) - player 2 hangs on wires and walks tightropes: an actor of the wire manager's own (a place kept at load), each hanging by its own hands rather than Mario's
+--- a/src/Map/MapWireManager.cpp
++++ b/src/Map/MapWireManager.cpp
+@@ -160,6 +160,14 @@
+ 	GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_SET);
+ }
+ 
++#ifdef TARGET_PC
++// Split-screen co-op (ext/coop): player 2 while they play, or null. They hang
++// on wires as Mario does: an actor of the wire manager's own, each hanging by
++// its own hands (each entry is a TMario).
++extern "C" TTakeActor* port_coop_wire_player2(void);
++static MtxPtr WireActorTakenMtx(TTakeActor* actor) { return ((TMario*)actor)->getTakenMtx(); }
++#endif
++
+ void TMapWireActorManager::doActorToWire()
+ {
+ 	TMapWire* previousWire = unk7C;
+@@ -189,10 +197,17 @@
+ 	}
+ 
+ 	if (unk4.mHeldObject != nullptr) {
++#ifdef TARGET_PC
++		if (unk7C != nullptr)
++			unk7C->setFootPointsAtHanged(WireActorTakenMtx(unk0));
++		if (previousWire != nullptr) {
++			previousWire->setFootPointsAtHanged(WireActorTakenMtx(unk0));
++#else
+ 		if (unk7C != nullptr)
+ 			unk7C->setFootPointsAtHanged(gpMarioOriginal->getTakenMtx());
+ 		if (previousWire != nullptr) {
+ 			previousWire->setFootPointsAtHanged(gpMarioOriginal->getTakenMtx());
++#endif
+ 			unk7C = previousWire;
+ 		}
+ 	}
+@@ -240,6 +255,16 @@
+ void TMapWireManager::perform(u32 cue, JDrama::TGraphics* graphics)
+ {
+ 	if (cue & CUE_MOVE) {
++#ifdef TARGET_PC
++		// player 2 an actor of the wires too, once they are there (load keeps a place)
++		if (TTakeActor* p2 = port_coop_wire_player2()) {
++			bool known = false;
++			for (int i = 0; i < unk1C; ++i)
++				known = known || unk24[i]->unk0 == p2;
++			if (!known && (u32)unk1C < unk20 + 1)
++				entry(p2);
++		}
++#endif
+ 		for (int i = 0; i < unk1C; ++i)
+ 			unk24[i]->doActorToWire();
+ 
+@@ -251,7 +276,11 @@
+ 			mgr = unk24[i];
+ 			mgr->unk4.onHitFlag(HIT_FLAG_NO_COLLISION);
+ 			if (mgr->unk7C != nullptr) {
++#ifdef TARGET_PC
++				MtxPtr mtx = WireActorTakenMtx(mgr->unk0);
++#else
+ 				MtxPtr mtx = gpMarioOriginal->getTakenMtx();
++#endif
+ 				mgr->unk4.offHitFlag(HIT_FLAG_NO_COLLISION);
+ 				mgr->unk4.mPosition.set(mtx[0][3], mtx[1][3], mtx[2][3]);
+ 			}
+@@ -318,7 +347,11 @@
+ 	mLowerSurface.b = val;
+ 
+ 	unk18 = new TMapWire*[unk14];
++#ifdef TARGET_PC
++	unk24 = new TMapWireActorManager*[unk20 + 1]; // and split-screen co-op's player 2
++#else
+ 	unk24 = new TMapWireActorManager*[unk20];
++#endif
+ 
+ 	unk10 = gpCubeWire->unk10;
+ 

@@ -1,0 +1,152 @@
+Reason: port: with frame_rate = 60 or 120 some bosses' steps made as their model is calculated (once per displayed frame) ran two or four times as fast: the Gatekeeper's and Petey's head turns toward Mario (3 and 1 degrees a frame), Phantamanta's post-hit wobble, Hinokuri 2's animation blend, and King Boo's spicy-hit sparks (a new emitter a frame) and slot spin sound; scale them to 30 fps frames
+--- a/src/Enemy/gatekeeper.cpp
++++ b/src/Enemy/gatekeeper.cpp
+@@ -33,6 +33,9 @@
+ #include <MSound/MSSetSound.hpp>
+ #include <MSound/MSoundBGM.hpp>
+ #include <M3DUtil/InfectiousStrings.hpp>
++#ifdef TARGET_PC
++#include "port_framerate.h"
++#endif
+ 
+ static const char* gatekeeper_bastable[] = {
+ 	"/scene/gatekeeper/bas/gene_pakkun_appear1.bas",
+@@ -268,10 +271,20 @@
+ 				// const-reference parameters are what put 3.0f
+ 				// and -3.0f in .sdata instead of .sdata2.
+ 				f32 turn;
++#ifdef TARGET_PC
++				// Port: the head turns as the model is calculated, once
++				// per displayed frame: 3 degrees a 30 fps frame.
++				const f32 portTurn = 3.0f * port_frame_scale();
++				if (0.0f < delta)
++					turn = std::min(portTurn, delta);
++				else
++					turn = std::max(-portTurn, delta);
++#else
+ 				if (0.0f < delta)
+ 					turn = std::min(3.0f, delta);
+ 				else
+ 					turn = std::max(-3.0f, delta);
++#endif
+ 
+ 				turn += cur;
+ 				f32 newYaw     = turn - mOwner->mRotation.y;
+--- a/src/Enemy/bosspakkun.cpp
++++ b/src/Enemy/bosspakkun.cpp
+@@ -735,6 +735,10 @@
+ 	MTXCopy(jointMtx, J3DSys::mCurrentMtx);
+ }
+ 
++#ifdef TARGET_PC
++#include "port_framerate.h"
++#endif
++
+ // TODO: frame 0xd0 against retail's 0x120 with the named block shifted
+ // (toMario 0xdc, rot 0xa0 in retail). Building the head axis before the
+ // toMario subtraction (upstream's order) is what loads it ahead of the
+@@ -773,10 +777,20 @@
+ 	}
+ 
+ 	f32 step = MsAngleDiff(turn, yaw);
++#ifdef TARGET_PC
++	// Port: the head homes as the model is calculated, once per displayed
++	// frame: 1 degree a 30 fps frame.
++	const f32 portStep = port_frame_scale();
++	if (step > 0.0f)
++		step = std::min(step, portStep);
++	else
++		step = std::max(step, -portStep);
++#else
+ 	if (step > 0.0f)
+ 		step = std::min(step, 1.0f);
+ 	else
+ 		step = std::max(step, -1.0f);
++#endif
+ 
+ 	yaw += step;
+ 	mOwner->mHeadYaw = yaw;
+--- a/src/Enemy/bossManta.cpp
++++ b/src/Enemy/bossManta.cpp
+@@ -35,6 +35,9 @@
+ #include <MSound/MSoundBGM.hpp>
+ #include <M3DUtil/InfectiousStrings.hpp>
+ #include <Map/MapCollisionEntry.hpp>
++#ifdef TARGET_PC
++#include "port_framerate.h"
++#endif
+ 
+ // .data order: sFrameRate before sScale (marioUS.MAP).
+ f32 TBossManta::sFrameRate[6] = { 0.3f, 0.5f, 1.2f, 2.0f, 5.0f, 5.3f };
+@@ -777,6 +780,12 @@
+ 
+ void TBossManta::updateEpilogueFrame()
+ {
++#ifdef TARGET_PC
++	// Port: called from calcRootMatrix, once per displayed frame; walk the
++	// 50-step wobble once per 1/30 s.
++	if (!port_native_frame_step(gpMarDirector->unk5C))
++		return;
++#endif
+ 	if (unk154 < 49)
+ 		unk154++;
+ }
+--- a/src/Enemy/hinokuri2.cpp
++++ b/src/Enemy/hinokuri2.cpp
+@@ -208,8 +208,15 @@
+ 		FeetInvCalc(j3dSys.getModel(), unk6E, unk70, unk72, unk74);
+ 	}
+ 
++#ifdef TARGET_PC
++	// Port: the model is calculated once per displayed frame; fade the blend
++	// by 0.05 a 30 fps frame.
++	if (param_1 == 0)
++		unk78 = MsClamp(unk78 - 0.05f * port_frame_scale(), 0.0f, 1.0f);
++#else
+ 	if (param_1 == 0)
+ 		unk78 = MsClamp(unk78 - 0.05f, 0.0f, 1.0f);
++#endif
+ }
+ 
+ THino2Hit::THino2Hit(THinokuri2* owner, int joint_idx, const char* name)
+--- a/src/Enemy/bosstelesa.cpp
++++ b/src/Enemy/bosstelesa.cpp
+@@ -587,6 +587,10 @@
+ 	}
+ }
+ 
++#ifdef TARGET_PC
++#include "port_framerate.h"
++#endif
++
+ void TTelesaSlot::calcRootMatrix()
+ {
+ 	bool rolling = false;
+@@ -600,6 +604,10 @@
+ 		if (unk1E0)
+ 			gpMSound->startSoundActor(MSD_SE_OBJ_SLOT_SPIN, &mPosition);
+ 
++#ifdef TARGET_PC
++		// Port: every other 30 fps frame (this runs once per displayed one).
++		if (port_native_frame_step(gpMarDirector->unk5C))
++#endif
+ 		unk1E0 = 1 - unk1E0;
+ 	}
+ 
+@@ -1425,8 +1433,16 @@
+ 		    getMActor()->getModel()->getAnmMtx(10), 1, this);
+ 	}
+ 
++#ifdef TARGET_PC
++	// Port: each call makes a new emitter and this runs once per displayed
++	// frame, so make them once per 1/30 s, as many as at 30 fps.
++	if (getMActor()->checkCurBckFromIndex(1)
++	    && getMActor()->getFrameCtrl(ANM_TYPE_BCK)->getFrame() < 20.0f
++	    && port_native_frame_step(gpMarDirector->unk5C)) {
++#else
+ 	if (getMActor()->checkCurBckFromIndex(1)
+ 	    && getMActor()->getFrameCtrl(ANM_TYPE_BCK)->getFrame() < 20.0f) {
++#endif
+ 		gpMarioParticleManager->emitAndBindToMtxPtr(BTELESA_JPA_MS_BTLS_SPICY_HIT,
+ 		    getMActor()->getModel()->getAnmMtx(5), 0, nullptr);
+ 	}

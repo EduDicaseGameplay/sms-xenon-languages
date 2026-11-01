@@ -1,0 +1,147 @@
+Xbox 360: the GX core timed by parts with timebase timers (pipe parsing, display-list checks, cached lists, recording; BP/CP/XF writes and vertex loading with SMS_XE_CORE_PARTS=1), less the renderer's time inside each, instead of port patch 11's QPC clock (two kernel calls a pipe command). Applied by xenon/tools/xstage to the staged copy only.
+diff -ru a/platform/gx/src/gx_fifo.cpp b/platform/gx/src/gx_fifo.cpp
+--- a/platform/gx/src/gx_fifo.cpp	2026-10-28 19:37:18.988842931 +0500
++++ b/platform/gx/src/gx_fifo.cpp	2026-10-28 19:50:16.909743046 +0500
+@@ -522,9 +522,61 @@
+     }
+ };
+ int CoreClock::depth = 0;
+-#define GX_CORE_CLOCK CoreClock coreClock
++// CoreClock's two monoSeconds (QPC, 135 ns each) for every command through the pipe cost more than
++// most commands: the core is timed by its parts instead (the sum of all but CP_OUT).
++#define GX_CORE_CLOCK
++
++// [perf]'s split of the core: timebase ticks (__mftb, 16 ns) by part, each scope's own time (a part
++// inside another pauses it), and the renderer's seconds inside each, which [perf] takes off. The
++// entry points (pipe, display lists) always switch; the finer parts (BP, CP, XF, vertices) only
++// with SMS_XE_CORE_PARTS=1, as their switches add ~50 ns a command.
++}  // namespace gx
++#include <ppcintrinsics.h>
++namespace gx {
++enum { CP_OUT, CP_PARSE, CP_BP, CP_CP, CP_XF, CP_VERTS, CP_DL_CHECK, CP_DL_DRAW, CP_DL_RECORD, CP_COUNT };
++unsigned long long g_corePartTicks[CP_COUNT];
++double g_corePartRender[CP_COUNT];
++static int s_corePart = CP_OUT;
++static unsigned long long s_corePartT0;
++static double s_corePartR0;
++static void corePartSwitch(int part) {
++    const unsigned long long t = __mftb();
++    const double r = xeRenderSeconds();
++    g_corePartTicks[s_corePart] += t - s_corePartT0;
++    g_corePartRender[s_corePart] += r - s_corePartR0;
++    s_corePart = part;
++    s_corePartT0 = t;
++    s_corePartR0 = r;
++}
++struct CorePart {
++    int prev;
++    explicit CorePart(int part) : prev(s_corePart) { corePartSwitch(part); }
++    ~CorePart() { corePartSwitch(prev); }
++};
++static int s_coreFine = -1;
++struct CorePartFine {
++    int prev;
++    bool on;
++    explicit CorePartFine(int part) {
++        if (s_coreFine < 0) s_coreFine = getenv("SMS_XE_CORE_PARTS") && getenv("SMS_XE_CORE_PARTS")[0] == '1';
++        on = s_coreFine != 0;
++        if (on) {
++            prev = s_corePart;
++            corePartSwitch(part);
++        }
++    }
++    ~CorePartFine() {
++        if (on) corePartSwitch(prev);
++    }
++};
++#define GX_CORE_PART(p) CorePart corePart(p)
++#define GX_CORE_PART_FINE(p) CorePartFine corePart(p)
++#define GX_CORE_PART_NEXT(p) corePartSwitch(p)
+ #else
+ #define GX_CORE_CLOCK
++#define GX_CORE_PART(p)
++#define GX_CORE_PART_FINE(p)
++#define GX_CORE_PART_NEXT(p)
+ #endif
+ 
+ // ------------------------------------------------------------------ packed vertex formats
+@@ -935,6 +987,7 @@
+         if (op == 0x08) {
+             len = 6;
+             if (avail < len) break;
++            GX_CORE_PART_FINE(CP_CP);
+             writeCP(p[1], be32(p + 2));
+         } else if (op == 0x10) {
+             if (avail < 5) { len = 5; break; }
+@@ -942,6 +995,7 @@
+             uint32_t cnt = (hdr >> 16) + 1;
+             len = 5 + cnt * 4;
+             if (avail < len) break;
++            GX_CORE_PART_FINE(CP_XF);
+             uint32_t words[64];
+             uint16_t addr = uint16_t(hdr & 0xFFFF);
+             for (uint32_t i = 0; i < cnt;) {
+@@ -953,6 +1007,7 @@
+         } else if (op == 0x20 || op == 0x28 || op == 0x30 || op == 0x38) {
+             len = 5;
+             if (avail < len) break;
++            GX_CORE_PART_FINE(CP_XF);
+             loadIndexedXF(op, be16(p + 1), be16(p + 3));
+         } else if (op == 0x40) {
+             len = 9;
+@@ -967,6 +1022,7 @@
+         } else if (op == 0x61) {
+             len = 5;
+             if (avail < len) break;
++            GX_CORE_PART_FINE(CP_BP);
+             writeBP(be32(p + 1));
+         } else if (op >= 0x80 && op < 0xC0) {
+             if (avail < 3) { len = 3; break; }
+@@ -975,6 +1031,7 @@
+             len = 3 + cnt * L.size;
+             if (avail < len) break;
+             g_traceLastVat = op & 7;
++            GX_CORE_PART_FINE(CP_VERTS);
+             if (g_gxStats) {
+                 double f0 = g_flushSeconds;  // a batch flushed inside counts as drawing
+                 double t0 = monoSeconds();
+@@ -1014,6 +1071,7 @@
+ 
+ void runCommands(const uint8_t* data, uint32_t size) {
+     GX_CORE_CLOCK;
++    GX_CORE_PART(CP_PARSE);
+     uint32_t need = 0;
+     uint32_t used = parse(data, size, &need);
+     if (used < size) logmsg("display list ends inside a command (%u of %u bytes used)", used, size);
+@@ -1270,6 +1328,7 @@
+ 
+ void callDisplayList(const uint8_t* data, uint32_t size) {
+     GX_CORE_CLOCK;
++    GX_CORE_PART(CP_DL_CHECK);
+     if (!data || !dlCacheEnabled() || !rendererReady() || s_dlRec) {
+         runCommands(data, size);
+         return;
+@@ -1281,6 +1340,7 @@
+         return;
+     }
+     if (dlReusable(e, data, size)) {
++        GX_CORE_PART_NEXT(CP_DL_DRAW);
+         if (e.stateOnly) {
+             dlReplayState(e);
+             e.misses = 0;
+@@ -1302,6 +1362,7 @@
+         return;
+     }
+     // (re)record; a list that keeps changing is left alone for a while
++    GX_CORE_PART_NEXT(CP_DL_RECORD);
+     if (e.valid || e.size) e.misses++;
+     if (batchUsesArena()) flushBatch();  // the batch may still read the runs about to be dropped
+     s_dlCacheBytes -= e.bytes;
+@@ -1407,6 +1468,7 @@
+ 
+ static void pipeRun() {
+     GX_CORE_CLOCK;
++    GX_CORE_PART(CP_PARSE);
+     uint32_t need = 1;
+     uint32_t used = parse(s_pipeBuf, s_pipeLen, &need);
+     if (used == s_pipeLen) {

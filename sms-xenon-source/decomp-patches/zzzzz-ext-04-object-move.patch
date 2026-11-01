@@ -1,0 +1,23 @@
+Reason: extensions (ext/, port_ext.h) hear of each object's move (JDrama::TViewObj::testPerform with CUE_MOVE), before and after: multiplayer makes the player nearest an object its Mario while it moves
+
+--- a/libs/JSystem/src/JDrama/JDRViewObj.cpp
++++ b/libs/JSystem/src/JDrama/JDRViewObj.cpp
+@@ -1,4 +1,5 @@
+ #include <JSystem/JDrama/JDRViewObj.hpp>
++#include "port_ext.h"
+ 
+ void JDrama::TViewObj::testPerform(u32 cue, JDrama::TGraphics* graphics)
+ {
+@@ -10,6 +11,12 @@
+ 	}
+ 	cue &= ~unkC.get();
+ 	if (cue) {
++		// port: extensions hear of each object's move, before and after
++		// (ext/multiplayer: the player nearest it is "Mario" while it moves)
++		if (cue & CUE_MOVE)
++			port_ext_object_move(this, 0);
+ 		perform(cue, graphics);
++		if (cue & CUE_MOVE)
++			port_ext_object_move(this, 1);
+ 	}
+ }

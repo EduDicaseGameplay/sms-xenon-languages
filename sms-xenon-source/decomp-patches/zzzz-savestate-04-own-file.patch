@@ -1,0 +1,100 @@
+Reason: port: a state keeps the file it was saved from, and a position-only load saves its progress over that file only, never another
+--- a/src/System/Application.cpp
++++ b/src/System/Application.cpp
+@@ -1045,6 +1045,22 @@
+ static u16 sStateLoadFrames;
+ static bool sStateLoadLeft; // the old stage has stopped playing
+ 
++// A save time no file on the card has (zzzz-savestate-04): the game will not
++// save over a file with it, as with another memory card's, until the file
++// select reads a file and its time.
++static const s64 kStateNoFileTime = -1;
++static bool sStateFileUnknown; // the state loading doesn't say its file: no file's time is taken
++
++// The file being played, as a state keeps it: 1 to 3 (A to C), 0 when there
++// is none (the title, or a game a state without its file was loaded into).
++static s8 ApplicationStateFileOf(TApplication* app)
++{
++	if (app->mCurrArea.getStage() == 15 || app->mSaveFile < 0 || app->mSaveFile > 2
++	    || TFlagManager::getInstance()->getLastSaveTime() == kStateNoFileTime)
++		return 0;
++	return (s8)(app->mSaveFile + 1);
++}
++
+ static void ApplicationStateCollect(TApplication* app, PortSaveStatePortable* p)
+ {
+ 	memset(p, 0, sizeof *p);
+@@ -1081,6 +1097,7 @@
+ 		p->cameraAt[2]  = gpCamera->unk148.z;
+ 	}
+ 	TFlagManager* flags = TFlagManager::getInstance();
++	p->saveFile = ApplicationStateFileOf(app);
+ 	for (int i = 0; i < PORT_SAVESTATE_CARD_BOOLS; i++)
+ 		p->cardBools[i] = (u8)flags->getFlag(0x10000 + i);
+ 	for (int i = 0; i < PORT_SAVESTATE_CARD_INTS; i++)
+@@ -1166,7 +1183,8 @@
+ 			gun->mCurrentWater = sStateLoad.water;
+ 		}
+ 	}
+-	port_savestate_notify("State loaded (position only)");
++	port_savestate_notify(sStateFileUnknown ? "State loaded (position only). Its file is unknown, so no file is saved over"
++	                                        : "State loaded (position only)");
+ }
+ 
+ static void ApplicationStateStartWarp(TApplication* app, TMarDirector* dir)
+@@ -1208,7 +1226,7 @@
+ 		return;
+ 	sStateCardReading = false;
+ 	const int slot    = app->mSaveFile;
+-	if (gpCardManager->getLastStatus() == CARD_RESULT_READY && slot >= 0 && slot < 3) {
++	if (gpCardManager->getLastStatus() == CARD_RESULT_READY && slot >= 0 && slot < 3 && !sStateFileUnknown) {
+ 		// a damaged file, or one never saved, the prompt asks about as ever
+ 		const TCardBookmarkInfo& mark = sStateCardMarks[slot];
+ 		if (mark.unk0 != 1 && mark.unk18 != 0 && TFlagManager::getInstance()->getLastSaveTime() != (s64)mark.unk8) {
+@@ -1219,6 +1237,30 @@
+ 	gpCardManager->unmount();
+ }
+ 
++// A state loaded by position only puts its file's progress (its flags) into
++// the game, which then saves it over the file being played. That is the
++// state's own file when the state says which it is: the game goes back to
++// that file, whichever was being played. A state from before states said
++// (or saved at the title) is taken as the file being played's, as ever, but
++// at the title no file is being played (only the last one's number is left),
++// so the game then saves over no file until the file select reads one.
++static void ApplicationStateTakeFile(TApplication* app)
++{
++	sStateFileUnknown = false;
++	const int file    = sStateLoad.saveFile - 1;
++	if (file >= 0 && file < 3) {
++		if (app->mSaveFile != file)
++			OSReport("[savestate] this state is file %c's: playing file %c\n", 'A' + file, 'A' + file);
++		app->mSaveFile = (s8)file;
++		return;
++	}
++	if (ApplicationStateFileOf(app) == 0) {
++		OSReport("[savestate] this state doesn't say which file it is from: no file is saved over\n");
++		sStateFileUnknown = true;
++		TFlagManager::getInstance()->setLastSaveTime(kStateNoFileTime);
++	}
++}
++
+ // Loads `path`: exactly when this build can (the screen is black for it, and
+ // fades back in), else its portable part.
+ static void ApplicationStateLoad(TApplication* app, TMarDirector* dir, bool paused, const char* path)
+@@ -1235,6 +1277,7 @@
+ 			app->mFader->startFadeinT(kStateFadeSeconds);
+ 		}
+ 		port_savestate_notify("State loaded");
++		sStateFileUnknown = false;
+ 		ApplicationStateCardStart();
+ 		return;
+ 	}
+@@ -1242,6 +1285,7 @@
+ 		app->mFader->startFadeinT(kStateFadeSeconds);
+ 	if (!hasPortable)
+ 		return;
++	ApplicationStateTakeFile(app);
+ 	ApplicationStateCardStart();
+ 	if (paused) {
+ 		sStateLoadPhase  = STATE_LOAD_UNPAUSE;

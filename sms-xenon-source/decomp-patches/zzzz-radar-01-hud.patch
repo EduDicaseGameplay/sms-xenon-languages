@@ -1,0 +1,30 @@
+Reason: port: the radar (src/radar.cpp, SMS_RADAR=1): the HUD draws it last, at its top right, given where the life meter is so it can make room
+--- a/src/GC2D/GCConsole2.cpp
++++ b/src/GC2D/GCConsole2.cpp
+@@ -586,6 +586,7 @@
+ extern "C" void GXPC_SetHud(int on);
+ extern "C" void GXPC_HudPaneBegin(float x1, float x2);
+ extern "C" void GXPC_HudPaneEnd(void);
++#include "port_radar.h"
+ #endif
+ 
+ TGCConsole2::TGCConsole2(const char* name)
+@@ -4869,6 +4870,18 @@
+ 		console->drawWater(graph);
+ 	}
+ #ifdef TARGET_PC
++	// the radar at the HUD's top right, over everything else of the HUD
++	// (src/radar.cpp), told where the life meter is this frame (its back,
++	// l_ba, in the group l_0 that slides in and out) so it can make room
++	if (port_radar) {
++		const J2DPane* group = console->unk1C4->getPane();
++		const J2DPane* back  = console->unk174->getPane();
++		if (group->isVisible() && back->isVisible()) {
++			const JUTRect& b = back->getGlobalBounds();
++			RadarDraw(graphics->getViewport(), b.x1, b.y1, b.x2, b.y2);
++		} else
++			RadarDraw(graphics->getViewport(), 0, 0, 0, 0);
++	}
+ 	GXPC_SetHud(0);
+ #endif
+ }

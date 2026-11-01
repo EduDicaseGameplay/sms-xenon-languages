@@ -1,0 +1,53 @@
+Reason: player->set_hidden_parts for mods (port_ext_hidden_player_parts): an extension may leave parts of Mario out while the rest of him is drawn. His head: the head joint (MarioHeadCtrl) shrunk to a point, and with it the face, hair and whatever hangs from it, and his cap not drawn. FLUDD: not entered for drawing (it still sprays). A first-person camera sits where his head is, and the player sees his body looking down. Without such an extension, nothing changes.
+
+--- a/src/Player/MarioDraw.cpp
++++ b/src/Player/MarioDraw.cpp
+@@ -1,4 +1,7 @@
+ #include <Player/Mario.hpp>
++#ifdef TARGET_PC
++#include "port_ext.h"
++#endif
+ #include <Player/MarioCap.hpp>
+ #include <Player/WaterGun.hpp>
+ 
+@@ -455,6 +458,16 @@
+ {
+ 	// volatile u32 padding[34];
+ 	Mtx transform;
++#ifdef TARGET_PC
++	// an extension may leave his head out (port_ext.h): the head joint, and
++	// the face, hair and cap hung from it, shrunk to a point (not to nothing,
++	// which the normals' matrices could not invert)
++	if (param_2 == 0 && (port_ext_hidden_player_parts(gpMarioForCallBack) & PORT_PLAYER_PART_HEAD)) {
++		MTXScale(transform, 0.001f, 0.001f, 0.001f);
++		MTXConcat(J3DSys::mCurrentMtx, transform, J3DSys::mCurrentMtx);
++		return 1;
++	}
++#endif
+ 	if (param_2 == 0) {
+ 		if (gpMarioForCallBack->getStatus() == MARIO_STATUS_READ_BILLBOARD) {
+ 			TBaseNPC* npc = gpMarDirector->getTalkingNPC();
+@@ -2388,7 +2401,12 @@
+ 		mRHand4ndModel->entry();
+ 	}
+ 
+-	if (mCap != nullptr) {
++	if (mCap != nullptr
++#ifdef TARGET_PC
++	    // the cap goes with his head
++	    && !(port_ext_hidden_player_parts(this) & PORT_PLAYER_PART_HEAD)
++#endif
++	) {
+ 		mCap->perform(CUE_ENTRY, graphics);
+ 	}
+ 
+--- a/src/Player/MarioMain.cpp
++++ b/src/Player/MarioMain.cpp
+@@ -225,6 +225,7 @@
+ 			// an extension may draw the player its own way (port_ext.h): FLUDD
+ 			// goes with him, whatever a mod's isYoshiMaintainFluddModel says
+ 			if (!port_ext_hide_player_model(this)
++			    && !(port_ext_hidden_player_parts(this) & PORT_PLAYER_PART_FLUDD)
+ 			    && (SMS_MOD_SITE(0x8024D68C)
+ 			        ? (SMS_MOD_GPR(31, this),
+ 			           ((bool (*)())SMS_MOD_SITE(0x8024D68C))())

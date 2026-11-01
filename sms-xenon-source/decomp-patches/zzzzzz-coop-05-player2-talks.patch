@@ -1,0 +1,52 @@
+Reason: port: split-screen co-op (ext/coop) - player 2 talks to people and reads signs: the director also looks for player 2's (port_coop_find_talk_npc), controller 2's B talks while they have someone to talk to, and their press starts the talk with them
+--- a/src/System/MarDirectorEvent.cpp
++++ b/src/System/MarDirectorEvent.cpp
+@@ -98,6 +98,12 @@
+ static inline TMarioGamePad* MDEPad(TMarDirector* d) { TMarioGamePad* p = d->unk18[0]; return p; }
+ static inline TTalkCursor* MDECursor(TMarDirector* d) { TTalkCursor* c = d->unk84; return c; }
+ 
++#ifdef TARGET_PC
++// Split-screen co-op (ext/coop): the person player 2 can talk to (as
++// findNearestTalkNPC finds Mario's, with player 2 as Mario), or null.
++TBaseNPC* port_coop_find_talk_npc(TMarDirector* director);
++#endif
++
+ void TMarDirector::movement_game()
+ {
+ 	MDECursor(this)->associateNPC(nullptr);
+@@ -105,6 +111,10 @@
+ 	switch (unk124) {
+ 	case 0:
+ 		unk18[0]->offFlag(0x4);
++#ifdef TARGET_PC
++		if (unk18[1])
++			unk18[1]->offFlag(0x4);
++#endif
+ 		if (SMSGetMarioBound()->isHolding())
+ 			return;
+ 		if (SMSGetCamera()->isLButtonCamera())
+@@ -124,6 +134,24 @@
+ 					    && (unk18[0]->mEnabledFrameMeaning & 0x800))
+ 						unk126 = 1;
+ 				}
++#ifdef TARGET_PC
++				// split-screen co-op: player 2 talks to the people beside
++				// them, found as Mario's are (port_coop_find_talk_npc);
++				// controller 2's B talks while they have someone to
++				if (TBaseNPC* p2Npc = port_coop_find_talk_npc(this)) {
++					if (talkNpc == nullptr) {
++						unkA0 = p2Npc;
++						unk84->associateNPC(p2Npc);
++					}
++					unk18[1]->onFlag(4);
++					unk128 |= 0x1;
++					if ((unk128 & 2)
++					    && (unk18[1]->mEnabledFrameMeaning & 0x800)) {
++						unkA0  = p2Npc;
++						unk126 = 1;
++					}
++				}
++#endif
+ 			}
+ 		}
+ 		break;

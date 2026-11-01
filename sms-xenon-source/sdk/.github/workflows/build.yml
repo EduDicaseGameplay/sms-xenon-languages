@@ -1,0 +1,139 @@
+# Builds the lua mod and the header checks for every platform the game runs
+# on, runs the checks, and on a tag (v*) releases the lua mod as one zip with
+# a library for each platform.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux libraries are built on Ubuntu 22.04, so they load on glibc
+          # 2.35 and newer (a newer one, as on ubuntu-24.04, would make them
+          # need it: fmod@GLIBC_2.38)
+          - platform: linux-x86_64
+            os: ubuntu-24.04
+            container: ubuntu:22.04
+          - platform: linux-x86
+            os: ubuntu-24.04
+            container: ubuntu:22.04
+            cmake: -DSMS_MOD_ARCH=32
+            apt: gcc-multilib g++-multilib
+          - platform: linux-arm64
+            os: ubuntu-24.04-arm
+            container: ubuntu:22.04
+          - platform: windows-x86_64
+            os: windows-2025
+            cmake: -A x64
+          - platform: windows-x86
+            os: windows-2025
+            cmake: -A Win32
+          - platform: macos-arm64
+            os: macos-15
+            cmake: -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          - platform: macos-x86_64
+            os: macos-15-intel
+            cmake: -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    steps:
+      - if: matrix.container
+        name: Tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential git ca-certificates python3-pip zip ${{ matrix.apt }}
+          pip3 install cmake
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake }}
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - if: matrix.container
+        name: Check the glibc it needs
+        run: |
+          need=$(objdump -T build/mods/lua/bin/*/lua_host.so | grep -o 'GLIBC_[0-9.]*' | sort -t. -k2,2n -k3,3n -u | tail -1)
+          echo "needs $need"
+          [ "$(printf '%s\nGLIBC_2.35\n' "$need" | sort -t. -k2,2n -k3,3n | tail -1)" = GLIBC_2.35 ]
+      - name: Check the platform folder
+        shell: bash
+        run: |
+          ls build/mods/lua/bin
+          test -d "build/mods/lua/bin/${{ matrix.platform }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lua-${{ matrix.platform }}
+          path: build/mods/lua
+          if-no-files-found: error
+
+  # One zip, mods/lua as the game loads it, with every platform's library.
+  package:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: lua-*
+          path: parts
+      - name: Merge the platforms
+        run: |
+          mkdir -p out/lua
+          for d in parts/lua-*; do cp -R "$d"/. out/lua/; done
+          ls -R out/lua
+          test "$(ls out/lua/bin | wc -l)" -eq 7
+          version="${GITHUB_REF_NAME#v}"
+          [[ "$GITHUB_REF_TYPE" == tag ]] || version="0.0.0-${GITHUB_SHA::7}"
+          echo "zip=sms-lua-mod-$version.zip" >> "$GITHUB_ENV"
+      - name: Zip
+        run: |
+          cd out && zip -r -X "../$zip" lua
+          cd .. && md5sum "$zip" && sha256sum "$zip" && stat -c '%s bytes' "$zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sms-lua-mod
+          path: ${{ env.zip }}
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sms-lua-mod
+      - name: The tag is the SDK's version
+        run: tools/check-version.sh "$GITHUB_REF_NAME"
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          zip=$(ls sms-lua-mod-*.zip)
+          version="${GITHUB_REF_NAME#v}"
+          api=$(echo "$version" | cut -d. -f1-2)
+          flags=()
+          if [[ $version == *-beta.* ]]; then
+            # a pre-release: GitHub's "latest" stays the last release
+            api="$api beta ${version##*-beta.}"
+            flags=(--prerelease)
+            pre='\n\nA pre-release: what it adds may still change before the release. Build a mod against it with `GIT_TAG '"$GITHUB_REF_NAME"'`; it needs a game built with this SDK (docs/MODDING.md, "Pre-releases").'
+          fi
+          notes=$(printf 'API %s. The lua mod, which runs Lua script mods: unzip into the game'"'"'s mods/ folder (it holds lua/, with a library for every platform), or run `python3 tools/mods/get.py lua` in the port.'"${pre:-}"'\n\nMD5 `%s`, SHA-256 `%s`, %s bytes.\n\nWhat changed: [CHANGELOG.md](%s/blob/%s/CHANGELOG.md).' \
+            "$api" "$(md5sum "$zip" | cut -d' ' -f1)" "$(sha256sum "$zip" | cut -d' ' -f1)" "$(stat -c %s "$zip")" \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_REF_NAME")
+          gh release create "$GITHUB_REF_NAME" "$zip" "${flags[@]}" --title "sms-mod-sdk $GITHUB_REF_NAME" --notes "$notes"
