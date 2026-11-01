@@ -1,0 +1,27 @@
+# Every file is stored and checked out BYTE FOR BYTE, with no line-ending conversion.
+# Reason: the build scripts (xenon/tools/xstage, build.sh, ...) run on Linux/WSL and break if
+# Git for Windows turns LF into CRLF on clone. This keeps the code identical to the original.
+# (sms-xenon-source/.gitattributes, from the original project, still applies to its folder.)
+* -text
+
+# These files must never be in the repository (see .gitignore). If one ever shows up,
+# Git treats it as binary: no diff and no changes to its contents.
+*.iso   binary
+*.gcm   binary
+*.ciso  binary
+*.rvz   binary
+*.wia   binary
+*.gcz   binary
+*.nkit* binary
+*.szs   binary
+*.arc   binary
+*.bmg   binary
+*.bti   binary
+*.bfn   binary
+*.thp   binary
+*.dol   binary
+*.xex   binary
+*.pdb   binary
+*.7z    binary
+*.zip   binary
+*.rar   binary

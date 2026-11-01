@@ -1,0 +1,60 @@
+# ============================================================================================
+#  WHAT MUST NEVER GO INTO THE REPOSITORY
+#
+#  Super Mario Sunshine and everything on its disc belong to Nintendo.
+#  This repository holds SOURCE CODE ONLY. Disc images, files extracted from the disc,
+#  generated language packs and compiled executables stay on your own computer.
+# ============================================================================================
+
+# --- Disc images (your USA, European and Brazilian discs) ----------------------------------
+*.iso
+*.gcm
+*.ciso
+*.rvz
+*.wia
+*.gcz
+*.nkit*
+*.dol
+# If you keep the disc images inside the repository, use the isos/ folder (it is ignored)
+/isos/
+
+# --- Archives (zipped disc images, the port's packages, downloads) -------------------------
+*.7z
+*.zip
+*.rar
+
+# --- Game data extracted or generated from the discs ---------------------------------------
+# sms_extract.py -> files/ and sys/  |  sms_language.py -> mods/languages/<code>/
+/jogo-xbox/
+/pacotes-idioma/
+**/mods/languages/
+/files/
+/sys/
+*.szs
+*.arc
+*.bmg
+*.bti
+*.bfn
+*.thp
+
+# --- Build output ---------------------------------------------------------------------------
+build/
+build-xenon/
+/work/
+*.xex
+*.pdb
+*.obj
+*.unsuccessfulbuild
+
+# --- Files the game writes on the console ---------------------------------------------------
+sms.log
+data/shaders/
+data/sms-port/
+savestates/
+
+# --- Python and the operating system --------------------------------------------------------
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+desktop.ini
