@@ -232,6 +232,12 @@ Se o jogo abrir em inglês sem você ter escolhido, abra o `sms.log` na pasta do
   seleção de fase, tela de save, legendas e título, mas nem tudo o que a versão europeia muda foi mapeado.
 - **A ISO americana é sempre necessária**: a europeia e a BR fornecem só os textos.
 - As legendas dos vídeos vêm do disco PAL e podem ficar um pouco fora de sincronia.
+- **Falar com os personagens não toca som de voz**; só as cenas (cutscenes) têm vozes. Isso acontece
+  também em inglês, no Xbox e no port de PC, e é igual aos vídeos do jogo original no GameCube: não é
+  causado pelos pacotes de idioma.
+- A própria ISO da tradução BR tem três arquivos de mensagem com defeito, então o pacote `pt` também tem:
+  na Delfino Plaza, o `dolpic6` não tem uma das mensagens (a partir da 6ª, texto e voz ficam uma posição
+  deslocados) e o `dolpic7` dá outra voz a duas mensagens; em Noki Bay, o `mare6` tem 28 mensagens em vez de 4.
 
 Encontrou um texto que não traduziu? Abra uma *issue* dizendo em qual tela.
 

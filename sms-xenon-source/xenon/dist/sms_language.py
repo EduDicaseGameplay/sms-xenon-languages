@@ -7,8 +7,8 @@ USA_IMAGE is the dump of your North American disc (GMSE01), the one sms_extract.
 game runs on it. OTHER_IMAGE is a disc with the game's text in other languages (GMSP01): the
 European release (English, French, German, Spanish, Italian), or a translation built on it, such
 as the Brazilian Portuguese one, which has Portuguese where the European disc has Spanish.
-OUT_FOLDER receives mods/languages/<code>/ for each language; copy mods\\ next to default.xex and
-put SMS_LANGUAGE=<code> in sms_env.txt.
+OUT_FOLDER receives mods/languages/<code>/ for each language; copy mods\\ next to default.xex. The
+game's menu then offers them when it starts (SMS_LANGUAGE=<code> in sms_env.txt skips the menu).
 
 A disc's languages are its slots: en, fr, ge, it, sp (and us, jp on some translations). By
 default the European disc gives fr, de, es and it, and a disc whose Spanish slot holds
@@ -261,6 +261,37 @@ class Rarc:
         return head + info + node_bytes + entry_bytes + strings + bytes(blob)
 
 
+def us_messages(bmg):
+    """A message file (BMG) in the North American layout. The European ones with a STR1 section
+    keep each message's voice (JMSMesgEntry::mVoiceIndex, the sound a character makes when it
+    talks) in byte 10 of its INF1 entry, after a 16-bit STR1 index; the game reads byte 8, where
+    they always hold 0, so every character would speak with that one voice. The voice goes back
+    to byte 8; STR1 stays, as the game skips it. Files without STR1 (subtitles, speech balloons)
+    already have the North American layout."""
+    if bmg[:8] != b'MESGbmg1':
+        return bmg
+    out = bytearray(bmg)
+    at, inf, has_str1 = 0x20, None, False
+    while at + 8 <= len(out):
+        tag, size = bytes(out[at:at + 4]), be32(out, at + 4)
+        if tag == b'INF1':
+            inf = at
+        elif tag == b'STR1':
+            has_str1 = True
+        if size == 0:
+            break
+        at += size
+    if inf is None or not has_str1:
+        return bmg
+    count, size = struct.unpack_from('>HH', out, inf + 8)
+    if size != 12:
+        return bmg
+    for i in range(count):
+        e = inf + 16 + i * size
+        out[e + 8:e + 12] = bytes([out[e + 10], 0, 0, 0])
+    return bytes(out)
+
+
 def textures_of(blo):
     """The texture names a screen layout (BLO) refers to."""
     out = []
@@ -292,7 +323,7 @@ def make_pack(us, other, slot, code, out):
         language's files win, and the North American ones it lacks stay."""
         base = us.archive(base_path)
         for p, (attr, data) in lang.files.items():
-            base.put(p, data, attr)
+            base.put(p, us_messages(data) if p.lower().endswith('.bmg') else data, attr)
         return yaz0_store(base.build())
 
     # Menus, the pause guide, the shine select, the save screen, movie subtitles: whole archives.
@@ -312,7 +343,7 @@ def make_pack(us, other, slot, code, out):
             if common.get(target) is None:
                 print('  note: common.szs has no %s; skipped' % target)
                 continue
-            write('/data/common.szs' + target, data, inside=True)
+            write('/data/common.szs' + target, us_messages(data), inside=True)
 
     # Every stage's dialogue: scene/<stage>.szs/map/message.bmg.
     stages = sorted(p for p in us.files if p.startswith('/data/scene/') and p.endswith('.szs'))
@@ -321,7 +352,7 @@ def make_pack(us, other, slot, code, out):
             continue
         msg = other.archive(p).get('/map/message_%s.bmg' % slot)
         if msg is not None:
-            write(p + '/map/message.bmg', msg, inside=True)
+            write(p + '/map/message.bmg', us_messages(msg), inside=True)
 
     # The font: the language's accented letters (a translation may add its own).
     font = other.archive('/data/nintendo.szs').get('/font/standard_fontex.bfn')
@@ -337,7 +368,7 @@ def make_pack(us, other, slot, code, out):
     put = []
     msg = lang_opt.get('/loadmessage_%s.bmg' % slot)
     if msg is not None:
-        put.append(('/loadmessage.bmg', msg))
+        put.append(('/loadmessage.bmg', us_messages(msg)))
     layouts = []
     elsewhere = set()  # pictures the North American layouts take from another archive too
     for scrn in ('title_1', 'load_score'):
@@ -427,7 +458,7 @@ def main():
             sys.exit('sms_language: %s has no language slot %s' % (args[1], slot))
         print('%s (slot %s) -> mods/languages/%s' % (args[1], slot, code))
         make_pack(us, other, slot, code, args[2])
-    print('Done. Copy mods next to default.xex, and put SMS_LANGUAGE=<code> in sms_env.txt.')
+    print('Done. Copy mods next to default.xex; the game asks for the language when it starts.')
 
 
 if __name__ == '__main__':

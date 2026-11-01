@@ -14,7 +14,7 @@ git diff 26a14ce HEAD -- sms-xenon-source
 
 | Arquivo | Tipo | O que mudou |
 |---|---|---|
-| [`xenon/dist/sms_language.py`](sms-xenon-source/xenon/dist/sms_language.py) | **criado** | Gera os pacotes de idioma (`mods/languages/<código>`) a partir da ISO americana + uma ISO PAL (europeia ou PT-BR). |
+| [`xenon/dist/sms_language.py`](sms-xenon-source/xenon/dist/sms_language.py) | **criado** | Gera os pacotes de idioma (`mods/languages/<código>`) a partir da ISO americana + uma ISO PAL (europeia ou PT-BR). Os arquivos de mensagem europeus guardam a voz de cada fala dois bytes depois de onde o jogo americano lê; o script move de volta (sem isso, todos os personagens falavam com a voz da Peach). |
 | [`xenon/dist/sms_extract.py`](sms-xenon-source/xenon/dist/sms_extract.py) | alterado (+4 linhas) | Quando recebe uma ISO europeia, explica que ela serve para gerar idiomas, em vez de só recusar. |
 | [`xenon/platform/xe_language.cpp`](sms-xenon-source/xenon/platform/xe_language.cpp) | **criado** | O menu de idioma antes do jogo começar, na caixa de mensagem do próprio Xbox (`XShowMessageBoxUI`): inglês e todos os pacotes instalados, dois por página com "Mais". Espera os botões do controle serem soltos, reabre a caixa se o sistema a fechar na hora e grava no `sms.log` o que aconteceu. |
 | [`platform/misc/language.cpp`](sms-xenon-source/platform/misc/language.cpp) | alterado (+11 linhas, só Xbox) | Sem `SMS_LANGUAGE` (ou com `SMS_LANGUAGE=ask`), pergunta o idioma pelo menu acima. A versão de PC não muda. |

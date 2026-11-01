@@ -234,6 +234,12 @@ If the game starts in English when it should not, open `sms.log` in the game's f
   release changes has been mapped yet.
 - **The North American disc is always required**: the European and Brazilian discs only provide the text.
 - Movie subtitles come from the PAL disc and may be slightly out of sync.
+- **Talking to characters plays no voice sound**; only the cutscenes have voices. This happens in English
+  too, on the Xbox and on the PC port, and matches videos of the original GameCube game: it is not caused
+  by the language packs.
+- The Brazilian translation's own disc has three faulty message files, so the `pt` pack has them too:
+  Delfino Plaza `dolpic6` lacks one message (from the 6th on, text and voice are one place off),
+  `dolpic7` gives two messages another voice, and Noki Bay `mare6` holds 28 messages instead of 4.
 
 Found a text that was not translated? Open an issue saying which screen it is on.
 

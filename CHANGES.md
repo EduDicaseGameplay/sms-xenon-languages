@@ -14,7 +14,7 @@ git diff 26a14ce HEAD -- sms-xenon-source
 
 | File | Type | What changed |
 |---|---|---|
-| [`xenon/dist/sms_language.py`](sms-xenon-source/xenon/dist/sms_language.py) | **new** | Builds the language packs (`mods/languages/<code>`) from the North American disc plus a PAL disc (the European one or the Brazilian Portuguese translation). |
+| [`xenon/dist/sms_language.py`](sms-xenon-source/xenon/dist/sms_language.py) | **new** | Builds the language packs (`mods/languages/<code>`) from the North American disc plus a PAL disc (the European one or the Brazilian Portuguese translation). The European message files keep each message's voice two bytes after where the North American game reads it; the script moves it back (without that, every character spoke with Peach's voice). |
 | [`xenon/dist/sms_extract.py`](sms-xenon-source/xenon/dist/sms_extract.py) | changed (+4 lines) | Given a European disc, explains that it is used for language packs instead of only refusing it. |
 | [`xenon/platform/xe_language.cpp`](sms-xenon-source/xenon/platform/xe_language.cpp) | **new** | The language menu shown before the game starts, in the console's own message box (`XShowMessageBoxUI`): English and every installed pack, two per page with "More". It waits until the controller's buttons are released, opens the box again if the system closes it right away, and writes what happened to `sms.log`. |
 | [`platform/misc/language.cpp`](sms-xenon-source/platform/misc/language.cpp) | changed (+11 lines, Xbox only) | With no `SMS_LANGUAGE` (or `SMS_LANGUAGE=ask`), asks the menu above for the language. The PC build is unchanged. |
