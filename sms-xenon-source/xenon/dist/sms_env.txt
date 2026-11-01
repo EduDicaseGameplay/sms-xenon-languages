@@ -7,7 +7,8 @@
 # SMS_DISC_IMAGE=game:\GMSE01.iso
 
 # Language: a pack sms_language.py made in mods\languages\<code> (pt, es, fr, de, it, ...).
-# Without one, the USA disc's English.
+# With no line (or SMS_LANGUAGE=ask), a menu before the game starts offers English and every
+# installed pack; a code here starts in that language without asking.
 # SMS_LANGUAGE=pt
 
 # Frame rate during gameplay: 30 (default, the GameCube's) or 60, which the console cannot hold.

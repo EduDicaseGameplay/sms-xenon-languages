@@ -28,7 +28,8 @@ Brazilian translation, which is built on the European disc.
    This writes mods\languages\<code> into the folder: fr, de, es, it from the European disc,
    pt from the Brazilian one (--lang sp=es and the like choose others).
 2. Copy the mods folder next to default.xex.
-3. Put SMS_LANGUAGE=<code> in sms_env.txt, for example SMS_LANGUAGE=pt.
+3. Start the game: a menu asks for the language (English or an installed pack) before it starts.
+   SMS_LANGUAGE=<code> in sms_env.txt (SMS_LANGUAGE=pt, say) skips the menu.
 Saves are the same in every language.
 
 Controls

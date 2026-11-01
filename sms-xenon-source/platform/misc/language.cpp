@@ -17,6 +17,11 @@
 #include <strings.h>
 #include <sys/stat.h>
 
+#ifdef TARGET_X360
+// xenon/platform/xe_language.cpp: the console's menu of the installed packs, or NULL
+extern "C" const char* xe_language_pick(void);
+#endif
+
 namespace {
 struct Language {
 	const char* code;
@@ -41,6 +46,12 @@ const Language* chosen()
 	done = true;
 	lang = &kLanguages[0];
 	const char* e = getenv("SMS_LANGUAGE");
+#ifdef TARGET_X360
+	// The console has no launcher: with no language set (or SMS_LANGUAGE=ask), a menu before the
+	// game starts offers English and the installed packs.
+	if (!e || !*e || !strcasecmp(e, "ask"))
+		e = xe_language_pick();
+#endif
 	if (!e || !*e)
 		return lang;
 	for (const Language& l : kLanguages) {

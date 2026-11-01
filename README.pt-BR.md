@@ -28,8 +28,9 @@ O port roda só com a **ISO americana** (GMSE01), que é a base do jogo. Os outr
 | **Tradução PT-BR** (feita sobre a europeia, também GMSP01) | Gera o pacote `pt` |
 
 O script [`sms_language.py`](sms-xenon-source/xenon/dist/sms_language.py) lê a ISO americana e a europeia
-(ou a BR) e cria a pasta `mods/languages/<código>`. O port já sabe carregar essa pasta: basta colocar
-`SMS_LANGUAGE=pt` no `sms_env.txt`.
+(ou a BR) e cria a pasta `mods/languages/<código>`. O port já sabe carregar essa pasta. Quando o jogo
+inicia, um **menu de idioma** (a caixa de mensagem do próprio Xbox) lista o inglês e todos os pacotes
+instalados, e você escolhe com o controle, sem editar nenhum arquivo.
 
 ---
 
@@ -57,8 +58,9 @@ C:\work\sms-xenon\stage\          <- criado no passo 9: onde o Visual Studio com
 - Um Xbox 360 desbloqueado (que rode homebrew), com HD ou pendrive.
 - As suas ISOs: a **americana** (obrigatória), mais a **europeia** e/ou a **PT-BR**.
 
-> **Só quer jogar, sem compilar?** Use o `default.xex` do pacote oficial do port (sms-xenon-f233c15).
-> Ele já lê os pacotes de idioma. Pule as partes 1 a 3 e vá direto para a [parte 4](#parte-4-montar-a-pasta-do-jogo-com-os-idiomas-no-ubuntu).
+> **Só quer jogar, sem compilar?** O `default.xex` do pacote oficial do port (sms-xenon-f233c15) também
+> lê os pacotes de idioma, mas **não tem o menu de idioma**: com ele, coloque `SMS_LANGUAGE=pt` (ou `es`,
+> `fr`, `de`, `it`) no `sms_env.txt`. Pule as partes 1 a 3 e vá direto para a [parte 4](#parte-4-montar-a-pasta-do-jogo-com-os-idiomas-no-ubuntu).
 
 ---
 
@@ -179,19 +181,20 @@ python3 xenon/dist/sms_language.py "/mnt/c/SMS/isos/Super Mario Sunshine (USA).i
 ```
 (Troque os nomes das ISOs pelos dos seus arquivos.)
 
-**14.** Copie o executável e o arquivo de opções, e escolha o idioma:
+**14.** Copie o executável e o arquivo de opções:
 ```bash
 cp /mnt/c/work/sms-xenon/stage/xenon/out/Master/default.xex /mnt/c/SMS/jogo-xbox/
 cp xenon/dist/sms_env.txt /mnt/c/SMS/jogo-xbox/
-sed -i 's/^# SMS_LANGUAGE=pt$/SMS_LANGUAGE=pt/' /mnt/c/SMS/jogo-xbox/sms_env.txt
 ```
-Para outro idioma, abra `C:\SMS\jogo-xbox\sms_env.txt` no Bloco de Notas e troque `pt` por `es`, `fr`, `de` ou `it`.
+Deixe a linha `SMS_LANGUAGE` do `sms_env.txt` comentada (`# SMS_LANGUAGE=pt`): assim o jogo mostra o menu
+de idioma toda vez que inicia. Se quiser sempre o mesmo idioma, tire o `#` e coloque o código (`pt`, `es`,
+`fr`, `de` ou `it`): o jogo entra direto nele, sem perguntar.
 
 Como fica a pasta:
 ```
 C:\SMS\jogo-xbox\
 ├── default.xex
-├── sms_env.txt          (com SMS_LANGUAGE=pt)
+├── sms_env.txt
 ├── GMSE01.iso           (opção A)  ou  files\ + sys\  (opção B)
 └── mods\languages\      (pt  es  fr  de  it)
 ```
@@ -203,7 +206,21 @@ C:\SMS\jogo-xbox\
 **15.** Copie **todo o conteúdo** de `C:\SMS\jogo-xbox` para o console (FTP pelo Aurora/FSD ou pendrive),
 por exemplo para `Hdd1:\Games\Sunshine\`.
 
-**16.** Inicie o `default.xex` pelo Aurora. Se o jogo abrir em inglês, abra o `sms.log` na pasta do jogo:
+**16.** Inicie o `default.xex` pelo Aurora. Depois de uns dois segundos de tela preta, aparece o menu de idioma:
+
+```
+Super Mario Sunshine
+Escolha o idioma / Choose your language / Elige el idioma
+
+  [ English ]  [ Português (Brasil) ]  [ Mais / More / Más > ]
+```
+
+A caixa de mensagem do Xbox aceita no máximo três botões, então os idiomas aparecem dois por página, com
+**Mais** para os próximos. O **B** volta para a primeira página; na primeira página ele fecha o menu e o
+jogo entra em inglês.
+
+Se o jogo abrir em inglês sem você ter escolhido, abra o `sms.log` na pasta do jogo:
+- linhas `language menu: ...` → o que o menu fez (o botão escolhido, ou por que fechou);
 - `no pack in mods/languages/pt` → a pasta `mods` não está ao lado do `default.xex`;
 - `language pt: ... replaced` → o pacote carregou.
 
@@ -236,7 +253,7 @@ O código original veio do pacote `sms-xenon-source-f233c15` (sms-pc-port, branc
 nenhuma alteração**. As minhas mudanças estão nos commits seguintes, então dá para ver exatamente o que
 mudou com:
 ```bash
-git diff HEAD~2 HEAD -- sms-xenon-source
+git diff 26a14ce HEAD -- sms-xenon-source
 ```
 Os avisos de licença originais continuam em [sms-xenon-source/LICENSE](sms-xenon-source/LICENSE),
 [sms-xenon-source/xenon/dist/LICENSE.txt](sms-xenon-source/xenon/dist/LICENSE.txt),

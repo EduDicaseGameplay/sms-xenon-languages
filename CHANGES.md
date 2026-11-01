@@ -7,7 +7,7 @@ with **no changes** in the first commit. Everything that changed after it is lis
 
 To see the differences line by line:
 ```bash
-git diff HEAD~2 HEAD -- sms-xenon-source
+git diff 26a14ce HEAD -- sms-xenon-source
 ```
 
 ## Source files (`sms-xenon-source/`)
@@ -16,15 +16,16 @@ git diff HEAD~2 HEAD -- sms-xenon-source
 |---|---|---|
 | [`xenon/dist/sms_language.py`](sms-xenon-source/xenon/dist/sms_language.py) | **new** | Builds the language packs (`mods/languages/<code>`) from the North American disc plus a PAL disc (the European one or the Brazilian Portuguese translation). |
 | [`xenon/dist/sms_extract.py`](sms-xenon-source/xenon/dist/sms_extract.py) | changed (+4 lines) | Given a European disc, explains that it is used for language packs instead of only refusing it. |
-| [`xenon/dist/README.txt`](sms-xenon-source/xenon/dist/README.txt) | changed (+11 lines) | New "Languages" section. |
-| [`xenon/dist/sms_env.txt`](sms-xenon-source/xenon/dist/sms_env.txt) | changed (+4 lines) | A commented-out `SMS_LANGUAGE=pt` line. |
+| [`xenon/platform/xe_language.cpp`](sms-xenon-source/xenon/platform/xe_language.cpp) | **new** | The language menu shown before the game starts, in the console's own message box (`XShowMessageBoxUI`): English and every installed pack, two per page with "More". It waits until the controller's buttons are released, opens the box again if the system closes it right away, and writes what happened to `sms.log`. |
+| [`platform/misc/language.cpp`](sms-xenon-source/platform/misc/language.cpp) | changed (+11 lines, Xbox only) | With no `SMS_LANGUAGE` (or `SMS_LANGUAGE=ask`), asks the menu above for the language. The PC build is unchanged. |
+| [`xenon/dist/README.txt`](sms-xenon-source/xenon/dist/README.txt) | changed (+12 lines) | New "Languages" section, with the menu. |
+| [`xenon/dist/sms_env.txt`](sms-xenon-source/xenon/dist/sms_env.txt) | changed (+5 lines) | A commented-out `SMS_LANGUAGE=pt` line, and how the menu works. |
 | [`xenon/tools/xpackage`](sms-xenon-source/xenon/tools/xpackage) | changed | Ships `sms_language.py` in the package. |
 | [`xenon/tools/xstubs.py`](sms-xenon-source/xenon/tools/xstubs.py) | changed (fix) | Works with the `compile_commands.json` that Ubuntu 22.04's CMake writes (no `output` field), and says clearly when the Linux build is missing. Without it, `xstage` stopped halfway and Visual Studio got unconverted code (C2059 errors in `J3DJoint.hpp`). |
-
 | [`decomp/.gitattributes`](sms-xenon-source/decomp/.gitattributes) | changed (1 line) | `* text=auto` → `* text=auto eol=lf`. Without it, cloning on Windows turned the decompilation's sources into CRLF and the first decomp patch failed (`gesso.cpp ... hunk FAILED`). Now cloning in Ubuntu, cloning on Windows or downloading the ZIP all give LF files. |
 
-No C/C++ file of the game or the port was changed: language support uses the pack system the port
-already had (`platform/misc/language.cpp`, `platform/dvd/dvd.cpp`).
+The language packs themselves use the pack system the port already had (`platform/misc/language.cpp`,
+`platform/dvd/dvd.cpp`); the only C/C++ changes are the menu (`xe_language.cpp`) and the call to it.
 
 ## New files at the repository root
 

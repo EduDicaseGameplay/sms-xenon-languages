@@ -30,7 +30,8 @@ languages come from other discs:
 
 [`sms_language.py`](sms-xenon-source/xenon/dist/sms_language.py) reads the North American disc and the
 European (or Brazilian) one and writes `mods/languages/<code>`. The port already knows how to load that
-folder: just put `SMS_LANGUAGE=pt` in `sms_env.txt`.
+folder. When the game starts, a **language menu** (the console's own message box) lists English and every
+installed pack, so you pick the language with the controller; no file to edit.
 
 ---
 
@@ -58,8 +59,9 @@ C:\work\sms-xenon\stage\          <- created in step 9: where Visual Studio comp
 - A modded Xbox 360 that runs homebrew, with a hard drive or USB storage.
 - Your disc images: the **North American** one (required), plus the **European** and/or **Brazilian Portuguese** one.
 
-> **Just want to play, without building?** Use the `default.xex` from the port's official package
-> (sms-xenon-f233c15); it already reads language packs. Skip parts 1 to 3 and go to [part 4](#part-4-build-the-game-folder-with-the-languages-in-ubuntu).
+> **Just want to play, without building?** The `default.xex` from the port's official package
+> (sms-xenon-f233c15) also reads language packs, but it has **no language menu**: with it, put
+> `SMS_LANGUAGE=pt` (or `es`, `fr`, `de`, `it`) in `sms_env.txt`. Skip parts 1 to 3 and go to [part 4](#part-4-build-the-game-folder-with-the-languages-in-ubuntu).
 
 ---
 
@@ -180,19 +182,20 @@ python3 xenon/dist/sms_language.py "/mnt/c/SMS/isos/Super Mario Sunshine (USA).i
 ```
 (Replace the file names with your own.)
 
-**14.** Copy the executable and the options file, and choose the language:
+**14.** Copy the executable and the options file:
 ```bash
 cp /mnt/c/work/sms-xenon/stage/xenon/out/Master/default.xex /mnt/c/SMS/jogo-xbox/
 cp xenon/dist/sms_env.txt /mnt/c/SMS/jogo-xbox/
-sed -i 's/^# SMS_LANGUAGE=pt$/SMS_LANGUAGE=pt/' /mnt/c/SMS/jogo-xbox/sms_env.txt
 ```
-For another language, open `C:\SMS\jogo-xbox\sms_env.txt` in Notepad and change `pt` to `es`, `fr`, `de` or `it`.
+Leave the `SMS_LANGUAGE` line in `sms_env.txt` commented out (`# SMS_LANGUAGE=pt`): the game then shows
+the language menu every time it starts. If you always want the same language, remove the `#` and set the
+code (`pt`, `es`, `fr`, `de` or `it`): the game starts in it without asking.
 
 The folder ends up like this:
 ```
 C:\SMS\jogo-xbox\
 ├── default.xex
-├── sms_env.txt          (with SMS_LANGUAGE=pt)
+├── sms_env.txt
 ├── GMSE01.iso           (option A)  or  files\ + sys\  (option B)
 └── mods\languages\      (pt  es  fr  de  it)
 ```
@@ -204,7 +207,21 @@ C:\SMS\jogo-xbox\
 **15.** Copy **everything** in `C:\SMS\jogo-xbox` to the console (FTP with Aurora/FSD, or a USB drive),
 for example to `Hdd1:\Games\Sunshine\`.
 
-**16.** Start `default.xex` from Aurora. If the game starts in English, open `sms.log` in the game's folder:
+**16.** Start `default.xex` from Aurora. After about two seconds of black screen, the language menu appears:
+
+```
+Super Mario Sunshine
+Escolha o idioma / Choose your language / Elige el idioma
+
+  [ English ]  [ Português (Brasil) ]  [ Mais / More / Más > ]
+```
+
+The console's message box holds three buttons at most, so the languages come two per page, with
+**More** for the next ones. **B** goes back to the first page; on the first page it closes the menu and
+the game starts in English.
+
+If the game starts in English when it should not, open `sms.log` in the game's folder:
+- `language menu: ...` lines → what the menu did (the button chosen, or why it closed);
 - `no pack in mods/languages/pt` → the `mods` folder is not next to `default.xex`;
 - `language pt: ... replaced` → the pack was loaded.
 
@@ -237,7 +254,7 @@ The original code comes from the `sms-xenon-source-f233c15` package (sms-pc-port
 commit `f233c150b8407a56c88de794887c3d9726f9ccef`). This repository's first commit is that code with
 **no changes**; my changes are in the commits after it, so you can see exactly what changed with:
 ```bash
-git diff HEAD~2 HEAD -- sms-xenon-source
+git diff 26a14ce HEAD -- sms-xenon-source
 ```
 The original license notices are kept in [sms-xenon-source/LICENSE](sms-xenon-source/LICENSE),
 [sms-xenon-source/xenon/dist/LICENSE.txt](sms-xenon-source/xenon/dist/LICENSE.txt),
