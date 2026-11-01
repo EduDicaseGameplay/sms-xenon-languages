@@ -23,7 +23,13 @@ for e in cc:
     game = '-DVERSION_GMSE01' in c and ('-std=gnu++03' in c or '-std=gnu99' in c) and not f.startswith('ext/multiplayer/')
     staged = 'game/' + f[len('decomp/'):] if f.startswith('decomp/') else f  # units-*.txt name staged paths
     if game or f in listed or staged in listed:
-        objs.append(os.path.join(repo, 'build/linux-32', e['output']))
+        # older CMake (Ubuntu 22.04's 3.22) writes no "output": the object is the command's -o
+        out = e.get('output') or re.search(r'(?:^|\s)-o\s+(\S+)', c).group(1)
+        objs.append(os.path.join(e.get('directory', os.path.join(repo, 'build/linux-32')), out))
+missing = [o for o in objs if not os.path.exists(o)]
+if missing:
+    sys.exit('xstubs: %d of %d Linux objects are missing (first: %s); build the Linux port first: '
+             'cmake --build build/linux-32 --target sms' % (len(missing), len(objs), missing[0]))
 defined = set()
 for i in range(0, len(objs), 200):
     out = subprocess.run(['nm', '--defined-only', '-C'] + objs[i:i + 200], capture_output=True, text=True).stdout

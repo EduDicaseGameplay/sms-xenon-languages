@@ -1,5 +1,6 @@
 # Auto detect text files and perform LF normalization
-* text=auto
+# (eol=lf: keep LF on every system, so the LF decomp-patches apply after a Windows clone)
+* text=auto eol=lf
 
 # Explicitly declare text files
 *.py   text

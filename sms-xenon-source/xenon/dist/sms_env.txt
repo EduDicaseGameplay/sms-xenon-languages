@@ -6,6 +6,10 @@
 # SMS_DISC_ROOT=game:\files
 # SMS_DISC_IMAGE=game:\GMSE01.iso
 
+# Language: a pack sms_language.py made in mods\languages\<code> (pt, es, fr, de, it, ...).
+# Without one, the USA disc's English.
+# SMS_LANGUAGE=pt
+
 # Frame rate during gameplay: 30 (default, the GameCube's) or 60, which the console cannot hold.
 # SMS_FRAME_RATE=60
 

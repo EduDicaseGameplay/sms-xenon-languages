@@ -77,6 +77,10 @@ def dol_size(dol):
 def extract(image, out):
     disc = Disc(image)
     boot = disc.read(0, 0x440)
+    if boot[:6] == b'GMSP01':
+        raise SystemExit('sms_extract: %s is the European disc (GMSP01). The game runs on the USA disc; '
+                         'sms_language.py makes language packs from this one (French, German, Spanish, '
+                         'Italian, or a translation such as Portuguese).' % image)
     if boot[:6] != GAME_ID:
         raise SystemExit('sms_extract: %s is %r, not Super Mario Sunshine (USA, %s)'
                          % (image, boot[:6].decode('ascii', 'replace'), GAME_ID.decode()))

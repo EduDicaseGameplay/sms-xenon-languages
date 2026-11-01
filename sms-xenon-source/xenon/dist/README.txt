@@ -20,6 +20,17 @@ Install
    (A GMSE01.iso in place of files and sys works too.)
 3. Start default.xex from your dashboard or file manager.
 
+Languages
+The USA disc is in English. sms_language.py makes the game's text and menus in another language
+from your own European disc (GMSP01): French, German, Spanish and Italian, or Portuguese from the
+Brazilian translation, which is built on the European disc.
+1. python3 sms_language.py <your USA disc image> <your European or Brazilian image> <a folder>
+   This writes mods\languages\<code> into the folder: fr, de, es, it from the European disc,
+   pt from the Brazilian one (--lang sp=es and the like choose others).
+2. Copy the mods folder next to default.xex.
+3. Put SMS_LANGUAGE=<code> in sms_env.txt, for example SMS_LANGUAGE=pt.
+Saves are the same in every language.
+
 Controls
 The Xbox 360 controller in the GameCube's layout: A, B, X, Y as on the GameCube; RB is Z;
 LT and RT are L and R (a full press clicks); the left stick moves, the right stick turns
